@@ -2,7 +2,7 @@
  * \file src/core/test/utils/thread.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -43,7 +43,7 @@ namespace {
     template<int producer_sleep, int consumer_sleep>
     void test_scq_sync_multi_producer() {
         size_t nr_worker_call = 0;
-        SCQueueSynchronizer sync;
+        SCQueueSynchronizer sync(0);
         auto worker = [&]() {
             RNGxorshf rng{next_rand_seed()};
             while (auto nr = sync.consumer_fetch(1)) {
@@ -87,7 +87,7 @@ namespace {
 
 TEST(TestAsyncQueue, Synchronizer) {
     size_t nr_worker_call = 0;
-    SCQueueSynchronizer sync;
+    SCQueueSynchronizer sync(0);
     auto worker = [&]() {
         for (; ;) {
             auto nr = sync.consumer_fetch(1);
@@ -115,7 +115,7 @@ TEST(TestAsyncQueue, Synchronizer) {
 TEST(TestAsyncQueue, SynchronizerWaitOverhead) {
     {
         size_t nr_worker_call = 0;
-        SCQueueSynchronizer sync;
+        SCQueueSynchronizer sync(0);
         auto worker = [&]() {
             for (;;) {
                 auto nr = sync.consumer_fetch(1);
@@ -141,7 +141,7 @@ TEST(TestAsyncQueue, SynchronizerWaitOverhead) {
         double worker_time = 0, avg_await;
         {
             size_t nr_worker_call = 0;
-            SCQueueSynchronizer sync;
+            SCQueueSynchronizer sync(0);
             auto worker = [&]() {
                 for (;;) {
                     auto nr = sync.consumer_fetch(1);
@@ -188,7 +188,7 @@ TEST(TestAsyncQueue, SynchronizerMultiProducer3) {
 }
 
 TEST(TestAsyncQueue, SynchronizerWaiterStarving) {
-    SCQueueSynchronizer sync;
+    SCQueueSynchronizer sync(0);
     std::atomic_size_t processed{0};
     auto worker = [&]() {
         while (sync.consumer_fetch(1)) {

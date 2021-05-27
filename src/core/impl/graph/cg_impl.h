@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/cg_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -38,6 +38,29 @@ class ComputingGraphImpl final : public ComputingGraph {
         //! extra info that must be set in the ComputingSequence
         CompSeqExtraInfo extra_info;
         const OprNodeArray* opr_seq = nullptr;
+        VarNodeArray dest_vars;
+    };
+
+    struct CallbackCallerKey {
+        OperatorNodeBase* opr;
+        CompNode comp_node;
+
+        bool operator==(const CallbackCallerKey& rhs) const {
+            return opr == rhs.opr && comp_node == rhs.comp_node;
+        }
+
+        struct Hash {
+            size_t operator()(const CallbackCallerKey& b) const {
+                return hash_pair_combine(mgb::hash(b.opr),
+                                         mgb::hash(b.comp_node));
+            }
+        };
+    };
+
+    struct CallbackCallerVal {
+        SmallVector<VarNode*> vars;
+        //! indexs of vars in out_spec.
+        SmallVector<SmallVector<size_t>> indexs;
     };
 
     /*!
@@ -122,6 +145,13 @@ public:
     ComputingGraphImpl();
     ~ComputingGraphImpl();
 
+    template<typename T> static ComputingGraphImpl* downcast(T* ptr) = delete;
+
+    inline static ComputingGraphImpl* downcast(ComputingGraph* graph) {
+        mgb_assert(!graph->options().imperative_proxy_graph);
+        return static_cast<ComputingGraphImpl*>(graph);
+    }
+
     friend struct ComputingGraph::Options;
 
     std::unique_ptr<AsyncExecutable> compile(
@@ -132,6 +162,10 @@ public:
 
     OperatorNodeBase* insert_opr(
             std::unique_ptr<OperatorNodeBase> opr) override;
+
+    void* alloc_varnode_storage() override;
+
+    void free_varnode_storage(void *ptr) override;
 
     const VarReceiverInfo& var_receiver_in_current_comp_seq(
             const VarNode* var) const override;
@@ -146,11 +180,13 @@ public:
         return m_var_receiver.at(var);
     }
 
+    std::string get_mem_allocation_info() const override;
+
     VarNode* find_var_by_id(size_t id) const override;
 
     TopoSorter& topo_sorter() { return components().topo_sorter; }
 
-    size_t next_node_id() { return (*m_node_id_counter)++; }
+    size_t next_node_id() override { return (*m_node_id_counter)++; }
 
     VarNodeMemManager& var_node_mem_manager() {
         return components().var_node_mem_manager;

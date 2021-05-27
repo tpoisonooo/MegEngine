@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/batch_normalization/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -35,8 +35,7 @@ void BNTensorDescHolder::setup(const TensorLayout& x,
             bn_mode = CUDNN_BATCHNORM_SPATIAL;
             break;
         default:
-            megdnn_throw(megdnn_mangle(
-                    "Unknown param dim type of batch normalization."));
+            megdnn_throw("Unknown param dim type of batch normalization.");
     }
     xy_desc.set(TensorLayout(xy_shape, x.dtype));
     param_desc.set(xy_desc.desc, bn_mode);
@@ -83,8 +82,7 @@ void BNForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in bn_scale,
                     m_param.epsilon));
             break;
         default:
-            megdnn_throw(megdnn_mangle(
-                    "Unknown forward mode type of batch normalization."));
+            megdnn_throw("Unknown forward mode type of batch normalization.");
     }
 }
 

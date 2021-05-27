@@ -2,7 +2,7 @@
  * \file dnn/src/naive/group_local/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -149,19 +149,19 @@ void GroupLocalForwardImpl::exec(_megdnn_tensor_in src,
                         dst.ptr<dt_float32>(), N, IC, IH, IW, FH, FW, OC, OH,
                         OW, group, param().pad_h, param().pad_w,
                         param().stride_h, param().stride_w));
-    } else if (MEGDNN_FLOAT16_SELECT(
+    } else if (DNN_FLOAT16_SELECT(
                        src.layout.dtype == dtype::Float16() &&
                                filter.layout.dtype == dtype::Float16() &&
                                dst.layout.dtype == dtype::Float16(),
                        false)) {
-        MEGDNN_INC_FLOAT16(MEGDNN_DISPATCH_CPU_KERN_OPR(forward(
+        DNN_INC_FLOAT16(MEGDNN_DISPATCH_CPU_KERN_OPR(forward(
                 src.ptr<dt_float16>(), filter.ptr<dt_float16>(),
                 dst.ptr<dt_float16>(), N, IC, IH, IW, FH, FW, OC, OH, OW, group,
                 param().pad_h, param().pad_w, param().stride_h,
                 param().stride_w)););
 
     } else {
-        megdnn_assert_internal(false);  
+        megdnn_assert_internal(false);
     }
 }
 

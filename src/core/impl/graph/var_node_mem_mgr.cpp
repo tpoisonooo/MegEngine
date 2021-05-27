@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node_mem_mgr.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,6 +24,8 @@
 #include "megbrain/utils/timer.h"
 #include "megbrain/utils/arith_helper.h"
 
+#include "megbrain/opr/io.h"
+
 #include <chrono>
 
 using namespace mgb;
@@ -36,7 +38,6 @@ void call_mem_status_changed(cg::OperatorNodeBase* opr) {
     if (cb.on_mem_status_changed.valid())
         cb.on_mem_status_changed.val()();
 }
-
 }  // namespace
 
 /* ==================== StaticDeviceMemoryManager ==================== */
@@ -123,9 +124,9 @@ StaticDeviceMemoryManager::make_default_impl() {
 }
 #endif  // MGB_THREAD_SAFE
 
-/* ==================== CUDAAsyncVarReleaser ==================== */
-#if MGB_CUDA
-class VarNodeMemManager::CUDAAsyncVarReleaser {
+/* ==================== AsyncVarReleaser ==================== */
+#if MGB_CUDA || MGB_ATLAS || MGB_CAMBRICON 
+class VarNodeMemManager::AsyncVarReleaser {
     struct WaiterParam {
         CompNode cn;
         CompNode::Event *event;
@@ -133,10 +134,10 @@ class VarNodeMemManager::CUDAAsyncVarReleaser {
     };
 
     class Waiter final: public AsyncQueueSC<WaiterParam, Waiter> {
-        CUDAAsyncVarReleaser *m_par_releaser;
+        AsyncVarReleaser *m_par_releaser;
 
         public:
-            Waiter(CUDAAsyncVarReleaser *releaser):
+            Waiter(AsyncVarReleaser *releaser):
                 m_par_releaser(releaser)
             {
             }
@@ -159,7 +160,7 @@ class VarNodeMemManager::CUDAAsyncVarReleaser {
     Spinlock m_event_pool_lock;
 
     public:
-        ~CUDAAsyncVarReleaser() {
+        ~AsyncVarReleaser() {
             wait_release_finish();
         }
 
@@ -244,18 +245,19 @@ bool VarNodeMemManager::ImpureMemPlanManager::check_need_realloc() {
 }
 
 /* ==================== VarNodeMemManager ==================== */
-VarNodeMemManager::VarNodeMemManager(ComputingGraphImpl *graph):
-    m_owner_graph(graph),
-    m_seq_mem_opt(graph)
-#if MGB_CUDA
-    ,m_cuda_asyn_var_releaser(new CUDAAsyncVarReleaser)
+VarNodeMemManager::VarNodeMemManager(ComputingGraphImpl* graph)
+        : m_owner_graph(graph),
+          m_seq_mem_opt(graph)
+#if MGB_CUDA || MGB_ATLAS || MGB_CAMBRICON 
+          ,m_asyn_var_releaser(new AsyncVarReleaser)
 #endif
 {
     auto on_comp_seq_finish = [this](const event::CompSeqExecFinished& ev) {
+        MGB_MARK_USED_VAR(ev);
         // async release is only used for sync between multiple comp nodes, and
         // does not wait for device to finish
-#if MGB_CUDA
-        m_cuda_asyn_var_releaser->wait_release_finish();
+#if MGB_CUDA || MGB_ATLAS || MGB_CAMBRICON 
+        m_asyn_var_releaser->wait_release_finish();
 #endif
         m_cpu_async_release_barrier.wait_zero();
     };
@@ -294,6 +296,15 @@ VarNodeMemManager::VarNodeMemManager(ComputingGraphImpl *graph):
             on_comp_seq_finish);
     graph->event().register_receiver_permanent<event::CompSeqExecError>(
             on_comp_seq_error);
+
+#if MGB_ENABLE_VAR_DEV_MEM_DEFRAGMENTER &&                                   \
+        (MGB_CUDA || MGB_ATLAS || MGB_CAMBRICON ) 
+    auto on_mem_defrag_start = [this](const event::BeforeMemDefrag&) {
+        m_asyn_var_releaser->wait_release_finish();
+    };
+    graph->event().register_receiver_permanent<event::BeforeMemDefrag>(
+            on_mem_defrag_start);
+#endif
 }
 
 VarNodeMemManager::~VarNodeMemManager() noexcept = default;
@@ -330,7 +341,7 @@ VarNodeMemManager::DynamicAllocOprInfo::DynamicAllocOprInfo(
     prev_dev_val_input.clear();
     static_infer_inp.clear();
     dev_val_input.clear();
-    auto &&mgr = static_cast<ComputingGraphImpl*>(opr->owner_graph())->
+    auto &&mgr = ComputingGraphImpl::downcast(opr->owner_graph())->
         static_infer_manager_impl();
 
     CompNode single_cn;
@@ -384,11 +395,12 @@ bool VarNodeMemManager::alloc_var_node_mem_static() {
 
 bool VarNodeMemManager::update_static_alloc_plan() {
     // check whether unchanged
+    bool free_no_need_memory = free_combine_memory_no_need_var();
     if (!m_owner_graph->static_infer_comp_seq_manager()
                  .update_static_check_shape_change() &&
         !m_first_static_plan_run &&
         !m_impure_mem_plan_mgr.check_need_realloc()) {
-        return false;
+        return false || free_no_need_memory;
     }
 
     if (m_first_static_plan_run)
@@ -483,6 +495,96 @@ bool VarNodeMemManager::make_static_var_tensor_from_alloc_plan() {
 
     m_static_mem_refholder_dev_mem_mgr_version = cur_version;
     return true;
+}
+
+bool VarNodeMemManager::free_combine_memory_no_need_var() {
+    if (!m_owner_graph->options().graph_opt.weight_preprocess ||
+        m_already_free_no_need_mem) {
+        return false;
+    }
+    bool reordered = false;
+    //! free no need storage
+    for (auto opr : *m_opr_seq) {
+        if (opr->try_cast_final<opr::SharedDeviceTensor>() ||
+            opr->try_cast_final<opr::SharedDeviceTensorWithFormat>()) {
+            auto opr_base = static_cast<opr::intl::SharedDeviceTensorBase*>(opr);
+            auto var = opr_base->output(0);
+            if (var->contain_flag(VarNode::Flag::MEMORY_NO_NEED) &&
+                var->dev_tensor_valid() && !var->dev_tensor().empty()) {
+                //! Only the tensor share count is 1, it can be free
+                if (opr_base->dev_data().use_count() == 1) {
+                    auto layout = var->layout();
+                    var->m_dev_tensor.reset(
+                            DeviceTensorStorage{var->comp_node()}, layout);
+                    opr_base->free_dev_data();
+                    mgb_log_debug(
+                            "preprocessed weight is freed, var name = %s, "
+                            "var layout = %s",
+                            var->name().c_str(), layout.to_string().c_str());
+                }
+                m_already_free_no_need_mem = true;
+            }
+        }
+        bool memory_need_reorder = false;
+        if (opr->try_cast_final<opr::MultipleDeviceTensorHolder>() ||
+            opr->try_cast_final<opr::MultipleDeviceTensorWithFormatHolder>()) {
+            auto opr_base =
+                    static_cast<opr::intl::MultipleDeviceTensorHolderBase*>(
+                            opr);
+            for (size_t index = 0; index < opr_base->output().size(); index++) {
+                auto var = opr_base->output(index);
+                if (var->contain_flag(VarNode::Flag::MEMORY_NO_NEED) &&
+                    var->dev_tensor_valid() && !var->dev_tensor().empty()) {
+                    //! Only the tensor share count is 1, it can be free
+                    if (opr_base->values()[index].use_count() == 1) {
+                        auto layout = var->layout();
+                        var->m_dev_tensor.reset(
+                                DeviceTensorStorage{var->comp_node()}, layout);
+                        opr_base->mutable_values()[index]->reset(
+                                DeviceTensorStorage{var->comp_node()}, layout);
+                        memory_need_reorder = true;
+                        mgb_log_debug(
+                                "preprocessed weight is freed, var name "
+                                "= %s, var layout = %s",
+                                var->name().c_str(),
+                                layout.to_string().c_str());
+                    }
+                    m_already_free_no_need_mem = true;
+                }
+            }
+        }
+        //! recorder the other needed outputs, because they share the
+        //! same chunk of mem in device with no needed var, see
+        //! BatchedDeviceValueLoader
+        if (memory_need_reorder) {
+            auto opr_base =
+                    static_cast<opr::intl::MultipleDeviceTensorHolderBase*>(
+                            opr);
+            auto comp_node = opr_base->output(0)->comp_node();
+            bool is_device_opr =
+                    comp_node.mem_node() != CompNode::default_cpu().mem_node();
+            if (memory_need_reorder && is_device_opr) {
+                for (size_t index = 0; index < opr_base->output().size();
+                     index++) {
+                    auto var = opr_base->output(index);
+                    if (!var->contain_flag(VarNode::Flag::MEMORY_NO_NEED)) {
+                        DeviceTensorStorage storage(var->comp_node());
+                        size_t size = var->layout().span().dist_byte();
+                        storage.ensure_size(size);
+                        storage.copy_from(var->m_dev_tensor.storage(), size);
+
+                        var->m_dev_tensor.reset(storage, var->layout());
+                        opr_base->mutable_values()[index]->reset(storage,
+                                                                var->layout());
+                        reordered = true;
+                    }
+                }
+                //! sync to make sure memcopy is finished
+                comp_node.sync();
+            }
+        }
+    }
+    return reordered;
 }
 
 void VarNodeMemManager::init_dynamic_alloc_opr_info() {
@@ -1229,13 +1331,18 @@ void VarNodeMemManager::make_dev_tensor_from_mem_plan_single(
 }
 
 void VarNodeMemManager::var_alloc_with_shape(VarNode* var,
-                                             const TensorShape& shape) {
+                                             const TensorShape& shape,
+                                             size_t size_req) {
     mgb_assert(var->format().is_default(),
                "dynamic shape is currently only supported for var with "
                "default format; got %s",
                var->format().to_string().c_str());
     var->shape(shape);
-    auto size_req = var->dtype().size(shape.total_nr_elems());
+    if (size_req != 0) {
+        mgb_assert(var->dtype().size(shape.total_nr_elems()) <= size_req);
+    } else {
+        size_req = var->dtype().size(shape.total_nr_elems());
+    }
 
     auto&& mplan = var->m_mem_plan;
     if (!mplan.valid() || mplan.chunk().owner_var != var)
@@ -1333,8 +1440,22 @@ void VarNodeMemManager::decr_var_mem_refcnt(
             }
 #if MGB_CUDA
         case DT::CUDA:
-            m_cuda_asyn_var_releaser->add(dispatch_cn, var);
+            m_asyn_var_releaser->add(dispatch_cn, var);
             break;
+#endif
+#if MGB_ATLAS
+        case DT::ATLAS:
+            {
+                m_asyn_var_releaser->add(dispatch_cn, var);
+                break;
+            }
+#endif
+#if MGB_CAMBRICON
+        case DT::CAMBRICON:
+            {
+                m_asyn_var_releaser->add(dispatch_cn, var);
+                break;
+            }
 #endif
         default:
             mgb_throw(MegBrainError,

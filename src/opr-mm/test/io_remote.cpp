@@ -2,7 +2,7 @@
  * \file src/opr-mm/test/io_remote.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -14,62 +14,50 @@
 #include "megbrain/opr/utility.h"
 #include "megbrain/system.h"
 #include "megbrain/test/helper.h"
+#include "mock_client.h"
 
 #include <thread>
 
 using namespace mgb;
-using namespace opr;
-
-namespace {
-
-class MockGroupClient final : public opr::GroupClient {
-    public:
-        ~MockGroupClient() override = default;
-
-        uint64_t opr_register(const std::string& key, size_t nr_devices, uint32_t rank,
-                uintptr_t stream) {
-            return m_mgr.opr_register(key, nr_devices, rank, stream);
-        }
-        
-        std::vector<std::string> gather_uid(const std::string& uid,
-                const std::string& key, uint32_t size, uint32_t rank) {
-            return m_mgr.gather_uid(uid, key, size, rank);
-        }
-
-        void set_output_shape(const std::string& key,
-                              const TensorShape& shape) override {
-            m_mgr.set_output_shape(key, shape);
-        }
-
-        TensorShape get_output_shape(const std::string& key) override {
-            return m_mgr.get_output_shape(key);
-        }
-
-        uint32_t group_barrier(uint32_t size, uint32_t rank) override {
-            return m_mgr.group_barrier(size, rank);
-        }
-
-    private:
-        opr::GroupManager m_mgr;
-};
-
-const auto send_tag = RemoteIOBase::Type::SEND;
-const auto recv_tag = RemoteIOBase::Type::RECV;
-
-}  // anonymous namespace
 
 TEST(TestOprIORemote, Identity) {
+    REQUIRE_GPU(2);
+    auto cn0 = CompNode::load("gpu0");
+    auto cn1 = CompNode::load("gpu1");
+
+    HostTensorGenerator<> gen;
+    auto host_x = gen({28, 28});
+    HostTensorND host_y;
+
+    auto client = std::make_shared<test::MockGroupClient>();
     auto graph = ComputingGraph::make();
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x, cn0);
+    auto xr = opr::RemoteSend::make("x", x, client, false);
+    auto y = opr::RemoteRecv::make("x", *graph.get(),
+                                   client, {cn1}, host_x->shape(),
+                                   host_x->dtype());
+
+    auto func = graph->compile({{xr, {}}, make_callback_copy(y, host_y)});
+
+    func->execute();
+
+    MGB_ASSERT_TENSOR_EQ(*host_x, host_y);
+}
+
+TEST(TestOprIORemote, IdentityMultiThread) {
+    REQUIRE_GPU(2);
     auto cns = load_multiple_xpus(2);
     HostTensorGenerator<> gen;
     auto host_x = gen({2, 3}, cns[1]);
     HostTensorND host_x_get;
-    auto client = std::make_shared<MockGroupClient>();
+    auto client = std::make_shared<test::MockGroupClient>();
 
     auto sender = [&]() {
+        auto graph = ComputingGraph::make();
         sys::set_thread_name("sender");
         auto x = opr::Host2DeviceCopy::make(*graph, host_x),
-             xr = opr::RemoteSend::make({"x", send_tag, false}, x, client);
+             xr = opr::RemoteSend::make("x", x, client, false);
         auto func = graph->compile({{xr, {}}});
         func->execute();
     };
@@ -77,7 +65,7 @@ TEST(TestOprIORemote, Identity) {
     auto receiver = [&]() {
         sys::set_thread_name("receiver");
         auto graph = ComputingGraph::make();
-        auto x = opr::RemoteRecv::make({"x", recv_tag, false}, *graph.get(),
+        auto x = opr::RemoteRecv::make("x", *graph.get(),
                                        client, {cns[0]}, host_x->shape(),
                                        host_x->dtype());
         auto func = graph->compile({make_callback_copy(x, host_x_get)});
@@ -92,17 +80,18 @@ TEST(TestOprIORemote, Identity) {
 }
 
 TEST(TestOprIORemote, IdentityWithGopt) {
+    REQUIRE_GPU(2);
     auto cns = load_multiple_xpus(2);
     HostTensorGenerator<> gen;
-    auto host_x = gen({2, 3}, cns[0]);
+    auto host_x = gen({2, 3}, cns[1]);
     HostTensorND host_x_get;
-    auto client = std::make_shared<MockGroupClient>();
+    auto client = std::make_shared<test::MockGroupClient>();
 
     auto sender = [&]() {
         sys::set_thread_name("sender");
         auto graph = ComputingGraph::make();
         auto x = opr::Host2DeviceCopy::make(*graph, host_x) * 2 + 1,
-             xr = opr::RemoteSend::make({"x", send_tag, false}, x, client);
+             xr = opr::RemoteSend::make("x", x, client, false);
         auto func = graph->compile({{xr, {}}});
         func->execute();
     };
@@ -110,7 +99,7 @@ TEST(TestOprIORemote, IdentityWithGopt) {
     auto receiver = [&]() {
         sys::set_thread_name("receiver");
         auto graph = ComputingGraph::make();
-        auto x = opr::RemoteRecv::make({"x", recv_tag, false}, *graph.get(),
+        auto x = opr::RemoteRecv::make("x", *graph.get(),
                                        client, {cns[0]}, host_x->shape(),
                                        host_x->dtype());
         auto func =
@@ -126,22 +115,23 @@ TEST(TestOprIORemote, IdentityWithGopt) {
 }
 
 TEST(TestOprIORemote, APlusB) {
+    REQUIRE_GPU(2);
     auto cns = load_multiple_xpus(2);
     HostTensorGenerator<> gen;
     auto host_x = gen({5, 7}, cns[0]), host_y = gen({5, 1}, cns[0]);
     HostTensorND host_z;
-    auto client = std::make_shared<MockGroupClient>();
+    auto client = std::make_shared<test::MockGroupClient>();
 
     auto sender = [&]() {
         auto graph = ComputingGraph::make();
-        auto z = opr::RemoteRecv::make({"z", recv_tag, false}, *graph.get(),
+        auto z = opr::RemoteRecv::make("z", *graph.get(),
                                        client, {cns[0]}, host_x->shape(),
                                        host_x->dtype());
         auto x = opr::Host2DeviceCopy::make(*graph, host_x).rename("x"),
              y = opr::Host2DeviceCopy::make(*graph, host_y).rename("y"),
-             xr = opr::RemoteSend::make({"x", send_tag, false}, x, client)
+             xr = opr::RemoteSend::make("x", x, client, false)
                           .rename("xr"),
-             yr = opr::RemoteSend::make({"y", send_tag, false}, y, client)
+             yr = opr::RemoteSend::make("y", y, client, false)
                           .rename("yr");
         auto func = graph->compile(
                 {{xr, {}}, {yr, {}}, make_callback_copy(z, host_z)});
@@ -152,14 +142,14 @@ TEST(TestOprIORemote, APlusB) {
 
     auto receiver = [&]() {
         auto graph = ComputingGraph::make();
-        auto x = opr::RemoteRecv::make({"x", recv_tag, false}, *graph.get(),
+        auto x = opr::RemoteRecv::make("x", *graph.get(),
                                        client, {cns[1]}, host_x->shape(),
                                        host_x->dtype()),
-             y = opr::RemoteRecv::make({"y", recv_tag, false}, *graph.get(),
+             y = opr::RemoteRecv::make("y", *graph.get(),
                                        client, {cns[1]}, host_y->shape(),
                                        host_y->dtype()),
              z = x + y,
-             zr = opr::RemoteSend::make({"z", send_tag, false}, z, client);
+             zr = opr::RemoteSend::make("z", z, client, false);
         auto func = graph->compile({{zr, {}}});
         func->execute();
     };
@@ -177,20 +167,21 @@ TEST(TestOprIORemote, APlusB) {
 }
 
 TEST(TestOprIORemote, SendGrad) {
+    REQUIRE_GPU(2);
     auto cns = load_multiple_xpus(2);
     HostTensorGenerator<> gen;
     auto host_x = gen({2, 3}, cns[0]);
     HostTensorND host_gx, host_loss;
-    auto client = std::make_shared<MockGroupClient>();
+    auto client = std::make_shared<test::MockGroupClient>();
 
     auto sender = [&]() {
         sys::set_thread_name("sender");
         auto graph = ComputingGraph::make();
         auto x = opr::Host2DeviceCopy::make(*graph, host_x),
-             loss = opr::RemoteSend::make({"loss", send_tag, false}, x, client);
+             loss = opr::RemoteSend::make("loss", x, client, false);
         ASSERT_TRUE(!loss.shape().ndim &&
                     loss.node()->contain_flag(VarNode::Flag::VOLATILE_CONTENT));
-        loss = opr::RemoteSend::make({"loss", send_tag, true}, x, client);
+        loss = opr::RemoteSend::make("loss", x, client, true);
         auto gx = cg::grad(loss, x);
         set_priority(loss, 0);
         set_priority(gx, 1);
@@ -207,10 +198,10 @@ TEST(TestOprIORemote, SendGrad) {
     auto receiver = [&]() {
         sys::set_thread_name("receiver");
         auto graph = ComputingGraph::make();
-        auto x = opr::RemoteRecv::make({"loss", recv_tag, false}, *graph.get(),
+        auto x = opr::RemoteRecv::make("loss", *graph.get(),
                                        client, {cns[1]}, host_x->shape(),
                                        host_x->dtype());
-        auto y = opr::RemoteSend::make({"loss:grad", send_tag, false}, x + 1, client);
+        auto y = opr::RemoteSend::make("loss:grad", x + 1, client, false);
         auto func = graph->compile({{y, {}}});
         func->execute();
     };

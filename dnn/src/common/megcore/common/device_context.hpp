@@ -2,7 +2,7 @@
  * \file dnn/src/common/megcore/common/device_context.hpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -38,6 +38,7 @@ class DeviceContext {
         virtual size_t mem_alignment_in_bytes() const noexcept = 0;
 
         virtual void activate() = 0;
+        virtual void deactivate() {}
         virtual void *malloc(size_t size_in_bytes) = 0;
         virtual void free(void *ptr) = 0;
 

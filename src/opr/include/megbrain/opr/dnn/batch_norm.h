@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/dnn/batch_norm.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -75,6 +75,12 @@ MGB_DEFINE_OPR_CLASS(BatchNormForward,
             const TensorShapeArray &output_shapes) const override;
         void init_output_static_infer_desc() override;
         void init_output_dtype() override;
+        void mem_plan_fwd_in2out_writable() override;
+
+        // if set to True, running mean/variance will be updated inplace
+        bool m_force_inplace = true;
+        // need running mean/variance
+        bool need_stats() const {return input().size() == 5 && param().fwd_mode == Param::FwdMode::TRAINING;}
 };
 
 using BatchNorm = BatchNormForward;

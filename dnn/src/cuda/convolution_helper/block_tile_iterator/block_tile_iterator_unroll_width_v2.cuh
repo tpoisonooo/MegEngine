@@ -26,7 +26,7 @@
  * \file dnn/src/cuda/convolution_helper/block_tile_iterator/block_tile_iterator_unroll_width_v2.cuh
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -154,7 +154,7 @@ struct BlockTileIteratorUnrollWidthV2 {
                     filter_gl2sh_visitor.copy();
                 }
 
-                consumer.template consume_block(src_gl2sh_visitor,
+                consumer.consume_block(src_gl2sh_visitor,
                                                 filter_gl2sh_visitor);
 
                 if (!(ci_outer == ci_blks - 1 && h == h_end)) {

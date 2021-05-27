@@ -2,7 +2,7 @@
  * \file src/opr/impl/loop/impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -229,6 +229,8 @@ MGB_DEFINE_OPR_CLASS(LoopImpl::DescImplBase::LoopCondManager::GetCondOpr,
 #if !MEGDNN_DISABLE_FLOAT16
                 case DTypeEnum::Float16:
                     return std::abs(cond.ptr<dt_float16>()[0]) > 1e-5;
+                case DTypeEnum::BFloat16:
+                    return std::abs(cond.ptr<dt_bfloat16>()[0]) > 1e-5;
 #endif
 
 #define cb(_dt) case DTypeTrait<_dt>::enumv: \
@@ -244,6 +246,10 @@ MGB_DEFINE_OPR_CLASS(LoopImpl::DescImplBase::LoopCondManager::GetCondOpr,
                 case DTypeEnum::IntB4:
                     break;
                 case DTypeEnum::UintB4:
+                    break;
+                case DTypeEnum::Bool:
+                    break;
+                case DTypeEnum::Uint16:
                     break;
 #define cb(_dt)         \
     case DTypeEnum::_dt: \

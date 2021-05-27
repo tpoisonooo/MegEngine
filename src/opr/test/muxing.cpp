@@ -2,7 +2,7 @@
  * \file src/opr/test/muxing.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -36,7 +36,12 @@ void run_all_gather(const std::vector<size_t>& axis_size, bool& success,
         sleep_time.push_back(i * 0.05 + 0.1);
         tot_axis_size += axis_size[i];
     }
+#if __cplusplus >= 201703L
+    std::default_random_engine rng_engine;
+    std::shuffle(sleep_time.begin(), sleep_time.end(), rng_engine);
+#else
     std::random_shuffle(sleep_time.begin(), sleep_time.end());
+#endif
 
     auto constexpr DEVICE_TYPE = CompNode::DeviceType::CUDA;
     size_t nr_dev = std::min<size_t>(

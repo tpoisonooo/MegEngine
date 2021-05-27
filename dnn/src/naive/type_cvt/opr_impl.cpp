@@ -2,7 +2,7 @@
  * \file dnn/src/naive/type_cvt/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -82,6 +82,7 @@ void on_dest_ctype(HandleImpl* handle, const TensorND& dest,
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
         MEGDNN_FOREACH_QUANTIZED_DTYPE(cb)
         MEGDNN_FOREACH_QUANTIZED_LOWBIT_DTYPE(cb)
+        cb(::megdnn::dtype::Bool)
 #undef cb
         default:
             megdnn_throw("bad dtype");
@@ -103,6 +104,7 @@ void TypeCvtImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_out dst) {
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
         MEGDNN_FOREACH_QUANTIZED_DTYPE(cb)
         MEGDNN_FOREACH_QUANTIZED_LOWBIT_DTYPE(cb)
+        cb(::megdnn::dtype::Bool)
 #undef cb
         default:
             megdnn_throw("bad dtype");

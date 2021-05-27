@@ -2,7 +2,7 @@
  * \file src/jit/impl/ast_c.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -145,9 +145,9 @@ const ElemGeneratorMap& ast_c::elem_opr_generator() {
                                    0.f}) /
                           6.f),
     };
-    mgb_assert(map.size() + 8 == opr::Elemwise::Param::MODE_NR_MEMBER);
+    mgb_assert(map.size() + 12 == opr::Elemwise::Param::MODE_NR_MEMBER);
     // unimplemented modes: SHL, SHR, FAST_TANH, FAST_TANH_GRAD, ROUND, RMULH,
-    // ERFINV, ERFCINV
+    // ERFINV, ERFCINV, NOT, AND, OR, XOR
     return map;
 #undef ADD_OPR
 }

@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/resize/forward.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -43,8 +43,7 @@ void resize_cv_proxy(_megdnn_tensor_in src, _megdnn_tensor_out dst,
                     src_mat.step(), dst_mat.step(), src_mat.channels(), imode,
                     workspace, stream);
         } else {
-            megdnn_throw(
-                    megdnn_mangle("Unsupported datatype of WarpAffine optr."));
+            megdnn_throw("Unsupported datatype of WarpAffine optr.");
         }
     }
 }

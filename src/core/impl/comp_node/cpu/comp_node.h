@@ -2,7 +2,7 @@
  * \file src/core/impl/comp_node/cpu/comp_node.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -38,7 +38,8 @@ namespace mgb {
             static constexpr Flag sm_flag =
                     Flag::SUPPORT_RECORDER |
                     Flag::RECORDER_SUPPORT_DYNAMIC_ALLOC |
-                    Flag::EVENT_DTOR_UNSAFE;
+                    Flag::EVENT_DTOR_UNSAFE |
+                    Flag::SUPPORT_UNIFIED_ADDRESS;
 
             //! base class for comp nodes that can be dispatched on CPU.
             //! This is currently used by CPU, FPGA and CADENCE
@@ -53,7 +54,9 @@ namespace mgb {
                     void add_callback(Task&& task) override;
             };
 
-            class CompNodeImpl;
+            class CompNodeBaseImpl;
+            class CompNodeDefaultImpl;
+            class CompNodeRecorderImpl;
 
             static void foreach(thin_function<void(CompNode)> callback);
             static void finalize();
@@ -64,9 +67,8 @@ namespace mgb {
 
     //! implement Event on CpuDispatchableBase comp nodes
     class CpuCompNode::CpuDispatchableBase::EventImpl: public EventImplHelper {
-
+    protected:
         TimeSpec m_prev_finish_time;
-
 #if MGB_HAVE_THREAD
         std::atomic_size_t
             m_record_nr_req{0}, m_record_nr_finish{0},
@@ -83,22 +85,21 @@ namespace mgb {
 
         void host_wait_cv() override;
 
-        protected:
-            void do_record() override;
+        void do_record() override;
 
-            //! incr m_record_nr_req; this is used in do_record()
-            void incr_nr_req() {
+        //! incr m_record_nr_req; this is used in do_record()
+        void incr_nr_req() {
 #if MGB_HAVE_THREAD
-                m_record_nr_req.fetch_add(1, std::memory_order_relaxed);
+            m_record_nr_req.fetch_add(1, std::memory_order_relaxed);
 #endif
-            }
+        }
 
-            //! callback to be dispatched to comp node
-            void on_finish();
+        //! callback to be dispatched to comp node
+        void on_finish();
 
-        public:
-            using EventImplHelper::EventImplHelper;
-            ~EventImpl() noexcept;
+    public:
+        using EventImplHelper::EventImplHelper;
+        ~EventImpl() noexcept;
     };
 }
 

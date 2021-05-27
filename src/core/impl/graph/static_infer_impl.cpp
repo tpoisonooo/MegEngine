@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/static_infer_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -245,6 +245,9 @@ MGB_DEFINE_CLS_WITH_SUPER(StaticInferManagerImpl::TagTraitMutableBase,
             return m_infer_withoutexc_ret;
         }
 
+        //! original deps given in the InferDesc by the caller
+        virtual const DepVal& raw_deps() = 0;
+
     protected:
         //! current infer result, to be used by dependents
         InpElement m_inp_element;
@@ -299,9 +302,6 @@ MGB_DEFINE_CLS_WITH_SUPER(StaticInferManagerImpl::TagTraitMutableBase,
 
         //! all missing inputs
         SharedSet<TagHandler*, TagHandlerSet> m_missing_input;
-
-        //! original deps given in the InferDesc by the caller
-        virtual const DepVal& raw_deps() = 0;
 
         //! recursively set m_inp_element_synced of this and all receivers to
         //! false
@@ -813,7 +813,7 @@ StaticInferManagerImpl::~StaticInferManagerImpl() noexcept {
     m_mem_pool_value_trait.disable_freelist();
     for (auto &&i: m_dtor_callbacks)
         i.second();
-    for (auto &&i: static_cast<ComputingGraphImpl*>(
+    for (auto &&i: ComputingGraphImpl::downcast(
                 m_owner_graph)->all_oprs()) {
         for (auto j: i->output()) {
             clear_tag_handler(j);
@@ -1027,6 +1027,14 @@ void StaticInferManagerImpl::update_mutable_src_shape(Tag dest) {
     MGB_CATCH(MegBrainError & exc, { update_rethrow_exc(dest, exc); })
 }
 
+DepVal StaticInferManagerImpl::get_deps(const DepElement &elem) {
+    auto trait_base = get_tag_trait_container(elem.dest).select(elem.type);
+    if (!trait_base || trait_base->is_const())
+        return {};
+
+    return trait_base->as_mutable_safe()->raw_deps();
+}
+
 /* ===================== CompSeqManager ===================== */
 
 class CompSeqManager::VersionedTagTrait {
@@ -1212,7 +1220,7 @@ class StaticInferManagerImpl::SubgraphStaticInferHelperImpl final:
 
     void check_graph_par(VarNode *var) {
         if (mgb_unlikely(!m_par_graph)) {
-            m_par_graph = static_cast<ComputingGraphImpl*>(var->owner_graph());
+            m_par_graph = ComputingGraphImpl::downcast(var->owner_graph());
             mgb_assert(m_par_graph != m_sub_graph);
 
             auto cb = [this]() {
@@ -1230,7 +1238,7 @@ class StaticInferManagerImpl::SubgraphStaticInferHelperImpl final:
 
     void check_graph_sub(VarNode *var) {
         if (mgb_unlikely(!m_sub_graph)) {
-            m_sub_graph = static_cast<ComputingGraphImpl*>(var->owner_graph());
+            m_sub_graph = ComputingGraphImpl::downcast(var->owner_graph());
             mgb_assert(m_sub_graph != m_par_graph);
         } else {
             mgb_assert(m_sub_graph == var->owner_graph());

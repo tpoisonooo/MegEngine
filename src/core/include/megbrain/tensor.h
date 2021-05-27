@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/tensor.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -100,6 +100,14 @@ class Slice {
          */
         SubTensorSpec apply(TensorLayout layout, int axis) const;
 };
+
+template <class Trait> class TensorStorage;
+
+class DeviceTensorStorageTrait;
+class HostTensorStorageTrait;
+
+using HostTensorStorage = TensorStorage<HostTensorStorageTrait>;
+using DeviceTensorStorage = TensorStorage<DeviceTensorStorageTrait>;
 
 /*!
  * \brief manager for raw tensor memory
@@ -230,6 +238,18 @@ class TensorStorage {
             std::enable_if<!std::is_same<Trait, RTrait>::value>::type>
         static TensorStorage make_proxy(const TensorStorage<RTrait> &src);
 
+        /*!
+         * \brief make a DeviceTensorStorage on default_cpu
+         *      that shares memory with this
+         *
+         * this must be a HostTensorStorage. Alignment not checked.
+         */
+        template<bool x = true, typename = std::enable_if_t<x && std::is_same<Trait, HostTensorStorageTrait>::value>>
+        DeviceTensorStorage proxy_to_default_cpu() const {
+            ptr();
+            return {true, CompNode::default_cpu(), m_size, m_capacity, m_offset, m_data};
+        }
+
         //! shortcut for raw_storage().use_count(), but won't trigger lazy alloc
         size_t use_count() const {
             if (m_size > m_capacity) {
@@ -284,11 +304,12 @@ class TensorStorage {
 
         [[noreturn]] static void on_invalid_comp_node();
 };
-class DeviceTensorStorageTrait;
-class HostTensorStorageTrait;
 
-using HostTensorStorage = TensorStorage<HostTensorStorageTrait>;
-using DeviceTensorStorage = TensorStorage<DeviceTensorStorageTrait>;
+
+template<class TensorStorage> class TensorND;
+
+using HostTensorND = TensorND<HostTensorStorage>;
+using DeviceTensorND = TensorND<DeviceTensorStorage>;
 
 /*!
  * \brief n-dimensional tensor
@@ -519,10 +540,24 @@ class TensorND {
             ret.reset(TensorStorage::make_proxy(src.storage()), src.layout());
             return ret;
         }
-};
 
-using HostTensorND = TensorND<HostTensorStorage>;
-using DeviceTensorND = TensorND<DeviceTensorStorage>;
+        //! similar to HostTensorStorage::proxy_to_default_cpu
+        template<bool x = true, typename = std::enable_if_t<x && std::is_same<TensorStorage, HostTensorStorage>::value>>
+        DeviceTensorND proxy_to_default_cpu() const {
+            DeviceTensorND ret;
+            ret.reset(storage().proxy_to_default_cpu(), layout());
+            return ret;
+        }
+
+        template<bool x = true, typename = std::enable_if_t<x && std::is_same<TensorStorage, HostTensorStorage>::value>>
+        HostTensorND proxy_to_comp_node(CompNode cn) const {
+            HostTensorStorage host_storage;
+            host_storage.reset(cn, m_storage.size(), m_storage.raw_storage());
+            HostTensorND ret;
+            ret.reset(host_storage, m_layout);
+            return ret;
+        }
+};
 
 /*!
  * \brief call memset in the data of a device tensor

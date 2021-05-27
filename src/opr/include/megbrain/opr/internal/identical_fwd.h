@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/internal/identical_fwd.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,6 +18,19 @@ namespace opr {
 
 
 namespace mixin {
+
+/*!
+ * \brief mixin for operators which essentially works by forward input to output
+ */
+class FwdIn2OutWritableHelper : public cg::OperatorNodeMixinBase {
+protected:
+    /*!
+     * \brief call this function in mem_plan_fwd_in2out_writable(),
+     *     this function will check if the input have conflict to find if the
+     *     output can be forward.
+     */
+    void mixin_mem_plan_fwd_in2out_writable(OperatorNodeBase &opr);
+};
 
 //! for internal use by DynamicOutputIfInputDynamic
 void init_rt_force_dynamic_mem_alloc_imply_chain_for_dyn_pass_i2o(
@@ -67,6 +80,7 @@ class ForwardInputToOutput: public cg::OperatorNodeMixinBase {
 
         virtual void mixin_scn_do_execute(OperatorNodeBase &opr);
 
+        void mixin_init_rt_force_dynamic_mem_alloc_imply_chain(OperatorNodeBase &opr);
         void mixin_mem_plan_fwd_in2out_readonly(OperatorNodeBase &opr);
         void mixin_init_output_static_infer_desc(OperatorNodeBase &opr);
         virtual cg::static_infer::ValueInferDesc mixin_get_static_infer_desc(OperatorNodeBase &opr);
@@ -86,6 +100,12 @@ class ForwardInputToOutput: public cg::OperatorNodeMixinBase {
          * This method should be called from the constructor.
          */
         void set_ignore_side_effect();
+
+        /*!
+         * \brief register stream propagate function which forwards the
+         * StreamPropType from \p opr input(0) to output(0).
+         */
+        void register_stream_propagate_in2out(OperatorNodeBase &opr);
 
     public:
 
@@ -167,8 +187,7 @@ MGB_DEFINE_CLS_WITH_SUPER(ForwardInputToOutput,
     protected:
         using Super::Super;
         void init_rt_force_dynamic_mem_alloc_imply_chain() override {
-            mixin::init_rt_force_dynamic_mem_alloc_imply_chain_for_dyn_pass_i2o(
-                    *this);
+            this->mixin_init_rt_force_dynamic_mem_alloc_imply_chain(*this);
         }
 
         void mem_plan_fwd_in2out_readonly() override {
@@ -177,6 +196,11 @@ MGB_DEFINE_CLS_WITH_SUPER(ForwardInputToOutput,
 
         void init_output_static_infer_desc() override {
             this->mixin_init_output_static_infer_desc(*this);
+        }
+
+        void init_output_comp_node() override {
+            Super::init_output_comp_node();
+            this->register_stream_propagate_in2out(*this);
         }
 };
 

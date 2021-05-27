@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/common.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -12,6 +12,7 @@
 #pragma once
 
 #include "megbrain_build_config.h"
+#include "megdnn/basic_types.h"
 
 #include <memory>
 #include <string>
@@ -48,6 +49,13 @@ namespace mgb {
 //! warn if result of a function is not used
 #define MGB_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
 
+#if __cplusplus >= 201703L || __clang_major__ >= 4
+#define MGB_FALLTHRU [[fallthrough]];
+#elif __GNUC__ >= 7
+#define MGB_FALLTHRU __attribute__((fallthrough));
+#else
+#define MGB_FALLTHRU
+#endif
 
 /* ================ exception and assertion ================  */
 
@@ -84,9 +92,13 @@ void __on_exception_throw__(const std::exception &exc)
     MGB_CATCH(..., {_stmt; throw; }) \
     _stmt
 
+#if MGB_ENABLE_LOGGING
 //! throw exception with given message
-#define mgb_throw(_exc, _msg...) \
-    mgb_throw_raw(_exc(::mgb::ssprintf(_msg))) \
+#define mgb_throw(_exc, _msg...) mgb_throw_raw(_exc(::mgb::ssprintf(_msg)))
+#else
+//! throw exception with given message
+#define mgb_throw(_exc, _msg...) mgb_throw_raw(_exc(""))
+#endif
 
 //! throw exception with given message if condition is true
 #define mgb_throw_if(_cond, _exc, _msg...) \
@@ -122,7 +134,7 @@ void __assert_fail__() __attribute__((noreturn));
 #endif // MGB_ASSERT_LOC
 
 /* ================ logging ================  */
-//! caused by need remve sensitive words at opt release
+//! caused by need remve some words at opt release
 #if MGB_ENABLE_LOGGING
 #define mgb_log_debug(fmt...) \
     _mgb_do_log(::mgb::LogLevel::DEBUG, __FILE__, __func__, __LINE__, fmt)
@@ -133,16 +145,18 @@ void __assert_fail__() __attribute__((noreturn));
 #define mgb_log_error(fmt...) \
     _mgb_do_log(::mgb::LogLevel::ERROR, __FILE__, __func__, __LINE__, fmt)
 #else
+#define LOC "about location info, please build with debug"
 #define mgb_log_debug(fmt...) \
-    _mgb_do_log(::mgb::LogLevel::DEBUG, "", "", 1, fmt)
+    _mgb_do_log(::mgb::LogLevel::DEBUG, "", "", __LINE__, fmt)
 #define mgb_log(fmt...) \
-    _mgb_do_log(::mgb::LogLevel::INFO, "", "", 1, fmt)
+    _mgb_do_log(::mgb::LogLevel::INFO, "", "", __LINE__, fmt)
 #define mgb_log_warn(fmt...) \
-    _mgb_do_log(::mgb::LogLevel::WARN, "", "", 1, fmt)
+    _mgb_do_log(::mgb::LogLevel::WARN, "", "", __LINE__, fmt)
 #define mgb_log_error(fmt...) \
-    _mgb_do_log(::mgb::LogLevel::ERROR, "", "", 1, fmt)
+    _mgb_do_log(::mgb::LogLevel::ERROR, LOC, "", __LINE__, fmt)
+#undef LOC
 #endif
-enum class LogLevel { DEBUG, INFO, WARN, ERROR };
+enum class LogLevel { DEBUG, INFO, WARN, ERROR, NO_LOG };
 
 typedef void(*LogHandler)(LogLevel level,
         const char *file, const char *func, int line, const char *fmt,
@@ -155,6 +169,13 @@ typedef void(*LogHandler)(LogLevel level,
  * \return previous log level
  */
 LogLevel set_log_level(LogLevel level);
+
+/*!
+ * \brief get logging level
+ *
+ * \return current log level
+ */
+LogLevel get_log_level();
 
 /*!
  * \brief set callback for receiving log requests
@@ -184,6 +205,11 @@ void __log__(LogLevel level, const char *file, const char *func, int line,
 #define MGB_GETENV  ::std::getenv
 #else
 #define MGB_GETENV(_name)  static_cast<char*>(nullptr)
+#endif
+
+#ifdef WIN32
+#define unsetenv(_name) _putenv_s(_name, "");
+#define setenv(name,value,overwrite) _putenv_s(name,value)
 #endif
 
 // use some macro tricks to get lock guard with unique variable name
@@ -226,6 +252,10 @@ inline constexpr std::size_t operator"" _z(unsigned long long n) {
     return n;
 }
 #endif
+
+#define MGB_DEF_ENUM_CLASS_BIT_OPR(cls) \
+    MEGDNN_DEF_ENUM_CLASS_BIT_OPR(cls)
+
 }   // namespace mgb
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

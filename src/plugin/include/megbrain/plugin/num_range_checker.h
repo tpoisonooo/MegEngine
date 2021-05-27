@@ -2,7 +2,7 @@
  * \file src/plugin/include/megbrain/plugin/num_range_checker.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -15,6 +15,13 @@
 #include "megbrain/plugin/base.h"
 #include "megbrain/graph/event.h"
 #include "megbrain/utils/thin/hash_table.h"
+
+namespace mgb {
+class NumRangeCheckerError final : public MegBrainError {
+public:
+    using MegBrainError::MegBrainError;
+};
+}  // namespace mgb
 
 namespace mgb {
 
@@ -47,11 +54,7 @@ namespace mgb {
         std::string format_msg(const HostTensorND &hv, float range);
 
         public:
-            class Error final: public MegBrainError {
-                public:
-                    using MegBrainError::MegBrainError;
-            };
-
+            using Error = NumRangeCheckerError;
             NumRangeChecker(cg::ComputingGraph *graph, float range);
     };
 }

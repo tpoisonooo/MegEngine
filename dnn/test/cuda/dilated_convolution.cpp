@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/dilated_convolution.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -30,19 +30,26 @@ TEST_F(CUDA, DILATED_CONVOLUTION_FORWARD)
     auto args = get_dilated_args();
     Checker<ConvolutionForward> checker(handle_cuda());
 #if CUDNN_VERSION >= 7500
-    checker.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-            ConvBiasForward::algo_name<ConvBiasForward::DefaultParam>(
-                    "CUDNN:Convolution:CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_"
-                    "PRECOMP_"
-                    "GEMM" CUDNN_VERSION_STRING,
-                    {})
-                    .c_str()));
+    checker.set_before_exec_callback(
+            AlgoChecker<ConvolutionForward>(ExecutionPolicyAlgoName{
+                    "DEFAULT",
+                    {{ConvBiasForward::algo_name<ConvBiasForward::DefaultParam>(
+                              "CUDNN:Convolution:CUDNN_CONVOLUTION_FWD_ALGO_"
+                              "IMPLICIT_"
+                              "PRECOMP_"
+                              "GEMM" CUDNN_VERSION_STRING,
+                              {})
+                              .c_str(),
+                      {}}}}));
     printf("cudnn version >= 7.5, use cudnn impl for dilated convolution\n");
 #else
-    checker.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-            ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>("MATMUL",
-                                                                     {})
-                    .c_str()));
+    checker.set_before_exec_callback(
+            AlgoChecker<ConvolutionForward>(ExecutionPolicyAlgoName{
+                    "DEFAULT",
+                    {{ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
+                              "MATMUL", {})
+                              .c_str(),
+                      {{"CUBLAS", {}}}}}}));
 #endif
     NormalRNG default_rng;
     for (auto &&arg: args) {
@@ -68,8 +75,8 @@ TEST_F(CUDA, DILATED_CONVOLUTION_BACKWARD_DATA)
             "CUDNN_CONVOLUTION_BWD_DATA_ALGO_1" CUDNN_VERSION_STRING));
     printf("cudnn version >= 7.5, use cudnn impl for dilated convolution\n");
 #else
-    checker.set_before_exec_callback(
-            AlgoChecker<ConvolutionBackwardData>("MATMUL"));
+    checker.set_before_exec_callback(AlgoChecker<ConvolutionBackwardData>(
+            ExecutionPolicyAlgoName{"MATMUL", {{"CUBLAS", {}}}}));
 #endif
     NormalRNG default_rng;
     for (auto &&arg: args) {
@@ -132,8 +139,8 @@ TEST_F(CUDA, DILATED_CONVOLUTION_BACKWARD_FILTER)
             "CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1" CUDNN_VERSION_STRING));
     printf("cudnn version >= 7.5, use cudnn impl for dilated convolution\n");
 #else
-    checker.set_before_exec_callback(
-            AlgoChecker<ConvolutionBackwardFilter>("MATMUL"));
+    checker.set_before_exec_callback(AlgoChecker<ConvolutionBackwardFilter>(
+            ExecutionPolicyAlgoName{"MATMUL", {{"CUBLAS", {}}}}));
 #endif
     NormalRNG default_rng;
     bool first_run = true;

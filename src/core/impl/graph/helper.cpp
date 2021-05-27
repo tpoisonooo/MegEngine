@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/helper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -99,8 +99,8 @@ SymbolVarArray cg::grad(SymbolVar target_, SymbolVarArray wrts_, bool warn_mid_w
     grads.reserve(wrts_.size());
     VarNodeArray dest_vars;
     auto&& graph = target->owner_graph();
-    auto&& eager_mgr = static_cast<ComputingGraphImpl*>(graph)->eager_eval_manager();
-    auto&& grad_mgr = static_cast<ComputingGraphImpl*>(graph)->grad_manager();
+    auto&& eager_mgr = ComputingGraphImpl::downcast(graph)->eager_eval_manager();
+    auto&& grad_mgr = ComputingGraphImpl::downcast(graph)->grad_manager();
     bool already_recorded = eager_mgr.enter_record_mode();
     for (auto&& wrt_ : wrts_) {
         auto wrt = wrt_.node();
@@ -139,7 +139,7 @@ SymbolVarArray cg::grad(SymbolVar target_, SymbolVarArray wrts_, bool warn_mid_w
 
 SymbolVar cg::current_grad_target(ComputingGraph &graph) {
 #if MGB_ENABLE_GRAD
-    auto var = static_cast<ComputingGraphImpl&>(graph).grad_manager(
+    auto var = ComputingGraphImpl::downcast(&graph)->grad_manager(
             ).current_grad_target();
     mgb_throw_if(!var, GraphError, "current_grad_target() called outside "
             "grad computing environment");
@@ -564,6 +564,9 @@ void ExtraDependencyMerger::on_opr(OperatorNodeBase* opr) {
             sopr_stat->has_virtual_grad = true;
         }
 #endif
+        if (sopr_stat && opr->same_type<opr::ShapeHint>()) {
+            sopr_stat->has_shape_hint = true;
+        }
     }
 }
 

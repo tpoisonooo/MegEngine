@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/internal/indexing_helper_sereg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -85,7 +85,7 @@ namespace serialization {
         static cg::OperatorNodeBase* load(
                 OprLoadContext &ctx, const cg::VarNodeArray &inputs,
                 const OperatorNodeConfig &config) {
-            mgb_assert(inputs.size() >= 2);
+            mgb_assert(inputs.size() >= 1);
             auto index_desc = ctx.read_param<IndexDescMaskDump>().
                 to_index_desc(inputs.begin() + 1, inputs.end());
             return Opr::make(inputs[0], index_desc, config).node()->owner_opr();
@@ -106,7 +106,7 @@ namespace serialization {
         static cg::OperatorNodeBase* load(
                 OprLoadContext &ctx, const cg::VarNodeArray &inputs,
                 const OperatorNodeConfig &config) {
-            mgb_assert(inputs.size() >= 3);
+            mgb_assert(inputs.size() >= 2);
             auto index_desc = ctx.read_param<IndexDescMaskDump>().
                 to_index_desc(inputs.begin() + 2, inputs.end());
             return Opr::make(inputs[0], inputs[1],

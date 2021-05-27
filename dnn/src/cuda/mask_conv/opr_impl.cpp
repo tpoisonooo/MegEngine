@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/mask_conv/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -27,7 +27,7 @@ void MaskConvForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in filter,
                                _megdnn_workspace workspace) {
     megdnn_assert(dst.layout.dtype.enumv() == DTypeTrait<dtype::Float32>::enumv,
                   "Mask conv only support Float32 dtype.");
-    m_conv_opr->exec(src, filter, dst, workspace);
+    m_conv_opr->exec(src, filter, dst, nullptr, workspace);
     auto stream = cuda_stream(handle());
 #define cb(DType)                                                     \
     if (mask.layout.dtype == DType()) {                               \

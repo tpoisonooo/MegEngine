@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node_mem_mgr/static_mem_alloc/impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -84,7 +84,7 @@ size_t StaticMemAllocImplHelper::add(size_t begin, size_t end, size_t size,
 
     mgb_assert(begin < end);
     auto id = m_interval_storage.size();
-    m_interval_storage.push_back({begin, end, size, key, id});
+    m_interval_storage.push_back({begin, end, size + m_padding, key, id});
     return id;
 }
 

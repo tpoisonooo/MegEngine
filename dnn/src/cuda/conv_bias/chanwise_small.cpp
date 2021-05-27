@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/conv_bias/chanwise_small.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -30,6 +30,10 @@ inline bool is_available_small(const chanwise::Param& param) {
 
 bool ConvBiasForwardImpl::AlgoChanwiseSmall::is_available(
         const SizeArgs& args) const {
+    if (args.src_layout->dtype == args.filter_layout->dtype &&
+        args.src_layout->dtype == dtype::BFloat16()) {
+        return false;
+    }
     if (args.z_layout->ndim > 0)
         return false;
 #if CUDA_VERSION < 9000

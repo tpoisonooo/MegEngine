@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/utils/mempool.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -86,12 +86,17 @@ namespace mgb {
             };
             using UniquePtr = std::unique_ptr<T, Deleter>;
 
+            void* alloc_raw() {
+                return m_storage.alloc(Const<>::ELEM_SIZE);
+            }
+
+            void free_raw(void *ptr) {
+                m_storage.free(ptr);
+            }
+
             template<typename...Args>
             T* alloc(Args&&... args) {
-                auto ptr = static_cast<T*>(
-                        m_storage.alloc(Const<>::ELEM_SIZE));
-                new(ptr) T(std::forward<Args>(args)...);
-                return ptr;
+                return new(alloc_raw()) T(std::forward<Args>(args)...);
             }
 
             template<typename...Args>
@@ -102,7 +107,7 @@ namespace mgb {
 
             void free(T *ptr) {
                 ptr->~T();
-                m_storage.free(ptr);
+                free_raw(ptr);
             }
 
             //! reorder free list for cache friendly in future alloc

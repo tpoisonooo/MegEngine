@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/mask_conv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,10 +22,11 @@ using namespace test;
 TEST_F(CUDA, MASK_CONV) {
     mask_conv_test(handle_cuda());
 }
-
+#if MEGDNN_WITH_BENCHMARK
 TEST_F(CUDA, MASK_CONV_BENCHMARK) {
     mask_conv_benchmark(handle_cuda());
 }
+#endif
 
 TEST_F(CUDA, MASK_PROPAGATE) {
     Checker<MaskPropagate> checker(handle_cuda());

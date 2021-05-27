@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/group_conv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -23,7 +23,7 @@ namespace test {
 
 TEST_F(CUDA, GROUP_CONV_FORWARD)
 {
-    bool is_int_available = (cuda::current_device_prop().major >= 6);
+    bool is_int_available = cuda::is_compute_capability_required(6, 1);
     auto run = [&](size_t N, size_t IC, size_t IH, size_t IW,
             size_t FH, size_t FW,
             size_t OC, size_t /* OH */, size_t /* OW */,
@@ -115,13 +115,18 @@ TEST_F(CUDA, GROUP_CONV_FORWARD_1x1) {
 #if CUDNN_MAJOR <= 6
         std::string conv1x1_name =
                 ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
-                        "MATMUL1X1", {});
-        checker.set_before_exec_callback(AlgoChecker<Convolution>(
-                ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
-                        ssprintf("%s:%s", "CUDA:GROUP_CONV",
-                                 conv1x1_name.c_str()),
-                        {})
-                        .c_str()));
+                        "BATCHEDMATMUL", {});
+        checker.set_before_exec_callback(
+                AlgoChecker<ConvolutionForward>(ExecutionPolicyAlgoName{
+                        "DEFAULT",
+                        {{ConvBiasForward::algo_name<
+                                  ConvBiasForward::DirectParam>(
+                                  ssprintf("%s:%s", "CUDA:GROUP_CONV",
+                                           conv1x1_name.c_str())
+                                          .c_str(),
+                                  {})
+                                  .c_str(),
+                          {}}}}));
 #endif
         Convolution::Param param;
         param.sparse = Convolution::Param::Sparse::GROUP;

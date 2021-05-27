@@ -2,7 +2,7 @@
  * \file src/opr/impl/utility.sereg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -153,6 +153,17 @@ namespace opr {
 #endif
 
     MGB_SEREG_OPR(PersistentOutputStorage, 1);
+
+    cg::OperatorNodeBase* opr_shallow_copy_shape_hint(
+            const serialization::OprShallowCopyContext &ctx,
+            const cg::OperatorNodeBase &opr_, const VarNodeArray &inputs,
+            const OperatorNodeConfig &config) {
+        auto &&opr = opr_.cast_final_safe<ShapeHint>();
+        mgb_assert(inputs.size() == 1);
+        return ShapeHint::make(inputs[0], opr.shape(), opr.is_const(), config)
+                .node()->owner_opr();
+    }
+    MGB_REG_OPR_SHALLOW_COPY(ShapeHint, opr_shallow_copy_shape_hint);
 } // namespace opr
 } // namespace mgb
 

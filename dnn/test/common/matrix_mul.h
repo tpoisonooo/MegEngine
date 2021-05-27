@@ -2,7 +2,7 @@
  * \file dnn/test/common/matrix_mul.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,6 +16,7 @@
 #include "megdnn/handle.h"
 #include "megdnn/opr_param_defs.h"
 #include "megdnn/oprs.h"
+#include "test/common/checker.h"
 
 namespace megdnn {
 namespace test {
@@ -23,15 +24,19 @@ namespace matrix_mul {
 
 // mask & 1 denotes transposeA; mask & 2 denotes transposeB
 struct TestArg {
+    constexpr static size_t UNSET_STRIDE_VAL = static_cast<size_t>(-1);
     size_t m, n, k, mask;
     size_t A_stride, B_stride, C_stride, b;
     size_t A_batch_stride, B_batch_stride, C_batch_stride;
     // stride = 0 means the default stride, the dim is contiguous, i.e. the
     // stride value which makes tensor compact.
-    TestArg(size_t m, size_t n, size_t k, size_t mask, size_t A_stride = 0,
-            size_t B_stride = 0, size_t C_stride = 0, size_t b = 1,
-            size_t A_batch_stride = 0, size_t B_batch_stride = 0,
-            size_t C_batch_stride = 0)
+    TestArg(size_t m, size_t n, size_t k, size_t mask,
+            size_t A_stride = UNSET_STRIDE_VAL,
+            size_t B_stride = UNSET_STRIDE_VAL,
+            size_t C_stride = UNSET_STRIDE_VAL, size_t b = 1,
+            size_t A_batch_stride = UNSET_STRIDE_VAL,
+            size_t B_batch_stride = UNSET_STRIDE_VAL,
+            size_t C_batch_stride = UNSET_STRIDE_VAL)
             : m{m},
               n{n},
               k{k},
@@ -48,8 +53,11 @@ struct TestArg {
 std::vector<TestArg> get_matmul_args_no_mask();
 std::vector<TestArg> get_matmul_args_mask(uint8_t mask);
 std::vector<TestArg> get_matmul_args();
+std::vector<TestArg> get_matmul_args_split_k();
 std::vector<TestArg> get_batched_matmul_args_mask(uint8_t mask);
 std::vector<TestArg> get_batched_matmul_args();
+std::vector<TestArg> get_batched_matmul_broadcast_args();
+std::vector<TestArg> get_batched_matmul_broadcast_args_mask(uint8_t mask);
 std::vector<TestArg> get_matmul_mk_packed_args(size_t nbase);
 std::vector<TestArg> get_batched_matmul_args_cublaslt();
 std::vector<TestArg> get_batched_matmul_args_int8x8x32();
@@ -58,18 +66,19 @@ using TestArgFilterFunc = std::function<bool(const TestArg&)>;
 template <typename Opr = megdnn::MatrixMul>
 void check_matrix_mul(
         DType A_dtype, DType B_dtype, DType C_dtype, Handle* handle,
-        const char* algo = nullptr,
+        const ExecutionPolicyAlgoName& algo = {"", {}},
         param::MatrixMul::Format format = param::MatrixMul::Format::DEFAULT,
         size_t nbase = 8, float eps = 1e-3, std::vector<TestArg>&& args = {});
 
 void check_matrix_mul(
         DType A_dtype, DType B_dtype, DType C_dtype, Handle* handle,
-        const char* algo = nullptr,
+        const ExecutionPolicyAlgoName& algo = {"", {}},
         param::MatrixMul::Format format = param::MatrixMul::Format::DEFAULT,
         size_t nbase = 8, float eps = 1e-3);
 
 void check_batched_matrix_mul(DType A_dtype, DType B_dtype, DType C_dtype,
-                              Handle* handle, const char* algo = nullptr,
+                              Handle* handle,
+                              const ExecutionPolicyAlgoName& algo = {"", {}},
                               float eps = 1e-3,
                               std::vector<TestArg>&& args = {});
 

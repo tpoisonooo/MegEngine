@@ -2,7 +2,7 @@
  * \file src/serialization/test/serializer_oss.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -60,6 +60,34 @@ TEST(TestSerializer2, GraphDumpLoad) {
         func->execute().wait();
         EXPECT_NEAR(*host_x.ptr<float>(), 1926.0817f, 1e-6);
     };
+    dump();
+    load();
+}
+
+TEST(TestSerializer2, MultiGraphDumpLoad) {
+    auto fname = GET_OUTPUT_FILE();
+
+    auto dump = [&]() {
+        auto cn = CompNode::load("cpu0");
+        auto graph = ComputingGraph::make();
+        auto x = opr::ImmutableTensor::make(*graph, 1926.0817f, {cn});
+        x.rename("varz");
+        auto dumper = GraphDumper::make(OutputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        // dump twice
+        dumper->dump({x});
+        dumper->dump({x});
+    };
+    auto load = [&]() {
+        GraphLoader::LoadConfig load_config = {};
+        auto loader = GraphLoader::make(InputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        // load twice
+        loader->load(load_config, false);
+        loader = GraphLoader::make(loader->reset_file(), loader->format());
+        loader->load(load_config, false);
+    };
+
     dump();
     load();
 }
@@ -683,6 +711,39 @@ TEST(TestSerializer2, ParamerizedDType) {
     load();
 }
 
+TEST(TestSerializer2, OperatorName) {
+    auto fname = GET_OUTPUT_FILE();
+    TensorShape shape{2, 3};
+
+    auto dump = [&]() {
+        auto cn = CompNode::load("xpu0");
+        auto host_x = std::make_shared<HostTensorND>(cn, shape),
+             host_y = std::make_shared<HostTensorND>(cn, shape);
+        auto graph = ComputingGraph::make();
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x, {"x"}),
+             y = opr::Host2DeviceCopy::make(*graph, host_y, {"y"});
+        using Mode = opr::Elemwise::Mode;
+        auto z = opr::Elemwise::make({x, y}, Mode::ADD, {"add(x, y)"});
+
+        auto dumper = GraphDumper::make(OutputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        auto rst = dumper->dump({z.rename("z")});
+    };
+
+    auto load = [&]() {
+        HostTensorGenerator<> gen;
+        auto loader = GraphLoader::make(InputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        auto rst = loader->load();
+        auto z = rst.output_var_map.at("z");
+        auto op_name = z.node()->owner_opr()->cname();
+        int cmp = strcmp(op_name, "add(x, y)");
+        EXPECT_EQ(cmp, 0);
+    };
+
+    dump();
+    load();
+}
 
 TEST(TestSerializer2, HasOutputDtype) {
     auto fname = GET_OUTPUT_FILE();
@@ -733,4 +794,41 @@ TEST(TestSerializer2, HasOutputDtype) {
     load();
 }
 
+TEST(TestSerializer2, LOGEXP) {
+    auto fname = GET_OUTPUT_FILE();
+    TensorShape shape{2, 3};
+    using Mode = opr::Elemwise::Mode;
+    bool inplace_opt = true;
+    auto dump = [&]() {
+        auto cn = CompNode::load("xpu0");
+        auto host_x = std::make_shared<HostTensorND>(cn, shape);
+        for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++i)
+            host_x->ptr<float>()[i] = 0.0;  // To avoid NAN
+        auto graph = ComputingGraph::make();
+        if (!inplace_opt)
+            graph->options().graph_opt_level = 0;
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x, {"x"});
+        auto y = opr::Elemwise::make({x}, Mode::EXP);
+        auto z = opr::Elemwise::make({y}, Mode::LOG);
+
+        auto dumper = GraphDumper::make(OutputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        auto rst = dumper->dump({z.rename("z"), z});
+        size_t expected_nr_opr = inplace_opt? 1: 3;
+        ASSERT_EQ(expected_nr_opr, rst.nr_opr);
+    };
+
+    auto load = [&]() {
+        auto loader = GraphLoader::make(InputFile::make_fs(fname.c_str()),
+                                        GraphDumpFormat::FLATBUFFERS);
+        auto rst = loader->load();
+    };
+
+    dump();
+    load();
+
+    inplace_opt = !inplace_opt;
+    dump();
+    load();
+}
 #endif

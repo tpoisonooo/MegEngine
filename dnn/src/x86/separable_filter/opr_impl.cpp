@@ -2,7 +2,7 @@
  * \file dnn/src/x86/separable_filter/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -14,7 +14,6 @@
 #include "src/common/cv/helper.h"
 #include "src/common/utils.h"
 #include "src/x86/utils.h"
-#include "src/x86/profile.h"
 #include "src/x86/handle.h"
 #include <cstring>
 
@@ -127,8 +126,7 @@ void SeparableFilterImpl::exec(_megdnn_tensor_in src,
         MEGDNN_DISPATCH_CPU_KERN_OPR(
                 separable_filter_exec_8u(src, filter_x, filter_y, dst));
     } else {
-        megdnn_throw(
-                megdnn_mangle("Unsupported datatype of SeparableFilter opr."));
+        megdnn_throw("Unsupported datatype of SeparableFilter opr.");
     };
 }
 

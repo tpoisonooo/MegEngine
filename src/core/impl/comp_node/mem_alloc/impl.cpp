@@ -2,7 +2,7 @@
  * \file src/core/impl/comp_node/mem_alloc/impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -267,45 +267,59 @@ MemAllocImplHelper::MemAddr DevMemAllocImpl::alloc_from_parent(size_t size) {
 }
 
 size_t DevMemAllocImpl::gather_stream_free_blk_and_release_full() {
-    size_t gathered_size = 0;
-    MGB_LOCK_GUARD(m_mutex);
-    for (auto &&pair: m_stream_alloc) {
-        auto ch = pair.second.get();
-        auto &&chmtx = ch->m_mutex;
-
-        MGB_LOCK_GUARD(chmtx);
-        for (auto &&i: ch->m_free_blk_size) {
-            merge_free_unsafe(i.first);
-            gathered_size += i.first.size;
-        }
-        ch->m_free_blk_addr.clear();
-        ch->m_free_blk_size.clear();
-    }
-    mgb_assert(gathered_size <= m_used_size.load());
-    m_used_size -= gathered_size;
-
     size_t free_size = 0;
-    using Iter = decltype(m_free_blk_size.begin());
     std::vector<void*> to_free_by_raw;
-    for (Iter i = m_free_blk_size.begin(), inext; i != m_free_blk_size.end();
-            i = inext) {
-        inext = i;
-        ++ inext;
-        auto &&blk = i->first;
-        if (blk.addr.is_head) {
-            auto riter = m_alloc_from_raw.find(blk.addr.addr_ptr());
-            mgb_assert(riter != m_alloc_from_raw.end() &&
-                    blk.size <= riter->second);
-            if (blk.size == riter->second) {
-                to_free_by_raw.push_back(blk.addr.addr_ptr());
-                free_size += blk.size;
-                auto j = i->second.aiter;
-                m_free_blk_size.erase(i);
-                m_free_blk_addr.erase(j);
-                m_alloc_from_raw.erase(riter);
+
+    MGB_LOCK_GUARD(m_mutex);
+    auto return_full_free_blk_unsafe = [&](MemAllocImplHelper* alloc) {
+        auto&& free_blk_size = alloc->m_free_blk_size;
+        auto&& free_blk_addr = alloc->m_free_blk_addr;
+        using Iter = decltype(m_free_blk_size.begin());
+        for (Iter i = free_blk_size.begin(), inext; i != free_blk_size.end();
+                i = inext) {
+            inext = i;
+            ++ inext;
+            auto &&blk = i->first;
+            if (blk.addr.is_head) {
+                auto riter = m_alloc_from_raw.find(blk.addr.addr_ptr());
+                mgb_assert(riter != m_alloc_from_raw.end() &&
+                        blk.size <= riter->second);
+                if (blk.size == riter->second) {
+                    to_free_by_raw.push_back(blk.addr.addr_ptr());
+                    free_size += blk.size;
+                    auto j = i->second.aiter;
+                    free_blk_size.erase(i);
+                    free_blk_addr.erase(j);
+                    m_alloc_from_raw.erase(riter);
+                }
             }
         }
+    };
+
+    if (auto child = get_single_child_stream_unsafe()) {
+        MGB_LOCK_GUARD(child->m_mutex);
+        return_full_free_blk_unsafe(child);
+        mgb_assert(free_size <= m_used_size.load());
+        m_used_size -= free_size;
+    } else {
+        size_t gathered_size = 0;
+        for (auto &&pair: m_stream_alloc) {
+            auto ch = pair.second.get();
+            auto &&chmtx = ch->m_mutex;
+
+            MGB_LOCK_GUARD(chmtx);
+            for (auto &&i: ch->m_free_blk_size) {
+                merge_free_unsafe(i.first);
+                gathered_size += i.first.size;
+            }
+            ch->m_free_blk_addr.clear();
+            ch->m_free_blk_size.clear();
+        }
+        mgb_assert(gathered_size <= m_used_size.load());
+        m_used_size -= gathered_size;
     }
+
+    return_full_free_blk_unsafe(this);
     m_tot_allocated_from_raw -= free_size;
 
     // we have to sync to ensure no kernel on the child stream still uses
@@ -359,10 +373,81 @@ FreeMemStat DevMemAllocImpl::get_free_memory_dev() {
     return ret;
 }
 
+void DevMemAllocImpl::insert_free_unsafe(const FreeBlock &block) {
+    if (auto child = get_single_child_stream_unsafe()) {
+        {
+            MGB_LOCK_GUARD(child->m_mutex);
+            child->insert_free_unsafe(block);
+        }
+        m_used_size += block.size;
+    } else {
+        MemAllocImplHelper::insert_free_unsafe(block);
+    }
+}
+
+StreamMemAllocImpl* DevMemAllocImpl::get_single_child_stream_unsafe() {
+    if (m_stream_alloc.size() == 1) {
+        return m_stream_alloc.begin()->second.get();
+    }
+    return nullptr;
+}
+
 DevMemAllocImpl::~DevMemAllocImpl() {
     for (auto &&i: m_alloc_from_raw)
         m_raw_allocator->free(i.first);
 }
 
-// vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
+std::unique_ptr<SimpleCachingAlloc> SimpleCachingAlloc::make(std::unique_ptr<RawAllocator> raw_alloc) {
+    return std::make_unique<SimpleCachingAllocImpl>(std::move(raw_alloc));
+}
 
+SimpleCachingAllocImpl::SimpleCachingAllocImpl(std::unique_ptr<RawAllocator> raw_alloc)
+        : m_raw_alloc(std::move(raw_alloc)) {}
+
+void* SimpleCachingAllocImpl::alloc(size_t size) {
+    size = get_aligned_power2(size, m_alignment);
+    auto&& addr = do_alloc(size, true);
+    auto ptr = addr.addr_ptr();
+    MGB_LOCK_GUARD(m_mutex);
+    m_allocated_blocks[ptr] = {addr.is_head, size};
+    m_used_size += size;
+    return ptr;
+}
+
+void SimpleCachingAllocImpl::free(void* ptr) {
+    MGB_LOCK_GUARD(m_mutex);
+    auto&& iter = m_allocated_blocks.find(ptr);
+    mgb_assert(iter != m_allocated_blocks.end(),
+            "releasing bad pointer: %p", ptr);
+    auto size = iter->second.size;
+    FreeBlock fb{MemAddr{iter->second.is_head, reinterpret_cast<size_t>(ptr)}, size};
+    m_allocated_blocks.erase(iter);
+    merge_free_unsafe(fb);
+    m_used_size -= size;
+}
+
+SimpleCachingAllocImpl::~SimpleCachingAllocImpl() {
+    for (auto&& ptr_size : m_alloc_from_raw) {
+        m_raw_alloc->free(ptr_size.first);
+    }
+}
+
+SimpleCachingAllocImpl::MemAddr SimpleCachingAllocImpl::alloc_from_parent(size_t size) {
+    void* ptr = m_raw_alloc->alloc(size);
+    m_alloc_from_raw[ptr] = size;
+    return {true, reinterpret_cast<size_t>(ptr)};
+}
+
+std::string SimpleCachingAllocImpl::get_name() const {
+    return "SimpleCachingAllocImpl";
+}
+
+size_t SimpleCachingAllocImpl::get_used_memory() {
+    return m_used_size;
+}
+
+FreeMemStat SimpleCachingAllocImpl::get_free_memory_dev() {
+    return get_free_memory();
+}
+
+// vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

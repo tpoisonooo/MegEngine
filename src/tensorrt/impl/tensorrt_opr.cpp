@@ -2,7 +2,7 @@
  * \file src/tensorrt/impl/tensorrt_opr.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -50,17 +50,6 @@ void TensorRTProfiler::print_layer_times() {
     printf("Total time: %4.3fms\n", total_time);
 }
 
-std::shared_ptr<json::Value> TensorRTProfiler::to_json() {
-    using namespace json;
-    auto prof_arr = Array::make();
-    for (auto&& rec : profile) {
-        auto&& item = Array::make();
-        item->add(String::make(rec.first));
-        item->add(Number::make(rec.second));
-        prof_arr->add(item);
-    }
-    return prof_arr;
-}
 #endif  // MGB_ENABLE_JSON
 
 
@@ -72,19 +61,24 @@ void TensorRTOpr::Logger::log(nvinfer1::ILogger::Severity severity,
                               const char* msg) {
     switch (severity) {
         case Severity::kINTERNAL_ERROR:
-            mgb_log_error("TRT_INTERNAL_ERROR: %s", msg);
+            mgb_log("TRT_INTERNAL_ERROR: %s", msg);
             return;
         case Severity::kERROR:
-            mgb_log_error("TRT_ERROR: %s", msg);
+            mgb_log("TRT_ERROR: %s", msg);
             return;
         case Severity::kWARNING:
-            mgb_log_warn("TRT_WARNING: %s", msg);
+            mgb_log("TRT_WARNING: %s", msg);
             return;
         case Severity::kINFO:
             mgb_log_debug("TRT_INFO: %s", msg);
             return;
+#if NV_TENSOR_RT_VERSION >= 6001
+        case Severity::kVERBOSE:
+            mgb_log_debug("TRT_VERBOSE: %s", msg);
+            return;
+#endif
         default:
-            mgb_log("TRT_UNKNOWN: %s", msg);
+            mgb_log_debug("TRT_UNKNOWN: %s", msg);
             return;
     }
 }
@@ -163,8 +157,8 @@ void TensorRTOpr::GpuAllocator::free(void* memory) {
 void TensorRTManager::exec(cg::SingleCNOperatorNodeBase* opr,
                            CompNode comp_node_check,
                            nvinfer1::ICudaEngine* engine,
-                           size_t batch) {
-    
+                           size_t batch, bool use_trt_profiler) {
+
     auto comp_node = opr->comp_node();
     // ICudaEngine is bound to the currently active device
     comp_node.activate();
@@ -175,22 +169,11 @@ void TensorRTManager::exec(cg::SingleCNOperatorNodeBase* opr,
                    comp_node_check.to_string().c_str(),
                    comp_node.to_string().c_str());
     }
-#if MGB_ENABLE_JSON
-    auto pf_holder_pair =
-            opr->owner_graph()
-                    ->options()
-                    .user_data.get_user_data<opr_profile::OprProfileHolder>();
-    if (m_has_profiler && !pf_holder_pair.second) {
-        m_context.reset();
-        m_has_profiler = false;
-    }
-#endif
     auto workspace_ptr = opr->output().back()->dev_tensor().raw_ptr();
     bool should_reinit_device_memory =
             !m_context || m_device_workspace_memory_ptr != workspace_ptr;
     if (!m_context) {
         m_context = {engine->createExecutionContextWithoutDeviceMemory(), {}};
-        m_has_profiler = false;
     }
     m_trt_iobuf.resize(opr->input().size() + opr->output().size() - 1);
     bool is_trt_opr = false;
@@ -230,11 +213,7 @@ void TensorRTManager::exec(cg::SingleCNOperatorNodeBase* opr,
 
     bool exec_success = false;
 
-#if MGB_ENABLE_JSON
-    if (!pf_holder_pair.second) {
-        mgb_assert(!m_has_profiler,
-                   "Invalid state of TensorRTRuntimeOpr: should not have "
-                   "profiler.");
+    if (!use_trt_profiler) {
 #if NV_TENSOR_RT_VERSION >= 6001
         if (is_trt_opr)
             exec_success = m_context->enqueueV2(m_trt_iobuf.data(),
@@ -250,7 +229,6 @@ void TensorRTManager::exec(cg::SingleCNOperatorNodeBase* opr,
     } else {
         TensorRTProfiler trt_profiler;
         m_context->setProfiler(&trt_profiler);
-        m_has_profiler = true;
         // TensorRT documentation stated that IExecutionContext->execute
         // "Synchronously execute inference on a batch", and it does not take a
         // cudaStream_t, we expect it do a device synchronize. But it seems like
@@ -267,24 +245,9 @@ void TensorRTManager::exec(cg::SingleCNOperatorNodeBase* opr,
         exec_success = m_context->execute(batch, m_trt_iobuf.data());
 #endif
         mgb_assert(exec_success, "trt execution failed: opr=%s", opr->cname());
-        pf_holder_pair.first[0]->id2object_map[opr] = trt_profiler.to_json();
         printf("TRT profile info of opr %s:\n", opr->name().c_str());
         trt_profiler.print_layer_times();
     }
-#else
-#if NV_TENSOR_RT_VERSION >= 6001
-    if (is_trt_opr)
-        exec_success = m_context->enqueueV2(m_trt_iobuf.data(),
-                                            env.cuda_env().stream, nullptr);
-    else
-        exec_success = m_context->enqueue(batch, m_trt_iobuf.data(),
-                                          env.cuda_env().stream, nullptr);
-#else
-    exec_success = m_context->enqueue(batch, m_trt_iobuf.data(),
-                                      env.cuda_env().stream, nullptr);
-#endif
-    mgb_assert(exec_success, "trt execution failed: opr=%s", opr->cname());
-#endif
 }
 
 /* ========================== TensorRTOpr ========================== */
@@ -357,7 +320,7 @@ SymbolVarArray TensorRTOpr::make(
         std::shared_ptr<nvinfer1::INetworkDefinition> network,
         TensorRTGraphFeatureBits feature_bits,
         std::shared_ptr<GpuAllocator> gpu_allocator, const SymbolVarArray& src,
-        std::shared_ptr<nvinfer1::ICudaEngine> engine,  
+        std::shared_ptr<nvinfer1::ICudaEngine> engine,
         const OperatorNodeConfig& config) {
     VarNodeArray var_node_array = cg::to_var_node_array(src);
     auto tensor_rt_opr = std::make_unique<TensorRTOpr>(
@@ -528,6 +491,7 @@ void TensorRTOpr::get_output_var_shape(const TensorShapeArray& inp_shape,
     }
 
     if (!engine_valid) {
+        comp_node().activate();
         // If a context created by a cuda engine, the context must be destroyed
         // before the corresponding cuda engine. Otherwise, a segmentfault will
         // occur.
@@ -571,6 +535,7 @@ void TensorRTOpr::build_engine_from_cache() {
             TensorRTEngineCache::make_key_from_trt_opr(this));
     if (!ret.valid())
         return;
+    comp_node().activate();
     auto engine = runtime->deserializeCudaEngine(
             reinterpret_cast<const void*>(ret->ptr), ret->size, nullptr);
     mgb_assert(engine, "failed to deserialize ICudaEngine");

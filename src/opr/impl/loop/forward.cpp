@@ -2,7 +2,7 @@
  * \file src/opr/impl/loop/forward.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -268,9 +268,11 @@ VarNode* Loop::grad(Loop &opr, size_t wrt_idx, const VarNodeArray &out_grad) {
     return gopr->get_grad_var(wrt_idx);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Loop) {
     return Loop::grad(const_cast<Loop&>(opr), wrt_idx, out_grad);
 }
+#endif
 
 cg::OperatorNodeBase::NodeProp* Loop::do_make_node_prop() const {
     auto prop = LoopImpl::do_make_node_prop();
@@ -368,6 +370,12 @@ cg::OperatorNodeBase::NodeProp* Loop::do_make_node_prop() const {
                         iv += contain_eq;
                         return std::max(iv, 0);
                     }
+                case DTypeEnum::Uint16:
+                    {
+                        auto iv = val.ptr<dt_uint16>()[0];
+                        iv += contain_eq;
+                        return std::max<int>(iv, 0);
+                    }
                 case DTypeEnum::Float32:
 #if !MEGDNN_DISABLE_FLOAT16
                 case DTypeEnum::Float16:
@@ -375,6 +383,18 @@ cg::OperatorNodeBase::NodeProp* Loop::do_make_node_prop() const {
                         float iv;
                         if (val.dtype().enumv() == DTypeEnum::Float16)
                             iv = val.ptr<dt_float16>()[0];
+                        else
+                            iv = val.ptr<float>()[0];
+                        auto inext = std::ceil(iv);
+                        if (iv == inext && contain_eq)
+                            ++ inext;
+                        return std::max<int>(inext, 0);
+                    }
+                case DTypeEnum::BFloat16:
+                    {
+                        float iv;
+                        if (val.dtype().enumv() == DTypeEnum::BFloat16)
+                            iv = val.ptr<dt_bfloat16>()[0];
                         else
                             iv = val.ptr<float>()[0];
                         auto inext = std::ceil(iv);
@@ -393,6 +413,8 @@ cg::OperatorNodeBase::NodeProp* Loop::do_make_node_prop() const {
                 case DTypeEnum::IntB4:
                     break;
                 case DTypeEnum::UintB4:
+                    break;
+                case DTypeEnum::Bool:
                     break;
 
                 #define cb(x) case DTypeEnum::x: break;

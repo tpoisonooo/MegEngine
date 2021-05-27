@@ -2,7 +2,7 @@
  * \file dnn/src/naive/warp_affine/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -259,7 +259,7 @@ void WarpAffineImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in mat,
 
         switch (src.layout.dtype.enumv()) {
             cb(dtype::Float32, float, float, 0);
-            MEGDNN_INC_FLOAT16(cb(dtype::Float16, dt_float16, dt_float16, 1));
+            DNN_INC_FLOAT16(cb(dtype::Float16, dt_float16, dt_float16, 1));
             cb(dtype::Int8, int8_t, float, 2);
             cb(dtype::QuantizedS8, int8_t, float, 3);
             cb(dtype::Uint8, uint8_t, float, 4);

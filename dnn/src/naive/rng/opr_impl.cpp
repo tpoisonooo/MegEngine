@@ -2,7 +2,7 @@
  * \file dnn/src/naive/rng/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -35,6 +35,15 @@ namespace {
         union U { uint16_t i; dt_float16 f; U(): f(0) {} } u;
         u.i = (0xF << 10) | (x >> 54);
         return dt_float16(2.f) - u.f;
+    }
+#endif
+
+#if !MEGDNN_DISABLE_FLOAT16
+    template<>
+    dt_bfloat16 uniform_int2float(uint64_t x) {
+        union U { uint16_t i; dt_bfloat16 f; U(): f(0) {} } u;
+        u.i = (0x7F << 7) | (x >> 57);
+        return dt_bfloat16(2.f) - u.f;
     }
 #endif
 

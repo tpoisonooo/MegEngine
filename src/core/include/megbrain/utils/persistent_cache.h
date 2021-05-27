@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/utils/persistent_cache.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -94,14 +94,13 @@ namespace mgb {
                         m_param{param}, m_param_size{param_size}
                     {
                     }
-
                     //! build a blob representation to be used as cache key
                     PersistentCache::Blob build_blob() const;
             };
 
             struct ResultEntry {
                 std::string algo;   //! identifier of the algorithm
-                bool reproducible;  //! whether algorithm is reproducible
+                uint32_t attribute;  //! algo attribute, e.g. reproducible
                 double time;        //! execution time in seconds
                 size_t workspace;   //! workspace in bytes
             };

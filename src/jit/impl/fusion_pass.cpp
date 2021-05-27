@@ -2,7 +2,7 @@
  * \file src/jit/impl/fusion_pass.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,6 +20,10 @@
 
 #if MGB_JIT
 
+#if MGB_JIT_MLIR
+#include "./mlir/ir/each_mode.h"
+#endif
+
 using namespace mgb;
 using namespace gopt;
 using namespace jit;
@@ -33,16 +37,16 @@ class JITFusionPass::Impl final {
     CompNode::UnorderedMap<size_t> m_cn2max_nr_input;
 
     SubGraph::Rewriter m_rewriter;
-    SmallVector<std::unique_ptr<InternalGraphGenrator>> m_igraph_gen_storage;
-    ThinHashMap<VarNode*, InternalGraphGenrator*> m_var2igraph_gen;
+    SmallVector<std::unique_ptr<InternalGraphGenerator>> m_igraph_gen_storage;
+    ThinHashMap<VarNode*, InternalGraphGenerator*> m_var2igraph_gen;
 
     //! map from var to its reader oprs and the corresponding dependency types
     ThinHashMap<VarNode*, SmallVector<std::pair<OperatorNodeBase*, DepType>>>
             m_var_readers;
     ThinHashSet<VarNode*> m_endpoint_set;
 
-    //! create a new InternalGraphGenrator rooted at given opr
-    InternalGraphGenrator* create_new_igraph_gen(OperatorNodeBase* opr);
+    //! create a new InternalGraphGenerator rooted at given opr
+    InternalGraphGenerator* create_new_igraph_gen(OperatorNodeBase* opr);
 
     //! process a single operator, maintaining m_var2igraph_gen
     void process_opr(OperatorNodeBase* opr);
@@ -51,11 +55,11 @@ class JITFusionPass::Impl final {
 
     //! check whether all oprs which depend on the var are in i_graph
     bool test_all_readers_in_the_graph(VarNode* var,
-                                       InternalGraphGenrator* i_graph);
+                                       InternalGraphGenerator* i_graph);
 
     //! check shape to determine whether the opr should be added to the internal
     //! graph
-    bool check_shape(cg::OperatorNodeBase* opr, InternalGraphGenrator* i_graph);
+    bool check_shape(cg::OperatorNodeBase* opr, InternalGraphGenerator* i_graph);
 
     //! use m_rewriter to update graph
     void update_graph();
@@ -155,7 +159,7 @@ void JITFusionPass::Impl::update_graph() {
 }
 
 bool JITFusionPass::Impl::test_all_readers_in_the_graph(
-        VarNode* var, InternalGraphGenrator* ig_gen) {
+        VarNode* var, InternalGraphGenerator* ig_gen) {
     for (auto&& reader : m_var_readers.at(var)) {
         if (reader.second & DepType::DEV_VALUE) {
             if (ig_gen->opr_set().count(reader.first) == 0) {
@@ -167,7 +171,7 @@ bool JITFusionPass::Impl::test_all_readers_in_the_graph(
 }
 
 bool JITFusionPass::Impl::check_shape(cg::OperatorNodeBase* opr,
-                                      InternalGraphGenrator* ig_gen) {
+                                      InternalGraphGenerator* ig_gen) {
     if (!cg::is_static_var_shape(opr->output(0))) {
         // currently we do not handle dynamic shape in JIT
         return false;
@@ -249,9 +253,9 @@ bool JITFusionPass::Impl::check_shape(cg::OperatorNodeBase* opr,
     }
 }
 
-InternalGraphGenrator* JITFusionPass::Impl::create_new_igraph_gen(
+InternalGraphGenerator* JITFusionPass::Impl::create_new_igraph_gen(
         OperatorNodeBase* opr) {
-    auto uptr = std::make_unique<InternalGraphGenrator>(opr);
+    auto uptr = std::make_unique<InternalGraphGenerator>(opr);
     auto ptr = uptr.get();
     m_igraph_gen_storage.emplace_back(std::move(uptr));
     m_var2igraph_gen[opr->output(0)] = ptr;
@@ -267,7 +271,7 @@ void JITFusionPass::Impl::process_opr(OperatorNodeBase* opr) {
     }
     // dimshuffle should not be an endpoint, because megbrain has lazy
     // dimshuffle machanism
-    InternalGraphGenrator* ig_gen = nullptr;
+    InternalGraphGenerator* ig_gen = nullptr;
     if (m_var2igraph_gen.count(opr->output(0)) == 0) {
         // because of the reverse traversal, when an operator is being
         // processed but not in m_var2igraph_gen, means it is a endpoint of a
@@ -287,8 +291,11 @@ void JITFusionPass::Impl::process_opr(OperatorNodeBase* opr) {
              cond_cn = opr->output(0)->comp_node() ==
                        ig_gen->output()->comp_node(),
              cond_shp = check_shape(opr, ig_gen),
-             cond_nr_inp = ig_gen->get_cnt_input_if_add(opr) <= max_nr_input;
-        if (cond_readers && cond_cn && cond_shp && cond_nr_inp) {
+             cond_nr_inp = ig_gen->get_cnt_input_if_add(opr) <= max_nr_input,
+             cond_mlir_specific = true;
+
+        if (cond_readers && cond_cn && cond_shp && cond_nr_inp &&
+            cond_mlir_specific) {
             ig_gen->add_opr(opr);
         } else {
             if (opr->same_type<opr::Dimshuffle>()) {
@@ -339,35 +346,79 @@ bool JITFusionPass::Impl::can_be_fused(cg::OperatorNodeBase* opr) const {
         return false;
     }
 
+    //! As MLIR backend has some contraints
+    const char* backend = MGB_GETENV("MGB_JIT_BACKEND");
+    if (!backend) {
+        backend = "DEFAULT";
+    }
     // float elemwise
     if (auto elem = gopt::try_cast_as_op<opr::Elemwise>(opr)) {
-        return ast_c::check_elem_mode(elem->param().mode) &&
+        bool ret = true;
+#if MGB_JIT_MLIR
+        if (!strcmp(backend, "MLIR")) {
+            switch (elem->param().mode) {
+#define cb(_, _mode)                 \
+    case opr::Elemwise::Mode::_mode: \
+        ret = true;                  \
+        break;
+
+                MLIR_MGB_FOREACH_ELEMWISE_MODE_UNARY(cb)
+                MLIR_MGB_FOREACH_ELEMWISE_MODE_BINARY(cb)
+                MLIR_MGB_FOREACH_ELEMWISE_MODE_TERNARY(cb)
+                default:
+                    ret = false;
+#undef cb
+            }
+#define FOREACH_ELEMWISE_SKIP_MODE(cb) cb(SIN)
+
+            //! FIXME mlir on cuda does't support sin currently.
+            if (opr->output(0)->comp_node().device_type() ==
+                CompNode::DeviceType::CUDA) {
+                switch (elem->param().mode) {
+#define cb(_mode)                    \
+    case opr::Elemwise::Mode::_mode: \
+        ret = false;                 \
+        break;
+
+                    FOREACH_ELEMWISE_SKIP_MODE(cb)
+                    default:
+                        break;
+#undef cb
+                }
+            }
+
+#undef FOREACH_ELEMWISE_SKIP_MODE
+        }
+#endif  // MGB_JIT_MLIR
+        return ret && ast_c::check_elem_mode(elem->param().mode) &&
                elem->output(0)->dtype().category() == DTypeCategory::FLOAT;
     }
 
-    if (opr->same_type<opr::PowC>()) {
-        return true;
-    }
+    if (strcmp(backend, "MLIR")) {
+        if (opr->same_type<opr::PowC>()) {
+            return true;
+        }
 
-    // float typecvt (e.g. used in f16 training)
-    if (opr->same_type<opr::TypeCvt>()) {
-        auto category = opr->input(0)->dtype().category();
-        if (category != opr->output(0)->dtype().category())
-            return false;
-        return category == DTypeCategory::FLOAT;
-    }
+        // float typecvt (e.g. used in f16 training)
+        if (opr->same_type<opr::TypeCvt>()) {
+            auto category = opr->input(0)->dtype().category();
+            if (category != opr->output(0)->dtype().category())
+                return false;
+            return category == DTypeCategory::FLOAT;
+        }
 
-    // float reduce
-    if ((m_feature_bits & JITFeatureBits::REDUCE) &&
-        opr->same_type<opr::Reduce>()) {
-        return opr->output(0)->dtype().category() == DTypeCategory::FLOAT;
-    }
+        // float reduce
+        if ((m_feature_bits & JITFeatureBits::REDUCE) &&
+            opr->same_type<opr::Reduce>()) {
+            return opr->output(0)->dtype().category() == DTypeCategory::FLOAT;
+        }
 
-    // dimshuffle
-    if ((m_feature_bits & JITFeatureBits::DIMSHUFFLE) &&
-        opr->same_type<opr::Dimshuffle>()) {
-        auto param = opr->cast_final_safe<opr::Dimshuffle>().param();
-        return param.pattern_len <= 4;
+        // dimshuffle
+        if ((m_feature_bits & JITFeatureBits::DIMSHUFFLE) &&
+            opr->same_type<opr::Dimshuffle>()) {
+            auto param = opr->cast_final_safe<opr::Dimshuffle>().param();
+            return param.pattern_len <= 4;
+        }
     }
 
     // existing JITExecutor

@@ -2,7 +2,7 @@
  * \file src/jit/impl/nvrtc/compiler_cuda.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -10,11 +10,13 @@
  */
 
 #include "./compiler_cuda.h"
+#include <cstdio>
 #include "./codegen_cuda.h"
 
 #include "megbrain/common.h"
 #include "megbrain/comp_node_env.h"
 #include "megbrain/jit/param_elem_visitor.h"
+#include "megbrain/jit/utils.h"
 #include "megbrain/utils/persistent_cache.h"
 #include "megbrain/utils/timer.h"
 
@@ -29,23 +31,6 @@ using namespace jit;
 namespace {
 std::string NVRTCCompile(const std::string& code, int cap_major,
                          int cap_minor) {
-    auto get_cuda_include_opts = []() {
-        auto cuda_path = getenv("CUDA_BIN_PATH");
-        if (cuda_path) {
-            std::string path1 = std::string("-I") + cuda_path + "/include";
-            std::string path2 = std::string("-I") + cuda_path + "/../include";
-            return std::vector<std::string>{path1, path2};
-        } else {
-            char cuda_lib_path[PATH_MAX];
-            auto handle = dlopen("libcudart.so",
-                                 RTLD_GLOBAL | RTLD_LAZY | RTLD_NOLOAD);
-            mgb_assert(handle != nullptr, "%s", dlerror());
-            mgb_assert(dlinfo(handle, RTLD_DI_ORIGIN, &cuda_lib_path) != -1,
-                       "%s", dlerror());
-            return std::vector<std::string>{std::string("-I") + cuda_lib_path +
-                                            "/../include"};
-        }
-    };
     static std::vector<std::string> cuda_include_opts = get_cuda_include_opts();
 
     auto arch_opt =
@@ -189,12 +174,6 @@ void setup_and_launch(const JITExecutor* fusion_opr, CUfunction func,
                                      env.cuda_env().stream, exec_args, 0));
 }
 }  // namespace
-void mgb::jit::_on_cuda_cu_error(const char* expr, CUresult cu_res,
-                                 const char* msg, const char* file,
-                                 const char* func, int line) {
-    mgb_throw(CudaError, "cuda error %d: %s (%s at %s:%s:%d)", int(cu_res), msg,
-              expr, file, func, line);
-}
 
 void mgb::jit::_on_nvrtc_error(const char* expr, nvrtcResult nvrtc_res,
                                const char* file, const char* func, int line) {

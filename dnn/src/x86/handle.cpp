@@ -2,7 +2,7 @@
  * \file dnn/src/x86/handle.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,7 +32,7 @@
 #include "src/x86/warp_affine/opr_impl.h"
 #include "src/x86/warp_perspective/opr_impl.h"
 
-#if defined(MEGDNN_X86_WITH_MKL)
+#if MEGDNN_X86_WITH_MKL
 
 #include <mkl.h>
 #define STR_HELPER(x) #x
@@ -57,11 +57,11 @@ HandleImpl::HandleImpl(megcoreComputingHandle_t computing_handle,
                        HandleType type)
         : fallback::HandleImpl::HandleImpl(computing_handle, type) {
     disable_denorm();
-#if defined(MEGDNN_X86_WITH_MKL)
+#if MEGDNN_X86_WITH_MKL
     vmlSetMode(VML_LA | VML_FTZDAZ_ON | VML_ERRMODE_ERRNO);
 #endif
 
-#if defined(MEGDNN_X86_WITH_MKL_DNN)
+#if MEGDNN_X86_WITH_MKL_DNN
     m_mkldnn_engine = dnnl::engine(dnnl::engine::kind::cpu, 0);
     m_mkldnn_stream = dnnl::stream(m_mkldnn_engine);
 #endif

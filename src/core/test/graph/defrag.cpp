@@ -2,7 +2,7 @@
  * \file src/core/test/graph/defrag.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -49,8 +49,8 @@ void run_graph(size_t mem_reserved, bool enable_defrag) {
     graph->options().var_sanity_check_first_run = false;
 
     auto x0 = opr::SharedDeviceTensor::make(*graph, dev_x).rename("x0"),
-         // x1 has rdonly fwd
-         x1 = opr::Concat::make({x0, x0}, 0).reshape({size*2}).rename("x1"),
+         // x1 has rdonly fwd chain
+         x1 = opr::Concat::make({x0, x0}, 0).add_axis(0).reshape({size*2}).rename("x1"),
          x2 = opr::Concat::make({x1, x0}, 0).rename("x2"),
          x3 = opr::Concat::make({x2, x0}, 0).rename("x3"),
          x4 = opr::Concat::make({x3, x0}, 0).rename("x4"),

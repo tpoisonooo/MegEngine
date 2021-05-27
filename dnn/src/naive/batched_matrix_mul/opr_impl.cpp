@@ -2,7 +2,7 @@
  * \file dnn/src/naive/batched_matrix_mul/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -64,9 +64,34 @@ void BatchedMatrixMulForwardImpl::exec(_megdnn_tensor_in A,
 
 }
 
-} // namespace naive
-} // namespace megdnn
+std::vector<BatchedMatrixMulForward::Algorithm*>
+BatchedMatrixMulForwardImpl::get_all_algorithms(const TensorLayout& /*A*/,
+                                                const TensorLayout& /*B*/,
+                                                const TensorLayout& /*C*/) {
+    return {static_cast<HandleImpl*>(handle())
+                    ->default_batched_matmul_fwd_algo()};
+}
+
+BatchedMatrixMulForward::Algorithm*
+BatchedMatrixMulForwardImpl::get_algorithm_heuristic(
+        const TensorLayout& /*A*/, const TensorLayout& /*B*/,
+        const TensorLayout& /*C*/, size_t /*workspace_limit_in_bytes*/,
+        const AlgoAttribute& /*positive_attr*/,
+        const AlgoAttribute& /*negative_attr*/) {
+    return static_cast<HandleImpl*>(handle())
+            ->default_batched_matmul_fwd_algo();
+}
+
+BatchedMatrixMulForward::Algorithm*
+BatchedMatrixMulForwardImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret = static_cast<HandleImpl*>(handle())
+                             ->default_batched_matmul_fwd_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
+}
+
+}  // namespace naive
+}  // namespace megdnn
 
 // vim: syntax=cpp.doxygen
-
-

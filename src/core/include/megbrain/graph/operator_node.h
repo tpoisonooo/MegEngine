@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/operator_node.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,9 +16,9 @@
 #include "megbrain/graph/symbol_var.h"
 
 #include "megbrain/utils/hashable.h"
-#include "megbrain/utils/enum_class_bit.h"
 #include "megbrain/utils/thin/hash_table.h"
 #include "megbrain/utils/small_vector.h"
+#include "megbrain/opr/param_defs.h"
 
 #include <type_traits>
 
@@ -69,25 +69,41 @@ class OperatorNodeConfig final: public Hashable {
             return *this;
         }
 
+        const Maybe<std::string>& name() const {
+            return m_name;
+        }
+
         /*!
-         * \brief set instance id
+         * \brief update instance ID
          *
-         * Instance id is used to differentiate multiple instances of the same
-         * operator (with same inputs, params and config), so the deduplication
-         * system can be bypassed.
+         * Instance ID is a hashed value used to differentiate multiple
+         * instances of the same operator (with same inputs, params and
+         * config), so the deduplication system can be bypassed.
          *
-         * Currently only used for sublinear memory optimization.
+         * This method always updates underlying instance_id.
          */
-        OperatorNodeConfig& instance_id(const void *id) {
-            m_instance_id = id;
+        template<typename T>
+        OperatorNodeConfig& update_instance_id(const T& p) {
+            static_assert(std::is_pointer<T>::value,
+                "update_instance_id can only accept a pointer");
+            m_instance_id_hashed = hash_pair_combine(
+                m_instance_id_hashed, mgb::hash(p));
             return *this;
         }
 
         /*!
-         * \brief get current instance ID
+         * \brief reset instance ID to the initial value
          */
-        const void* instance_id() const {
-            return m_instance_id;
+        OperatorNodeConfig& reset_instance_id() {
+            m_instance_id_hashed = sm_initial_instance_id;
+            return *this;
+        }
+
+        /*!
+         * \brief get current hashed instance ID
+         */
+        size_t instance_id() const {
+            return m_instance_id_hashed;
         }
 
         /*!
@@ -133,9 +149,10 @@ class OperatorNodeConfig final: public Hashable {
         bool is_same_st(const Hashable &rhs) const override;
 
     private:
+        static constexpr size_t sm_initial_instance_id = 1333331;
         Maybe<std::string> m_name;
         CompNodeArray m_comp_node;
-        const void *m_instance_id = nullptr;
+        size_t m_instance_id_hashed = sm_initial_instance_id;
         DType m_output_dtype;
 };
 
@@ -1026,5 +1043,11 @@ MGB_DEFINE_CLS_WITH_SUPER(_name final, _base ,##__VA_ARGS__) \
 
 } // namespace cg
 } // namespace mgb
+
+namespace megdnn {
+namespace param {
+MGB_DEF_ENUM_CLASS_BIT_OPR(ExecutionPolicy::Strategy)
+}
+}  // namespace megdnn
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

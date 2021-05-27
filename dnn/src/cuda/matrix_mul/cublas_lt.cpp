@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/matrix_mul/cublas_lt.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,10 +18,11 @@ using namespace megdnn;
 using namespace cuda;
 
 bool MatrixMulForwardImpl::AlgoCuBlasLt::is_available(
-        const SizeArgs &args) const {
+        const SizeArgs& args) const {
     if (args.opr->param().format != param::MatrixMul::Format::DEFAULT)
         return false;
-    if (args.layout_a.dtype.enumv() == DTypeEnum::Quantized4Asymm)
+    if (args.layout_a.dtype.enumv() == DTypeEnum::Quantized4Asymm ||
+        args.layout_a.dtype.enumv() == DTypeEnum::BFloat16)
         return false;
     CUBLASLTMatmulDesc::SizeArgs ltArgs(args);
     return CUBLASLTMatmulDesc(ltArgs).is_available(ltArgs, INT_MAX);
@@ -127,7 +128,22 @@ void MatrixMulForwardImpl::AlgoCuBlasLt::exec(const ExecArgs& args) const {
             stream));
         cublas_check(cublasLtMatrixTransformDescDestroy(transform_desc));
     };
-    switch(desc.dt_compute) {
+#if CUDA_VERSION >= 11000
+    switch (desc.dt_compute) {
+        case CUBLAS_COMPUTE_16F:
+            hgemm();
+            break;
+        case CUBLAS_COMPUTE_32F:
+            sgemm();
+            break;
+        case CUBLAS_COMPUTE_32I:
+            igemm();
+            break;
+        default:
+            megdnn_throw("compute type must be float16/float32/int32");
+    }
+#else
+    switch (desc.dt_compute) {
         case CUDA_R_16F:
             hgemm();
             break;
@@ -138,8 +154,9 @@ void MatrixMulForwardImpl::AlgoCuBlasLt::exec(const ExecArgs& args) const {
             igemm();
             break;
         default:
-            megdnn_throw(megdnn_mangle("compute type must be float16/float32/int32"));
+            megdnn_throw("compute type must be float16/float32/int32");
     }
+#endif
 }
 #endif
 // vim: syntax=cpp.doxygen

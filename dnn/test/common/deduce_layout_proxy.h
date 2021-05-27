@@ -2,7 +2,7 @@
  * \file dnn/test/common/deduce_layout_proxy.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -56,6 +56,16 @@ struct DeduceLayoutProxy<Opr, 5, true> {
         opr->deduce_layout(layouts[0], layouts[1], layouts[2], layouts[3],
                            layouts[4]);
     }
+};
+
+template <typename Opr>
+struct DeduceLayoutProxy<Opr, 5, false> {
+    static void deduce_layout(Opr*, TensorLayoutArray&) {}
+};
+
+template <typename Opr>
+struct DeduceLayoutProxy<Opr, 6, false> {
+    static void deduce_layout(Opr*, TensorLayoutArray&) {}
 };
 
 template <typename Opr>

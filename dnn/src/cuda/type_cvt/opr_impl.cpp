@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/type_cvt/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -73,6 +73,7 @@ void exec_src_normal(const TensorND& dst, const TensorND& src,
         return;                                                    \
     }
             MEGDNN_FOREACH_COMPUTING_DTYPE(cb);
+            cb(::megdnn::dtype::Bool);
 #undef cb
             default:
                 megdnn_assert_internal(0);
@@ -108,6 +109,7 @@ void TypeCvtImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_out dst) {
         return;                                 \
     }
             MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
+            cb(::megdnn::dtype::Bool)
 #undef cb
             default:
                 megdnn_assert_internal(0);

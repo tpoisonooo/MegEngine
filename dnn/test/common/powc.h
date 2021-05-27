@@ -2,7 +2,7 @@
  * \file dnn/test/common/powc.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -12,12 +12,11 @@
 
 #include "megdnn/handle.h"
 #include "megdnn/oprs/general.h"
-#include "test/common/opr_proxy.h"
+
+#include "src/common/opr_trait.h"
 
 namespace megdnn {
 namespace test {
-
-DEF(PowC, 2, false, true);
 
 void run_powc_test(Handle* handle, DType dtype);
 

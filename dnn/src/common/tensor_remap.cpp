@@ -2,7 +2,7 @@
  * \file dnn/src/common/tensor_remap.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,9 +32,11 @@ void IndexingRemapBase::check_layout_fwd(const TensorLayout &src,
     }
     megdnn_assert(map.shape[dst.ndim] == src.ndim, "%s", errmsg_c);
 
-    megdnn_assert(src.dtype == dtype::Float32());
+    megdnn_assert(dst.dtype == src.dtype);
+    megdnn_assert(src.dtype == dtype::Float32() || src.dtype == dtype::Int32(),
+                  "indexing remap only support float32/int32, got %s",
+                  src.dtype.name());
     megdnn_assert(map.dtype == dtype::Int32());
-    megdnn_assert(dst.dtype == dtype::Float32());
 }
 
 void IndexingRemapForward::deduce_layout(const TensorLayout &src,

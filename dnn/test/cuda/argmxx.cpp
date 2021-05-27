@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/argmxx.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,15 +24,16 @@ class ArgmxxRNG final: public RNG {
         void gen(const TensorND &tensor) override {
             auto offset = tensor.layout.span().low_elem;
             auto nr_elems = tensor.layout.span().dist_elem();
-#define cb(DType) \
-            if (tensor.layout.dtype == DType()) { \
-                using ctype = typename DTypeTrait<DType>::ctype; \
-                auto ptr = tensor.ptr<ctype>(); \
-                for (size_t i = 0; i < nr_elems; ++i) { \
-                    ptr[offset+i] = i; \
-                } \
-                std::random_shuffle(ptr + offset, ptr + offset + nr_elems); \
-            }
+
+#define cb(DType)                                             \
+    if (tensor.layout.dtype == DType()) {                     \
+        using ctype = typename DTypeTrait<DType>::ctype;      \
+        auto ptr = tensor.ptr<ctype>();                       \
+        for (size_t i = 0; i < nr_elems; ++i) {               \
+            ptr[offset + i] = i;                              \
+        }                                                     \
+        COMPAT_RANDOM(ptr + offset, ptr + offset + nr_elems); \
+    }
             MEGDNN_FOREACH_COMPUTING_DTYPE(cb);
 #undef cb
         }

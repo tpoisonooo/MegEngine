@@ -2,7 +2,7 @@
  * \file dnn/test/common/warp_perspective.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,7 +22,11 @@ namespace test {
 struct WarpPerspectiveMatIdxProxy {
     WorkspaceWrapper W;
     static void deduce_layout(WarpPerspective*, TensorLayoutArray&);
+    static void deduce_layout(WarpPerspectiveBackwardData*, TensorLayoutArray&);
+    static void deduce_layout(WarpPerspectiveBackwardMat*, TensorLayoutArray&);
     void exec(WarpPerspective* opr, const TensorNDArray& tensors);
+    void exec(WarpPerspectiveBackwardData* opr, const TensorNDArray& tensors);
+    void exec(WarpPerspectiveBackwardMat* opr, const TensorNDArray& tensors);
 };
 
 class WarpPerspectiveMatRNG final : public IIDRNG {
@@ -57,10 +61,11 @@ struct TestArg {
     param::WarpPerspective param;
     TensorShape src;
     TensorShape trans;
+	TensorShape mat_idx;
     TensorShape dst;
-    TestArg(param::WarpPerspective param_, TensorShape src_, TensorShape trans_,
+    TestArg(param::WarpPerspective param_, TensorShape src_, TensorShape trans_, TensorShape mat_idx_,
             TensorShape dst_)
-            : param(param_), src(src_), trans(trans_), dst(dst_) {}
+            : param(param_), src(src_), trans(trans_), mat_idx(mat_idx_), dst(dst_) {}
 };
 
 //! Test args for the WarpPerspective with format NHWC

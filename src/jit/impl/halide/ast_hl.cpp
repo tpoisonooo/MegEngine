@@ -2,7 +2,7 @@
  * \file src/jit/impl/halide/ast_hl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -193,6 +193,14 @@ Halide::Expr dispatch_elemwise_mode(
             return Halide::round(inp(0));
         case Mode::RMULH:
             return (inp(0) * inp(1)) >> Halide::popcount(inp(0));
+        case Mode::NOT:
+            return cv(1) - cv(inp(0) != cv(0));
+        case Mode::AND:
+            return cv(inp(0) != cv(0)) * cv(inp(1) != cv(0));
+        case Mode::OR:
+            return cv(cv(inp(0) != cv(0)) + cv(inp(1) != cv(0)) > cv(0));
+        case Mode::XOR:
+            return cv(cv(inp(0) != cv(0)) + cv(inp(1) != cv(0)) == cv(1));
         default:
             mgb_throw(InternalError, "unsupported Elemwise mode(%d)",
                       static_cast<int>(mode));

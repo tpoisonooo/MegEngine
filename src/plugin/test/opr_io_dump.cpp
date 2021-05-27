@@ -2,7 +2,7 @@
  * \file src/plugin/test/opr_io_dump.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -118,6 +118,8 @@ void run_test(const PluginMaker& plugin_maker,
               const ResultChecker& result_checker) {
     for (size_t i = 1; i < CompNode::NR_DEVICE_TYPE; ++i) {
         auto type = static_cast<CompNode::DeviceType>(i);
+        if (!check_device_type_avaiable(type))
+            continue;
         if (CompNode::get_device_count(type)) {
             auto cn = CompNode::load({type, -1, 0});
             if (cn.contain_flag(CompNode::Flag::SUPPORT_RECORDER)) {
@@ -145,7 +147,7 @@ std::vector<std::string> getlines(std::istream& inp, size_t skip_head = 0) {
 }
 
 }  // anonymous namespace
-
+#if MGB_VERBOSE_TYPEINFO_NAME
 TEST(TestOprIODump, Text) {
     auto fname_base = output_file("test_opr_iodump");
     std::array<std::string, 3> fnames;
@@ -178,6 +180,26 @@ TEST(TestOprIODump, Text) {
 
     run_test(make_plugin, check_result);
 }
+#endif
+
+TEST(TestOprIODump, StdErr) {
+    MGB_MARK_USED_VAR(EXPECTED_TEXT_OUT_REC);
+    HostTensorGenerator<> gen;
+    auto host_x = gen({5});
+    auto host_y = gen({5});
+
+    auto graph = ComputingGraph::make();
+    std::shared_ptr<FILE> sp(stdout, [](FILE*){});
+    auto plugin = std::make_unique<TextOprIODump>(graph.get(), sp);
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x);
+    auto y = opr::Host2DeviceCopy::make(*graph, host_y);
+    auto z = x + y;
+
+    HostTensorND host_z;
+    auto func = graph->compile({make_callback_copy(z, host_z)});
+    func->execute();
+}
 
 TEST(TestOprIODump, Binary) {
     auto fname = output_file("");
@@ -188,4 +210,3 @@ TEST(TestOprIODump, Binary) {
 }
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
-

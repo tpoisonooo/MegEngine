@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/matrix_mul.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -51,7 +51,8 @@ TEST_F(CUDA, MATRIX_MUL_QUANTIZED4x4x32) {
     if (cuda::current_device_prop().major < 7 ||
         (cuda::current_device_prop().major == 7 &&
          cuda::current_device_prop().minor < 5)) {
-        printf("Skip CUDA.MATRIX_MUL_QUANTIZED4x4x32 test as current device doesn't support\n");
+        printf("Skip CUDA.MATRIX_MUL_QUANTIZED4x4x32 test as current device "
+               "doesn't support\n");
         return;
     }
     Checker<MatrixMul> checker(handle_cuda(), false);
@@ -129,7 +130,7 @@ TEST_F(CUDA, PEAK_BENCHMARK_MATRIX_MUL_QUANTIZED4x4x32) {
 #endif
 
 TEST_F(CUDA, MATRIX_MUL_INT8x8x32_WITH_SPETIAL_STRIDES) {
-    if (cuda::current_device_prop().major < 6) {
+    if (!cuda::is_compute_capability_required(6, 1)) {
         printf("Skip CUDA.MATRIX_MUL test as current device doesn't support\n");
         return;
     }
@@ -151,7 +152,7 @@ TEST_F(CUDA, MATRIX_MUL_INT8x8x32_WITH_SPETIAL_STRIDES) {
 }
 
 TEST_F(CUDA, MATRIX_MUL_INT8x8x32_NAIVE) {
-    if (cuda::current_device_prop().major < 6) {
+    if (!cuda::is_compute_capability_required(6, 1)) {
         printf("Skip CUDA.MATRIX_MUL test as current device doesn't support\n");
         return;
     }
@@ -184,8 +185,47 @@ TEST_F(CUDA, MATRIX_MUL_INT8x8x32_NAIVE) {
     }
 }
 
-TEST_F(CUDA, MATRIX_MUL)
-{
+TEST_F(CUDA, MATRIX_MUL_FLOAT_NAIVE) {
+    Checker<MatrixMul> checker(handle_cuda());
+    checker.set_before_exec_callback(AlgoChecker<MatrixMulForward>("NAIVE"));
+    using Param = MatrixMul::Param;
+    size_t m = 12, n = 16, k = 20;
+
+    std::vector<DType> dtype_array;
+    dtype_array.push_back(dtype::Float32());
+    dtype_array.push_back(dtype::Float16());
+
+    for (DType dtype : dtype_array) {
+        for (unsigned mask = 0; mask < 4; ++mask) {
+            Param param;
+            param.transposeA = mask & 1;
+            param.transposeB = mask & 2;
+            DType stype = dtype;
+            TensorShape A, B;
+            if (param.transposeA)
+                A = TensorShape{k, m};
+            else
+                A = TensorShape{m, k};
+            if (param.transposeB)
+                B = TensorShape{n, k};
+            else
+                B = TensorShape{k, n};
+            if (dtype == dtype::Float16()) {
+                param.compute_mode = param::MatrixMul::ComputeMode::FLOAT32;
+            }
+            checker.set_param(param)
+                    .set_dtype(0, stype)
+                    .set_dtype(1, stype)
+                    .set_dtype(2, dtype)
+                    .set_epsilon(dtype == dtype::Float16()
+                                         ? 5e-2
+                                         : 5e-3)
+                    .execs({A, B, {}});
+        }
+    }
+}
+
+TEST_F(CUDA, MATRIX_MUL) {
     if (cuda::current_device_prop().major < 6) {
         printf("Skip CUDA.MATRIX_MUL test as current device doesn't support\n");
         return;
@@ -193,8 +233,16 @@ TEST_F(CUDA, MATRIX_MUL)
     Checker<MatrixMul> checker(handle_cuda());
     using Param = MatrixMul::Param;
     size_t m = 12, n = 16, k = 20;
-    for (DType dtype: std::array<DType, 3>{
-            {dtype::Float32(), dtype::Float16(), dtype::Int32()}}) {
+
+    bool is_int_available = cuda::is_compute_capability_required(6, 1);
+    std::vector<DType> dtype_array;
+    dtype_array.push_back(dtype::Float32());
+    dtype_array.push_back(dtype::Float16());
+    dtype_array.push_back(dtype::BFloat16());
+    if (is_int_available)
+        dtype_array.push_back(dtype::Int32());
+
+    for (DType dtype : dtype_array) {
         for (unsigned mask = 0; mask < 4; ++mask) {
             Param param;
             param.transposeA = mask & 1;
@@ -209,12 +257,25 @@ TEST_F(CUDA, MATRIX_MUL)
                 B = TensorShape{n, k};
             else
                 B = TensorShape{k, n};
-            checker.set_param(param).
-                set_dtype(0, stype).
-                set_dtype(1, stype).
-                set_dtype(2, dtype).
-                set_epsilon(dtype == dtype::Float16() ? 5e-2 : 5e-3).
-                execs({A, B, {}});
+            if (dtype == dtype::BFloat16()) {
+                param.compute_mode = param::MatrixMul::ComputeMode::FLOAT32;
+                checker.set_before_exec_callback(
+                        AlgoChecker<MatrixMulForward>(ExecutionPolicyAlgoName{
+                                "MATMUL_BFLOAT16", {{"CUBLAS", {}}}}));
+            }
+            checker.set_param(param)
+                    .set_dtype(0, stype)
+                    .set_dtype(1, stype)
+                    .set_dtype(2, dtype)
+                    .set_epsilon(dtype == dtype::Float16() ||
+                                                 dtype == dtype::BFloat16()
+                                         ? 5e-2
+                                         : 5e-3)
+                    .execs({A, B, {}});
+            if (dtype == dtype::BFloat16()) {
+                checker.reset_before_exec_callback();
+                checker.opr()->execution_policy() = {};
+            }
         }
     }
 
@@ -237,19 +298,19 @@ TEST_F(CUDA, MATRIX_MUL)
             BS = TensorShape{k, n};
         CS = TensorShape{m, n};
         TensorLayout AL, BL, CL;
-        if (arg.A_stride == 0) {
+        if (arg.A_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             AL = TensorLayout(AS, dtype::Float32());
         } else {
             AL = TensorLayout(AS, {ptrdiff_t(arg.A_stride), 1},
                               dtype::Float32());
         }
-        if (arg.B_stride == 0) {
+        if (arg.B_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             BL = TensorLayout(BS, dtype::Float32());
         } else {
             BL = TensorLayout(BS, {ptrdiff_t(arg.B_stride), 1},
                               dtype::Float32());
         }
-        if (arg.C_stride == 0) {
+        if (arg.C_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             CL = TensorLayout(CS, dtype::Float32());
         } else {
             CL = TensorLayout(CS, {ptrdiff_t(arg.C_stride), 1},
@@ -265,8 +326,9 @@ TEST_F(CUDA, MATRIX_MUL_CUBLASLT)
     NormalRNG normal_rng;
     Checker<MatrixMul> checker(handle_cuda());
     checker.set_rng(0, &normal_rng)
-           .set_rng(1, &normal_rng)
-           .set_before_exec_callback(AlgoChecker<MatrixMulForward>("CUBLAS_LT"));
+            .set_rng(1, &normal_rng)
+            .set_before_exec_callback(
+                    AlgoChecker<MatrixMulForward>("CUBLAS_LT"));
     using Param = MatrixMul::Param;
     size_t m = 32, n = 32, k = 32;
     // test Int8 matmul
@@ -330,19 +392,19 @@ TEST_F(CUDA, MATRIX_MUL_CUBLASLT)
             BS = TensorShape{k, n};
         CS = TensorShape{m, n};
         TensorLayout AL, BL, CL;
-        if (arg.A_stride == 0) {
+        if (arg.A_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             AL = TensorLayout(AS, dtype::Float32());
         } else {
             AL = TensorLayout(AS, {ptrdiff_t(arg.A_stride), 1},
                               dtype::Float32());
         }
-        if (arg.B_stride == 0) {
+        if (arg.B_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             BL = TensorLayout(BS, dtype::Float32());
         } else {
             BL = TensorLayout(BS, {ptrdiff_t(arg.B_stride), 1},
                               dtype::Float32());
         }
-        if (arg.C_stride == 0) {
+        if (arg.C_stride == matrix_mul::TestArg::UNSET_STRIDE_VAL) {
             CL = TensorLayout(CS, dtype::Float32());
         } else {
             CL = TensorLayout(CS, {ptrdiff_t(arg.C_stride), 1},

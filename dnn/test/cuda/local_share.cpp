@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/local_share.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -778,7 +778,7 @@ TEST_F(CUDA, BENCHMARK_LOCAL_SHARE_BWD_FILTER) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({src, diff, grad}) / RUNS;
 
         printf("src=%s, diff=%s, grad=%s, float32: %.2fms "
@@ -856,7 +856,7 @@ TEST_F(CUDA, BENCHMARK_GROUP_LOCAL_SHARE_FORWARD) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({src, filter, {}}) / RUNS;
         ;
 
@@ -915,7 +915,7 @@ TEST_F(CUDA, BENCHMARK_LOCAL_SHARE_BWD_DATA) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({filter, diff, grad}) / RUNS;
 
         printf("filter=%s, diff=%s, grad=%s, float32: %.2fms "
@@ -1002,11 +1002,11 @@ TEST_F(CUDA, BENCHMARK_LOCAL_SHARE_FORWARD_BOTTLENECK) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher_conv.set_param(conv_param);
-        bencher_conv.proxy()->target_algo = nullptr;
+        bencher_conv.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms_conv =
                 bencher_conv.execs({src, {oc, ic, f, f}, {}}) / RUNS;
 
@@ -1094,11 +1094,11 @@ TEST_F(CUDA, BENCHMARK_LOCAL_SHARE_FORWARD_FROM_RESEARCH) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher_conv.set_param(conv_param);
-        bencher_conv.proxy()->target_algo = nullptr;
+        bencher_conv.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms_conv =
                 bencher_conv.execs({src, {oc, ic, f, f}, {}}) / RUNS;
 
@@ -1177,11 +1177,11 @@ TEST_F(CUDA, BENCHMARK_LOCAL_SHARE_FORWARD) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher_conv.set_param(conv_param);
-        bencher_conv.proxy()->target_algo = nullptr;
+        bencher_conv.proxy()->target_execution_policy.algo.reset();
         auto time_in_ms_conv =
                 bencher_conv.execs({src, {oc, ic, f, f}, {}}) / RUNS;
 

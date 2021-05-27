@@ -2,11 +2,12 @@
  * \file dnn/src/naive/pooling/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #include "src/naive/pooling/opr_impl.h"
 
@@ -165,6 +166,13 @@ struct NCHW88IdxGetter {
                           size_t C, size_t H, size_t W) {
         size_t id =
                 (((n * (C >> 3) + (c >> 3)) * H + h) * W + w) * 8 + (c & 0b111);
+        return id;
+    }
+};
+struct NCHW44IdxGetter {
+    static size_t get_idx(size_t n, size_t c, size_t h, size_t w, size_t,
+                          size_t C, size_t H, size_t W) {
+        size_t id = (((n * (C >> 2) + (c >> 2)) * H + h) * W + w) * 4 + (c % 4);
         return id;
     }
 };
@@ -362,63 +370,67 @@ void pooling_backward_max_impl(const ctype* __restrict src,
     }
 }
 
-}  // anonymous namespace
+}  // namespace
 
 namespace megdnn {
 namespace naive {
 
 void PoolingForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_out dst,
                               _megdnn_workspace workspace) {
-    MIDOUT_BEGIN(megdnn_naive_pooling) {
-        check_exec(src.layout, dst.layout, workspace.size);
-        size_t c_pos, spatial_pos, batch_pos = 0;
-        if (param().format == Param::Format::NCHW ||
-            param().format == Param::Format::NCHW4 ||
-            param().format == Param::Format::NCHW88 ||
-            param().format == Param::Format::NCHW32) {
-            c_pos = 1;
-            spatial_pos = 2;
-        } else if (param().format == Param::Format::NHWC) {
-            c_pos = 3;
-            spatial_pos = 1;
-        } else if (param().format == Param::Format::CHWN4) {
-            c_pos = 0;
-            spatial_pos = 1;
-            batch_pos = 3;
-        } else {
-            megdnn_assert(param().format == Param::Format::NHWCD4);
-            c_pos = 2;
-            spatial_pos = 1;
-        }
-        size_t N = src.layout.shape[batch_pos], C = src.layout.shape[c_pos],
-               IH = src.layout.shape[spatial_pos + 0],
-               IW = src.layout.shape[spatial_pos + 1];
-        size_t OH = dst.layout.shape[spatial_pos + 0],
-               OW = dst.layout.shape[spatial_pos + 1];
-        if (param().format == Param::Format::NHWCD4) {
-            C *= 4;
-            IW = src.layout.shape[spatial_pos + 2];
-            OW = dst.layout.shape[spatial_pos + 2];
-        }
-        if (param().format == Param::Format::NCHW4 ||
-            param().format == Param::Format::CHWN4) {
-            C *= 4;
-        }
-        if (param().format == Param::Format::NCHW88) {
-            C *= 8;
-        }
-        if (param().format == Param::Format::NCHW32) {
-            C *= 32;
-        }
-        size_t PH = param().pad_h, PW = param().pad_w;
-        size_t FH = param().window_h, FW = param().window_w;
-        size_t SH = param().stride_h, SW = param().stride_w;
-#define DISPATCH_WITH_POOLER_AND_IDX_GETTER(Pooler, IdxGetter)              \
-    MEGDNN_DISPATCH_CPU_KERN(                                               \
-            static_cast<naive::HandleImpl*>(handle()),                      \
-            pooling_forward_impl<Pooler MEGDNN_COMMA IdxGetter>(            \
-                    sptr, dptr, src.layout.dtype, N, C, IH, IW, OH, OW, PH, \
-                    PW, SH, SW, FH, FW));
+    check_exec(src.layout, dst.layout, workspace.size);
+    size_t c_pos, spatial_pos, batch_pos = 0;
+    if (param().format == Param::Format::NCHW ||
+        param().format == Param::Format::NCHW4 ||
+        param().format == Param::Format::NCHW88 ||
+        param().format == Param::Format::NCHW44 ||
+        param().format == Param::Format::NCHW32) {
+        c_pos = 1;
+        spatial_pos = 2;
+    } else if (param().format == Param::Format::NHWC) {
+        c_pos = 3;
+        spatial_pos = 1;
+    } else if (param().format == Param::Format::CHWN4) {
+        c_pos = 0;
+        spatial_pos = 1;
+        batch_pos = 3;
+    } else {
+        megdnn_assert(param().format == Param::Format::NHWCD4);
+        c_pos = 2;
+        spatial_pos = 1;
+    }
+    size_t N = src.layout.shape[batch_pos], C = src.layout.shape[c_pos],
+           IH = src.layout.shape[spatial_pos + 0],
+           IW = src.layout.shape[spatial_pos + 1];
+    size_t OH = dst.layout.shape[spatial_pos + 0],
+           OW = dst.layout.shape[spatial_pos + 1];
+    if (param().format == Param::Format::NHWCD4) {
+        C *= 4;
+        IW = src.layout.shape[spatial_pos + 2];
+        OW = dst.layout.shape[spatial_pos + 2];
+    }
+    if (param().format == Param::Format::NCHW4 ||
+        param().format == Param::Format::NCHW44 ||
+        param().format == Param::Format::CHWN4) {
+        C *= 4;
+    }
+    if (param().format == Param::Format::NCHW88) {
+        C *= 8;
+    }
+    if (param().format == Param::Format::NCHW32) {
+        C *= 32;
+    }
+    size_t PH = param().pad_h, PW = param().pad_w;
+    size_t FH = param().window_h, FW = param().window_w;
+    size_t SH = param().stride_h, SW = param().stride_w;
+#define DISPATCH_WITH_POOLER_AND_IDX_GETTER(Pooler, IdxGetter)                 \
+    MIDOUT_BEGIN(megdnn_naive_pooling, midout_iv(#Pooler #IdxGetter##_hash)) { \
+        MEGDNN_DISPATCH_CPU_KERN(                                              \
+                static_cast<naive::HandleImpl*>(handle()),                     \
+                pooling_forward_impl<Pooler MEGDNN_COMMA IdxGetter>(           \
+                        sptr, dptr, src.layout.dtype, N, C, IH, IW, OH, OW,    \
+                        PH, PW, SH, SW, FH, FW));                              \
+    }                                                                          \
+    MIDOUT_END();
 
 #define DISPATCH_WITH_POOLER(Pooler)                                      \
     switch (param().format) {                                             \
@@ -436,6 +448,9 @@ void PoolingForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_out dst,
             break;                                                        \
         case Param::Format::NCHW88:                                       \
             DISPATCH_WITH_POOLER_AND_IDX_GETTER(Pooler, NCHW88IdxGetter); \
+            break;                                                        \
+        case Param::Format::NCHW44:                                       \
+            DISPATCH_WITH_POOLER_AND_IDX_GETTER(Pooler, NCHW44IdxGetter); \
             break;                                                        \
         case Param::Format::NCHW32:                                       \
             DISPATCH_WITH_POOLER_AND_IDX_GETTER(Pooler, NCHW32IdxGetter); \
@@ -471,21 +486,64 @@ void PoolingForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_out dst,
             }                                                   \
         }                                                       \
     }
-        MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
-        MEGDNN_FOREACH_QUANTIZED_DTYPE(cb)
+    MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
+    MEGDNN_FOREACH_QUANTIZED_DTYPE(cb)
 #undef cb
 #undef DISPATCH_WITH_POOLER_AND_IDX_GETTER
 #undef DISPATCH_WITH_POOLER
-        megdnn_assert_internal(0);
-    }
-    MIDOUT_END();
+    megdnn_assert_internal(0);
 }
 
-void PoolingBackwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in dst,
-                               _megdnn_tensor_in diff, _megdnn_tensor_out grad,
+WorkspaceBundle PoolingBackwardImpl::get_workspace_bundle(
+        void* ptr, const TensorLayout& src, const TensorLayout& dst,
+        const TensorLayout& diff, const TensorLayout& grad) const {
+    SmallVector<size_t> sizes;
+    TensorLayout fsrc = src;
+    TensorLayout fdst = dst;
+    TensorLayout fdiff = diff;
+    TensorLayout fgrad = grad;
+    auto get_workspace = [&sizes](TensorLayout& layout) {
+        if (DNN_FLOAT16_SELECT(layout.dtype == dtype::BFloat16(), false)) {
+            layout.dtype = dtype::Float32();
+            sizes.push_back(layout.span().dist_byte());
+        }
+    };
+    get_workspace(fsrc);
+    get_workspace(fdst);
+    get_workspace(fdiff);
+    get_workspace(fgrad);
+    return {ptr, std::move(sizes)};
+}
+
+size_t PoolingBackwardImpl::get_workspace_in_bytes(
+        const TensorLayout& src, const TensorLayout& dst,
+        const TensorLayout& diff, const TensorLayout& grad) {
+    return get_workspace_bundle(nullptr, src, dst, diff, grad)
+            .total_size_in_bytes();
+}
+
+void PoolingBackwardImpl::exec(_megdnn_tensor_in ssrc, _megdnn_tensor_in sdst,
+                               _megdnn_tensor_in sdiff,
+                               _megdnn_tensor_out sgrad,
                                _megdnn_workspace workspace) {
-    check_exec(src.layout, dst.layout, diff.layout, grad.layout,
+    check_exec(ssrc.layout, sdst.layout, sdiff.layout, sgrad.layout,
                workspace.size);
+    TensorND src = ssrc;
+    TensorND dst = sdst;
+    TensorND diff = sdiff;
+    TensorND grad = sgrad;
+#if !MEGDNN_DISABLE_FLOAT16
+    auto wsb = get_workspace_bundle(workspace.raw_ptr, ssrc.layout, sdst.layout,
+                                    sdiff.layout, sgrad.layout);
+    auto ctypecvt = CompTypeCvter<dtype::BFloat16, dtype::Float32>(
+            static_cast<HandleImpl*>(handle()), &wsb);
+    if (ssrc.layout.dtype.enumv() == DTypeTrait<dtype::BFloat16>::enumv) {
+        ctypecvt.src_to_comp_type(ssrc, src)
+                .src_to_comp_type(sdst, dst)
+                .src_to_comp_type(sdiff, diff)
+                .src_to_comp_type(sgrad, grad);
+    }
+#endif
     size_t c_pos, spatial_pos;
     if (param().format == Param::Format::NCHW) {
         c_pos = 1;
@@ -507,7 +565,7 @@ void PoolingBackwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in dst,
     MEGDNN_DISPATCH_CPU_KERN(static_cast<naive::HandleImpl*>(handle()),      \
                              Func<ctype MEGDNN_COMMA IdxGetter>(             \
                                      sptr, dptr, diffptr, gradptr, N, C, IH, \
-                                     IW, OH, OW, PH, PW, SH, SW, FH, FW));
+                                     IW, OH, OW, PH, PW, SH, SW, FH, FW));   \
 
 #define DISPATCH_WITH_FUNC(Func, ctype)                                    \
     switch (param().format) {                                              \
@@ -529,27 +587,33 @@ void PoolingBackwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in dst,
                 auto sptr = src.ptr<ctype>(), dptr = dst.ptr<ctype>(),         \
                      diffptr = diff.ptr<ctype>(), gradptr = grad.ptr<ctype>(); \
                 DISPATCH_WITH_FUNC(pooling_backward_avg_impl, ctype);          \
-                return;                                                        \
+                break;                                                         \
             }                                                                  \
             case Mode::AVERAGE_COUNT_EXCLUDE_PADDING: {                        \
                 auto sptr = src.ptr<ctype>(), dptr = dst.ptr<ctype>(),         \
                      diffptr = diff.ptr<ctype>(), gradptr = grad.ptr<ctype>(); \
                 DISPATCH_WITH_FUNC(pooling_backward_avg_expd_impl, ctype);     \
-                return;                                                        \
+                break;                                                         \
             }                                                                  \
             case Mode::MAX: {                                                  \
                 auto sptr = src.ptr<ctype>(), dptr = dst.ptr<ctype>(),         \
                      diffptr = diff.ptr<ctype>(), gradptr = grad.ptr<ctype>(); \
                 DISPATCH_WITH_FUNC(pooling_backward_max_impl, ctype);          \
-                return;                                                        \
+                break;                                                         \
             }                                                                  \
+            default:                                                           \
+                megdnn_assert_internal(0);                                     \
         }                                                                      \
     }
     MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
 #undef cb
 #undef DISPATCH_WITH_FUNC_AND_IDX_GETTER
 #undef DISPATCH_WITH_FUNC
-    megdnn_assert_internal(0);
+#if !MEGDNN_DISABLE_FLOAT16
+    if (sgrad.layout.dtype.enumv() == DTypeTrait<dtype::BFloat16>::enumv) {
+        ctypecvt.comp_to_dst_type(grad, sgrad);
+    }
+#endif
 }
 
 }  // namespace naive

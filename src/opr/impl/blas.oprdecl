@@ -15,13 +15,15 @@ decl_opr('BatchedMatrixMul',
 
 decl_opr('MatrixMul',
          inputs=['opr0', 'opr1'],
-         params='MatrixMul',
+         params=[('param', 'MatrixMul'),
+                 ('execution_polity', 'ExecutionPolicy')],
          desc='matrix multiplication',
          version=2, has_out_dtype=True)
 
 decl_opr('BatchedMatrixMul',
          inputs=['opr0', 'opr1'],
-         params='MatrixMul',
+         params=[('param', 'MatrixMul'),
+                 ('execution_polity', 'ExecutionPolicy')],
          desc='batched matrix multiplication: input shapes should be '
          '(n, a, b) and (n, b, c) (assuming transposeA and transeposeB are '
          'False); then :math:`n` independent matrix multiplications would be '

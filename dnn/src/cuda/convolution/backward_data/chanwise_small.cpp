@@ -2,11 +2,12 @@
  * \file dnn/src/cuda/convolution/backward_data/chanwise_small.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #include "src/cuda/convolution/backward_data/algo.h"
@@ -28,36 +29,41 @@ inline bool is_available_small(const chanwise::Param& param) {
 }  // anonymous namespace
 
 bool ConvolutionBackwardDataImpl::AlgoChanwiseSmall::is_available(
-        const SizeArgs &args) const {
+        const SizeArgs& args) const {
+    if ((args.diff_layout->dtype == args.filter_layout->dtype &&
+         args.diff_layout->dtype == dtype::BFloat16()) ||
+        (args.diff_layout->dtype == args.filter_layout->dtype &&
+         args.diff_layout->dtype == dtype::QuantizedS8())) {
+        return false;
+    }
 #if CUDA_VERSION < 9000
     if (args.diff_layout->dtype.enumv() == DTypeEnum::Float16)
         return false;
 #endif
     auto kparam = chanwise::Param::from_fwd_args(args.as_fwd_args());
-    auto &&fm = args.filter_meta;
+    auto&& fm = args.filter_meta;
     return args.filter_meta.format == Param::Format::NCHW &&
-        args.diff_layout->dtype.category() == DTypeCategory::FLOAT &&
+           args.diff_layout->dtype.category() == DTypeCategory::FLOAT &&
            args.opr->param().compute_mode == Param::ComputeMode::DEFAULT &&
-        fm.spatial_ndim == 2 && fm.icpg == 1 &&
-        fm.dilation[0] == 1 && fm.dilation[1] == 1 &&
-        !fm.should_flip && is_available_small(kparam);
+           fm.spatial_ndim == 2 && fm.icpg == 1 && fm.dilation[0] == 1 &&
+           fm.dilation[1] == 1 && !fm.should_flip && is_available_small(kparam);
 }
 
 size_t ConvolutionBackwardDataImpl::AlgoChanwiseSmall::get_workspace_in_bytes(
-        const SizeArgs &) const {
+        const SizeArgs&) const {
     return 0;
 }
 
 void ConvolutionBackwardDataImpl::AlgoChanwiseSmall::exec(
-        const ExecArgs &args) const {
+        const ExecArgs& args) const {
     auto kparam = chanwise::Param::from_fwd_args(args.as_fwd_args());
     auto stream = cuda_stream(args.handle);
     switch (args.grad_layout->dtype.enumv()) {
         case DTypeEnum::Float32:
-            return chanwise::run_bwd_data_small(args.grad_tensor->ptr<float>(),
-                                     args.diff_tensor->ptr<float>(),
-                                     args.filter_tensor->ptr<float>(), kparam,
-                                     stream);
+            return chanwise::run_bwd_data_small(
+                    args.grad_tensor->ptr<float>(),
+                    args.diff_tensor->ptr<float>(),
+                    args.filter_tensor->ptr<float>(), kparam, stream);
 #if CUDA_VERSION >= 9000
         case DTypeEnum::Float16:
             return chanwise::run_bwd_data_small(
@@ -73,4 +79,3 @@ void ConvolutionBackwardDataImpl::AlgoChanwiseSmall::exec(
 }
 
 // vim: syntax=cpp.doxygen
-

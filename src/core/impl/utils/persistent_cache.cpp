@@ -2,7 +2,7 @@
  * \file src/core/impl/utils/persistent_cache.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -122,6 +122,17 @@ std::string PersistentCache::make_category_from_comp_node(CompNode comp_node) {
             break;
         }
 #endif
+#if MGB_ROCM
+        case CompNode::DeviceType::ROCM: {
+            int drv = -1, hip_rt = -1;
+            MGB_ROCM_CHECK(hipDriverGetVersion(&drv));
+            MGB_ROCM_CHECK(hipRuntimeGetVersion(&hip_rt));
+            auto&& prop = env.rocm_env().device_prop;
+            return ssprintf("plat=rocm;dev=%s;cap=%d.%d,drv=%d;runtime=%d",
+                            prop.name, prop.major, prop.minor, drv, hip_rt);
+            break;
+        }
+#endif
         case CompNode::DeviceType::CPU:
             return "plat=cpu";
         default:
@@ -176,11 +187,9 @@ AlgoChooserProfileCache::get(const Key &key) {
 
         auto entry_len = read_uint32();
         mgb_assert(buf + entry_len <= buf_end);
-        int rep;
         auto nr = sscanf(reinterpret_cast<const char*>(buf), ENTRY_FMT,
-                &rep, &i.time, &i.workspace);
+                         &i.attribute, &i.time, &i.workspace);
         mgb_assert(nr == 3);
-        i.reproducible = rep;
         buf += entry_len;
     }
     mgb_assert(buf == buf_end);
@@ -201,10 +210,10 @@ void AlgoChooserProfileCache::put(const Key &key, Result &result) {
         auto &&cur = result[i];
 
         if (prev.workspace <= cur.workspace &&
-                prev.reproducible == cur.reproducible) {
+            prev.attribute == cur.attribute) {
             result.erase(result.begin() + i);
         } else {
-            ++ i;
+            ++i;
         }
     }
 
@@ -226,8 +235,10 @@ void AlgoChooserProfileCache::put(const Key &key, Result &result) {
         write_uint32(0);
         pos = val.size();
         val.resize(pos + SPR_SIZE);
-        uint32_t nr = snprintf(&val[pos], SPR_SIZE,
-                ENTRY_FMT, i.reproducible, i.time, i.workspace);
+        uint32_t nr = snprintf(&val[pos], SPR_SIZE, ENTRY_FMT, i.attribute,
+                               i.time, i.workspace);
+        //! for memory boundary failed, snprintf ret do not contain \0
+        nr += 1;
         mgb_assert(nr < SPR_SIZE);
         memcpy(&val[pos - sizeof(uint32_t)], &nr, sizeof(nr));
         val.resize(pos + nr);

@@ -2,7 +2,7 @@
  * \file src/opr/impl/blas.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,15 +18,41 @@
 #include "megbrain/opr/tensor_gen.h"
 #include "megbrain/opr/tensor_manip.h"
 
+#include "megbrain/opr/search_policy/algo_chooser.h"
+#include "megbrain/opr/search_policy/profiler.h"
+
 #include "./internal/megdnn_opr_wrapper.inl"
+#include "./search_policy/workspace_need_limit_getter.inl"
+#include "megdnn/oprs/linalg.h"
 
 using namespace mgb;
 using namespace opr;
 
+namespace {
+int get_mask_from_matmul(const megdnn::param::MatrixMul& param) {
+    return static_cast<int>(param.transposeA) +
+           (static_cast<int>(param.transposeB) * 2);
+}
+}
+
 /* ================= MatrixMul =================  */
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(MatrixMul);
-MEGDNN_OPR_INIT2(MatrixMul, "matrix_mul")
+MatrixMul::MatrixMul(VarNode* a, VarNode* b, const Param& param,
+                     const ExecutionPolicy& policy,
+                     const OperatorNodeConfig& config)
+        : Super{a->owner_graph(), config, "matrix_mul", {a, b}} {
+    init_megdnn_opr(*this, param);
+    m_policy = policy;
+    add_input({a, b});
+}
+
+SymbolVar MatrixMul::make(SymbolVar a, SymbolVar b, const Param& param,
+                          const ExecutionPolicy& policy,
+                          const OperatorNodeConfig& config) {
+    return a.insert_single_output_opr<MatrixMul>(a.node(), b.node(), param,
+                                                 policy, config);
+}
 
 void MatrixMul::init_output_dtype() {
     DType output_dtype = config().output_dtype();
@@ -65,8 +91,6 @@ size_t MatrixMul::get_workspace_size_bytes(
     TensorLayout i0(input_shapes[0], input(0)->dtype()),
             i1(input_shapes[1], input(1)->dtype()),
             out(output_shapes[0], output(0)->dtype());
-    intl::MegDNNOprInputsLayoutModifier<megdnn::MatrixMul>::apply(
-            tparam, {&i0, &i1, &out});
 
     auto transpose = [](TensorLayout& dst, bool& param) {
         std::swap(dst.shape[0], dst.shape[1]);
@@ -74,13 +98,37 @@ size_t MatrixMul::get_workspace_size_bytes(
         param ^= 1;
     };
     MGB_TRY {
-        a = mo->get_workspace_in_bytes(i0, i1, out);
+        megdnn_opr()->execution_policy() = {};
+        a = AlgoChooser<megdnn::MatrixMul>::setup_algo({i0, i1, out},
+                                                       megdnn_opr(), this);
+        //! Here we just want to save the execution policy got from setup_algo,
+        //! while change the delaration of get_workspace_in_bytes may cause
+        //! many changes.
+        const_cast<MatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i0, tparam.transposeA);
-        b = mo->get_workspace_in_bytes(i0, i1, out);
+        b = AlgoChooser<megdnn::MatrixMul>::setup_algo({i0, i1, out},
+                                                       megdnn_opr(), this);
+        const_cast<MatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i1, tparam.transposeB);
-        c = mo->get_workspace_in_bytes(i0, i1, out);
+        c = AlgoChooser<megdnn::MatrixMul>::setup_algo({i0, i1, out},
+                                                       megdnn_opr(), this);
+        const_cast<MatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i0, tparam.transposeA);
-        d = mo->get_workspace_in_bytes(i0, i1, out);
+        d = AlgoChooser<megdnn::MatrixMul>::setup_algo({i0, i1, out},
+                                                       megdnn_opr(), this);
+        const_cast<MatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
     }
     MGB_FINALLY({ tparam = this->param(); });
     return std::max(std::max(a, b), std::max(c, d));
@@ -102,14 +150,15 @@ void MatrixMul::scn_do_execute() {
     MGB_TRY {
         transpose(inp0.layout, tparam.transposeA);
         transpose(inp1.layout, tparam.transposeB);
-        intl::MegDNNOprInputsLayoutModifier<megdnn::MatrixMul>::apply(
-                tparam, {&inp0.layout, &inp1.layout, &out.layout});
+        megdnn_opr()->execution_policy() =
+                m_cadidate_execution_policies[get_mask_from_matmul(tparam)];
         megdnn_opr()->exec(inp0, inp1, out,
                            intl::get_megdnn_workspace_from_var(output(1)));
     }
     MGB_FINALLY({ tparam = this->param(); });
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(MatrixMul) {
     mgb_assert(opr.input(0)->dtype().category() == DTypeCategory::FLOAT,
                "only float data type supported for grad");
@@ -132,11 +181,26 @@ MGB_IMPL_OPR_GRAD(MatrixMul) {
     }
     return grad.node();
 }
+#endif
 
 /* ================= BatchedMatrixMul =================  */
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(BatchedMatrixMul);
-MEGDNN_OPR_INIT2(BatchedMatrixMul, "batched_matrix_mul")
+BatchedMatrixMul::BatchedMatrixMul(VarNode* a, VarNode* b, const Param& param,
+                                   const ExecutionPolicy& policy,
+                                   const OperatorNodeConfig& config)
+        : Super{a->owner_graph(), config, "batched_matrix_mul", {a, b}} {
+    init_megdnn_opr(*this, param);
+    m_policy = policy;
+    add_input({a, b});
+}
+
+SymbolVar BatchedMatrixMul::make(SymbolVar a, SymbolVar b, const Param& param,
+                                 const ExecutionPolicy& policy,
+                                 const OperatorNodeConfig& config) {
+    return a.insert_single_output_opr<BatchedMatrixMul>(a.node(), b.node(),
+                                                        param, policy, config);
+}
 
 void BatchedMatrixMul::add_input_layout_constraint() {
     auto check = [](const TensorLayout& ly) {
@@ -186,8 +250,6 @@ size_t BatchedMatrixMul::get_workspace_size_bytes(
     TensorLayout i0(input_shapes[0], input(0)->dtype()),
             i1(input_shapes[1], input(1)->dtype()),
             out(output_shapes[0], output(0)->dtype());
-    intl::MegDNNOprInputsLayoutModifier<megdnn::BatchedMatrixMul>::apply(
-            tparam, {&i0, &i1, &out});
 
     auto transpose = [](TensorLayout& dst, bool& param) {
         std::swap(dst.shape[1], dst.shape[2]);
@@ -195,13 +257,34 @@ size_t BatchedMatrixMul::get_workspace_size_bytes(
         param ^= 1;
     };
     MGB_TRY {
-        a = mo->get_workspace_in_bytes(i0, i1, out);
+        megdnn_opr()->execution_policy() = {};
+        a = AlgoChooser<megdnn::BatchedMatrixMul>::setup_algo(
+                {i0, i1, out}, megdnn_opr(), this);
+        const_cast<BatchedMatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i0, tparam.transposeA);
-        b = mo->get_workspace_in_bytes(i0, i1, out);
+        b = AlgoChooser<megdnn::BatchedMatrixMul>::setup_algo(
+                {i0, i1, out}, megdnn_opr(), this);
+        const_cast<BatchedMatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i1, tparam.transposeB);
-        c = mo->get_workspace_in_bytes(i0, i1, out);
+        c = AlgoChooser<megdnn::BatchedMatrixMul>::setup_algo(
+                {i0, i1, out}, megdnn_opr(), this);
+        const_cast<BatchedMatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
         transpose(i0, tparam.transposeA);
-        d = mo->get_workspace_in_bytes(i0, i1, out);
+        d = AlgoChooser<megdnn::BatchedMatrixMul>::setup_algo(
+                {i0, i1, out}, megdnn_opr(), this);
+        const_cast<BatchedMatrixMul*>(this)
+                ->m_cadidate_execution_policies[get_mask_from_matmul(tparam)] =
+                megdnn_opr()->execution_policy();
+        megdnn_opr()->execution_policy() = {};
     }
     MGB_FINALLY({ tparam = this->param(); });
     return std::max(std::max(a, b), std::max(c, d));
@@ -224,14 +307,15 @@ void BatchedMatrixMul::scn_do_execute() {
     MGB_TRY {
         transpose(inp0.layout, tparam.transposeA);
         transpose(inp1.layout, tparam.transposeB);
-        intl::MegDNNOprInputsLayoutModifier<megdnn::BatchedMatrixMul>::apply(
-                tparam, {&inp0.layout, &inp1.layout, &out.layout});
+        megdnn_opr()->execution_policy() =
+                m_cadidate_execution_policies[get_mask_from_matmul(tparam)];
         megdnn_opr()->exec(inp0, inp1, out,
                            intl::get_megdnn_workspace_from_var(output(1)));
     }
     MGB_FINALLY({ tparam = this->param(); });
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(BatchedMatrixMul) {
     mgb_assert(opr.input(0)->dtype().category() == DTypeCategory::FLOAT,
             "only float data type supported for grad");
@@ -259,6 +343,7 @@ MGB_IMPL_OPR_GRAD(BatchedMatrixMul) {
     }
     return grad.node();
 }
+#endif
 
 /* ================= Dot =================  */
 
@@ -335,6 +420,7 @@ void Dot::add_input_layout_constraint() {
     input(1)->add_layout_constraint(check);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Dot) {
     auto other_input = opr.input(wrt_idx == 0 ? 1 : 0);
     auto ishp0 = opr::GetVarShape::make(opr.input(0)),
@@ -344,6 +430,7 @@ MGB_IMPL_OPR_GRAD(Dot) {
             Broadcast::make(mul(out_grad[0], other_input), max_ishp),
             wrt_idx ? ishp1 : ishp0).node();
 }
+#endif
 
 SymbolVar Dot::make(SymbolVar opr0, SymbolVar opr1,
          const OperatorNodeConfig &config) {
@@ -358,6 +445,8 @@ void Dot::record_execute_deps(ExecDependencyArray &deps) {
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(MatrixInverse);
 MEGDNN_OPR_INIT1(MatrixInverse, "matrix_inv")
+
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(MatrixInverse) {
     SymbolVar a = opr.output(0);
     // TODO: use unified MatrixMul interface when we have it
@@ -372,6 +461,7 @@ MGB_IMPL_OPR_GRAD(MatrixInverse) {
                  a_bnn);
     return da.reshape(a.symshape()).node();
 }
+#endif
 
 /* ================= SVD =================  */
 
@@ -394,6 +484,7 @@ SVD::SVD(VarNode* src, const Param& param, const OperatorNodeConfig& config) :
     }
 }
 
+#if MGB_ENABLE_GRAD
 namespace {
 
 /*!
@@ -485,7 +576,9 @@ OP(*, {}, {})
 #undef OP
 
 }  // anonymous namespace
+#endif
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(SVD) {
     /**
      * The formula is copied from
@@ -563,6 +656,7 @@ MGB_IMPL_OPR_GRAD(SVD) {
                                        I_n - matmul(v, v, param01)));
     return ret.reshape(a.symshape()).node();
 }
+#endif
 
 SymbolVarArray SVD::make(const SymbolVar& src, const Param& param,
                          const OperatorNodeConfig& config) {

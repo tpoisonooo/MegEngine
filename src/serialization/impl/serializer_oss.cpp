@@ -2,7 +2,7 @@
  * \file src/serialization/impl/serializer_oss.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,6 +32,8 @@
 #include "megbrain/serialization/opr_load_dump.h"
 #include "megbrain/serialization/serializer.h"
 #include "megbrain/version.h"
+
+#include <flatbuffers/flatbuffers.h>
 
 #include <cerrno>
 #include <cinttypes>
@@ -121,7 +123,12 @@ public:
     void dump_tensor(const std::string& name, const HostTensorND& tensor,
                      TensorWriteMethod method) override;
     flatbuffers::FlatBufferBuilder& builder() override { return m_builder; }
-    void append_param(uint32_t type, flatbuffers::Offset<void> value) override {
+    void append_param(uint32_t type, uint32_t value) override {
+        static_assert(std::is_same<uint32_t, flatbuffers::uoffset_t>::value,
+                      "append_param depends on uoffset_t being uint32_t");
+        static_assert(std::is_standard_layout<flatbuffers::Offset<void>>::value,
+                      "append_param depends on flatbuffers::Offset having "
+                      "standard memory layout");
         mgb_assert(type != fbs::OperatorParam_NONE);
         m_cur_opr_param_type.emplace_back(
                 static_cast<fbs::OperatorParam>(type));
@@ -201,6 +208,11 @@ flatbuffers::Offset<fbs::Operator> GraphDumperOSS::build_single_opr(
         inputs = m_builder.CreateVector(v);
     }
 
+    Offset<String> operator_name;
+    if (m_config.keep_op_name) {
+        operator_name = m_builder.CreateSharedString(opr->name());
+    }
+
     Offset<Vector<Offset<String>>> output_names;
     if (m_config.keep_var_name >= 2 ||
         (m_config.keep_var_name == 1 &&
@@ -248,6 +260,7 @@ flatbuffers::Offset<fbs::Operator> GraphDumperOSS::build_single_opr(
     }
     builder.add_comp_node(comp_node);
     builder.add_output_name(output_names);
+    builder.add_name(operator_name);
     builder.add_output_dtype(output_dtype);
     if (param_cnt > 0) {
         builder.add_param_type(m_cur_opr_param_type[0]);
@@ -691,6 +704,9 @@ void GraphLoaderOSS::OprLoadContextImpl::load_single_opr(
     if (fbopr->output_dtype()) {
         config.output_dtype(fbs::intl::load_dtype(fbopr->output_dtype()));
     }
+    if (fbopr->name()) {
+        config.name(fbopr->name()->str());
+    }
     if (fbopr->comp_node()) {
         auto cnt = fbopr->comp_node()->size();
         cg::OperatorNodeConfig::CompNodeArray comp_node_arr(cnt);
@@ -749,9 +765,15 @@ void GraphLoaderOSS::OprLoadContextImpl::load_single_opr(
 GraphLoader::LoadResult GraphLoaderOSS::OprLoadContextImpl::load_oprs() {
     // load oprs
     const auto* oprs = m_loader->m_graph->oprs();
-    for (flatbuffers::uoffset_t i = 0; i < oprs->size(); ++i) {
-        m_current_opr = oprs->Get(i);
-        load_single_opr(m_current_opr);
+    {
+        // inplace arith graph optimization is disabled during opr load
+        // it tries to restore the same graph as it was dumped
+        // see test TestSerializer2.LOGEXP for example
+        GraphLoader::ScopedGraphOptDisabler _(m_graph);
+        for (flatbuffers::uoffset_t i = 0; i < oprs->size(); ++i) {
+            m_current_opr = oprs->Get(i);
+            load_single_opr(m_current_opr);
+        }
     }
 
     // batched loading device values
@@ -846,7 +868,7 @@ GraphLoader::LoadResult GraphLoaderOSS::load(const LoadConfig& config,
     OprLoadContextImpl ctx{this, m_graph->mgb_version()};
     auto result = ctx.load_oprs();
 
-    auto fbs_end = tensor_begin + offset_to_fbs + size;
+    auto fbs_end = tensor_begin + offset_to_fbs + sizeof(size) + size;
     auto cur = m_file->tell();
     mgb_assert(fbs_end > cur);
     // Skip to Graph end

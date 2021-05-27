@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/benchmark.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,7 +24,7 @@ namespace test {
 
 TEST_F(CUDA, BENCHMARK_CONVOLUTION_8X8X32)
 {
-    if (cuda::current_device_prop().major < 6) {
+    if (!cuda::is_compute_capability_required(6, 1)) {
         printf("Skip CUDA.BENCHMARK_CONVOLUTION_8X8X32 test as current device"
                "doesn't support\n");
         return;
@@ -41,10 +41,12 @@ TEST_F(CUDA, BENCHMARK_CONVOLUTION_8X8X32)
         auto time_in_ms_float = benchmarker.set_param(param_float)
             .set_dtype(0, dtype::Float32())
             .set_dtype(1, dtype::Float32())
+            .set_dtype(2, dtype::Float32())
             .execs({src_float, filter_float, {}});
         auto time_in_ms_int = benchmarker.set_param(param_int)
             .set_dtype(0, dtype::Int8())
             .set_dtype(1, dtype::Int8())
+            .set_dtype(2, dtype::Int32())
             .execs({src_int, filter_int, {}});
         std::cout << "1x1: N=" << N << " OC=" << OC << " IC=" << IC
             << " H=" << H << " W=" << W
@@ -67,10 +69,12 @@ TEST_F(CUDA, BENCHMARK_CONVOLUTION_8X8X32)
         auto time_in_ms_float = benchmarker.set_param(param_float)
             .set_dtype(0, dtype::Float32())
             .set_dtype(1, dtype::Float32())
+            .set_dtype(2, dtype::Float32())
             .execs({src_float, filter_float, {}});
         auto time_in_ms_int = benchmarker.set_param(param_int)
             .set_dtype(0, dtype::Int8())
             .set_dtype(1, dtype::Int8())
+            .set_dtype(2, dtype::Int32())
             .execs({src_int, filter_int, {}});
         std::cout << "chanwise: N=" << N << " C=" << C
             << " H=" << H << " W=" << W << " F=" << F

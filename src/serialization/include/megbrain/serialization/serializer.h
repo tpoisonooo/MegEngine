@@ -2,7 +2,7 @@
  * \file src/serialization/include/megbrain/serialization/serializer.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -59,6 +59,21 @@ namespace serialization {
                  */
                 std::unique_ptr<cg::AsyncExecutable> graph_compile(
                         const ComputingGraph::OutputSpec &outspec);
+            };
+
+            //! helper to disable inplace arith graph optimization during
+            //! de-serialization
+            struct ScopedGraphOptDisabler {
+                bool option_saved;
+                std::shared_ptr<ComputingGraph> cg;
+                ScopedGraphOptDisabler(std::shared_ptr<ComputingGraph>& cg_p)
+                        : option_saved(true), cg(cg_p) {
+                    std::swap(option_saved,
+                              cg->options().disable_inplace_arith_opt);
+                }
+                ~ScopedGraphOptDisabler() {
+                    cg->options().disable_inplace_arith_opt = option_saved;
+                }
             };
 
             //! mem_node => tensor_value

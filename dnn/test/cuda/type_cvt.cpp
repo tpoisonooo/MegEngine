@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/type_cvt.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -104,6 +104,21 @@ TEST_F(CUDA, QUANTIZED_TYPECVT) {
     run(dtype::Quantized8Asymm(1e-3f, (uint8_t)20), dtype::Int32());
     run(dtype::Quantized8Asymm(1e-3f, (uint8_t)10), dtype::QuantizedS8(2e-3f));
     run(dtype::Quantized8Asymm(1e-3f, (uint8_t)18), dtype::QuantizedS32(7e-4f));
+}
+
+TEST_F(CUDA, TYPE_CVT_BFLOAT16) {
+    Checker<TypeCvt> checker(handle_cuda());
+    UniformFloatRNG rng(-20, 20);
+    checker.set_rng(0, &rng);
+    std::vector<DType> dtypes = {dtype::Float32(), dtype::Float16(),
+                                 dtype::Int32(),   dtype::Int16(),
+                                 dtype::Int8()};
+    for (auto sdtype : dtypes) {
+        TensorLayout src({10, 10}, sdtype), dst({10, 10}, dtype::BFloat16());
+        checker.exec(TensorLayoutArray{src, dst});
+        TensorLayout src2({10, 10}, dtype::BFloat16()), dst2({10, 10}, sdtype);
+        checker.exec(TensorLayoutArray{src2, dst2});
+    }
 }
 
 #if MEGDNN_WITH_BENCHMARK

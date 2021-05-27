@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/topk/topk_radix.cuh
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -76,10 +76,12 @@ struct RadixConverter<int32_t> {
 template <typename ctype>
 cudaError_t find_kth_radix(const ctype* input, ctype* output, void* workspace,
                            uint32_t batch, uint32_t length, int32_t lda,
-                           int32_t k, cudaStream_t stream);
+                           int32_t k, uint32_t grid_dim_y_limit,
+                           cudaStream_t stream);
 
 //! get workspace in bytes
-uint32_t find_kth_radix_workspace(uint32_t batch, uint32_t length);
+uint32_t find_kth_radix_workspace(uint32_t batch, uint32_t length,
+                                  uint32_t grid_dim_y_limit);
 
 /*!
  * \brief select values from rows of input that compare to thresh as specified
@@ -90,7 +92,8 @@ template <typename ctype>
 cudaError_t topk_select(const ctype* input, const ctype* thresh,
                         ctype* output_value, int32_t* output_idx,
                         void* workspace, uint32_t batch, uint32_t length,
-                        int32_t lda, int32_t k, cudaStream_t stream);
+                        int32_t lda, int32_t k, uint32_t batch_upper_limit,
+                        cudaStream_t stream);
 
 uint32_t topk_select_workspace(uint32_t batch, uint32_t length);
 

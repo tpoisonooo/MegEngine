@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/utils/thread_impl_1.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -50,7 +50,11 @@ namespace mgb {
      * wrap around within a practical time, which would crash the system.
      */
     class SCQueueSynchronizer {
-        static size_t cached_max_spin;
+        //! cached value for global default max spin, read and stored by get_default_max_spin
+        static size_t cached_default_max_spin;
+
+        //! synchronizer wait at most m_max_spin before CPU yield
+        size_t m_max_spin;
         std::atomic_flag m_consumer_waiting = ATOMIC_FLAG_INIT;
         std::atomic_bool m_should_exit{false};
         bool m_worker_started = false, m_wait_finish_called = false;
@@ -65,14 +69,23 @@ namespace mgb {
         std::thread m_worker_thread;
 
         public:
-            SCQueueSynchronizer();
+            SCQueueSynchronizer(size_t max_spin);
+
             ~SCQueueSynchronizer() noexcept;
 
             bool worker_started() const {
                 return m_worker_started;
             }
 
-            static size_t max_spin();
+#ifdef WIN32
+            static bool is_into_atexit;
+            void set_finish_called(bool status) {
+                m_wait_finish_called = status;
+            }
+#endif
+
+            //! get global default max spin from env
+            static size_t get_default_max_spin();
 
             void start_worker(std::thread thread);
 
@@ -143,14 +156,39 @@ namespace mgb {
         };
 
         public:
-            void add_task(const Param &param) {
+            //! \param max_spin specify max spin manually, caller must ensure the given value
+            //!     is optimal, otherwise caller should leave the value adjustable by user.
+            //! \param max_items limit memory usage by number of items
+            AsyncQueueSC(ptrdiff_t max_spin = -1, ptrdiff_t max_items = -1)
+                    : m_synchronizer(max_spin >= 0 ? max_spin : SCQueueSynchronizer::get_default_max_spin()) {
+                if (max_items >= 0) {
+                    // -1 / 2 == 0
+                    m_block_quota = (max_items - 1) / BLOCK_SIZE + 1;
+                }
+            }
+#ifdef WIN32
+            bool check_is_into_atexit() {
+                if (SCQueueSynchronizer::is_into_atexit) {
+                    mgb_log_warn(
+                            "add_task after system call atexit happened! "
+                            "ignore it, workround for windows os force INT "
+                            "some thread before shared_ptr destructor "
+                            "finish!!");
+                    m_synchronizer.set_finish_called(true);
+                }
+
+                return SCQueueSynchronizer::is_into_atexit;
+            }
+#endif
+
+            void add_task(const Param& param) {
                 SyncedParam* p = allocate_task();
                 new (p->get()) Param(param);
                 p->init_done.store(true, std::memory_order_release);
                 m_synchronizer.producer_add();
             }
 
-            void add_task(Param &&param) {
+            void add_task(Param&& param) {
                 SyncedParam* p = allocate_task();
                 new (p->get()) Param(std::move(param));
                 p->init_done.store(true, std::memory_order_release);
@@ -165,6 +203,10 @@ namespace mgb {
             void wait_all_task_finish() {
                 auto tgt = m_queue_tail_tid.load(std::memory_order_acquire);
                 do {
+#ifdef WIN32
+                    if (check_is_into_atexit())
+                        return;
+#endif
                     // we need a loop because other threads might be adding new
                     // tasks, and m_queue_tail_tid is increased before
                     // producer_add()
@@ -184,6 +226,10 @@ namespace mgb {
             void wait_task_queue_empty() {
                 size_t tgt, done;
                 do {
+#ifdef WIN32
+                    if (check_is_into_atexit())
+                        return;
+#endif
                     m_synchronizer.producer_wait();
                     // producer_wait() only waits for tasks that are added upon
                     // entrance of the function, and new tasks might be added
@@ -249,8 +295,10 @@ namespace mgb {
             TaskBlock *m_queue_tail = nullptr;
             std::atomic_size_t m_queue_tail_tid{0},    //!< id of next task
                 m_finished_task{0};
+            size_t m_block_quota = std::numeric_limits<size_t>::max();
             std::vector<std::unique_ptr<TaskBlock>> m_free_task_block;
             Spinlock m_mutex;
+            std::condition_variable_any m_cv;
             SyncedParam *m_cur_task = nullptr;
             SCQueueSynchronizer m_synchronizer;
 #if MGB_ENABLE_EXCEPTION
@@ -272,6 +320,17 @@ namespace mgb {
                     // reload newest tail
                     tail = m_queue_tail;
                     if (!m_synchronizer.worker_started()) {
+#ifdef WIN32
+                        if (!SCQueueSynchronizer::is_into_atexit) {
+                            auto cb_atexit = [] {
+                                SCQueueSynchronizer::is_into_atexit = true;
+                            };
+                            auto err = atexit(cb_atexit);
+                            mgb_assert(!err,
+                                       "failed to register windows_call_atexit "
+                                       "at exit");
+                        }
+#endif
                         m_synchronizer.start_worker(std::thread{
                                 &AsyncQueueSC::worker_thread_impl, this});
                     }
@@ -302,12 +361,20 @@ namespace mgb {
             std::unique_ptr<TaskBlock> allocate_task_block_unsafe(
                     TaskBlock *prev) {
                 std::unique_ptr<TaskBlock> ret;
-                if (!m_free_task_block.empty()) {
-                    ret = std::move(m_free_task_block.back());
-                    m_free_task_block.pop_back();
-                } else {
-                    ret = std::make_unique<TaskBlock>();
-                }
+                do {
+                    if (!m_free_task_block.empty()) {
+                        ret = std::move(m_free_task_block.back());
+                        m_free_task_block.pop_back();
+                        break;
+                    } else if (m_block_quota > 0) {
+                        ret = std::make_unique<TaskBlock>();
+                        m_block_quota--;
+                        break;
+                    } else {
+                        m_cv.wait(m_mutex);
+                        continue;
+                    }
+                } while (true);
                 ret->first_tid = m_new_block_first_tid;
                 m_new_block_first_tid += BLOCK_SIZE;
                 ret->prev = prev;
@@ -350,6 +417,7 @@ namespace mgb {
                         } else {
                             m_queue_tail = nullptr;
                         }
+                        m_cv.notify_one();
                     }
 
                     SyncedParam &cur = m_queue_head->params[qh ++];

@@ -2,7 +2,7 @@
  * \file dnn/test/cpu/matrix_mul.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,6 +17,7 @@
 
 using namespace megdnn;
 using namespace test;
+#if MEGDNN_WITH_BENCHMARK
 namespace {
 
 void sgemm_sgemv_like(const float* __restrict A, const float* __restrict B,
@@ -70,6 +71,7 @@ TEST_F(CPU, BENCHMARK_MATRIX_MUL) {
             run(m, nk, nk);
         }
 }
+#endif
 
 TEST_F(CPU, MATRIX_MUL) {
     matrix_mul::check_matrix_mul(dtype::Float32{}, dtype::Float32{},

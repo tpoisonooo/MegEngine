@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/convolution3d/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -15,6 +15,7 @@
 #include "./forward/algo.h"
 #include "./helper.h"
 
+#include "src/common/algo_chooser.h"
 #include "src/cuda/utils.h"
 
 using namespace megdnn;
@@ -32,16 +33,18 @@ Convolution3DForwardImpl::Algorithm*
 Convolution3DForwardImpl::get_algorithm_heuristic(
         const TensorLayout& src, const TensorLayout& filter,
         const TensorLayout& dst, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto fm = check_layout_fwd(src, filter, dst);
     return get_algorithm_heuristic(src, fm, dst, workspace_limit_in_bytes,
-                                   reproducible);
+                                   positive_attr, negative_attr);
 }
 Convolution3DForwardImpl::Algorithm*
 Convolution3DForwardImpl::get_algorithm_heuristic(
         const TensorLayout& src, const CanonizedFilterMeta& filter,
         const TensorLayout& dst, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     AlgoBase::SizeArgs args(this, src, filter, dst);
 
 #if CUDNN_MAJOR < 7 || (CUDNN_MAJOR == 7 && CUDNN_MINOR < 5)
@@ -49,26 +52,28 @@ Convolution3DForwardImpl::get_algorithm_heuristic(
         // prefer special chanwise impl since as the group conv of cudnn whose
         // version is lower than v7.5.0 is still slower than our implementation
         // in many channel-wise cases
-        if (sm_algo_pack.chanwise.is_available_reproducible(
-                    args, reproducible, workspace_limit_in_bytes)) {
+        if (sm_algo_pack.chanwise.is_available_attribute(
+                    args, positive_attr, negative_attr,
+                    workspace_limit_in_bytes)) {
             return &sm_algo_pack.chanwise;
         }
     }
 #endif
 
-    auto prefer_1x1x1 = [&args, reproducible, workspace_limit_in_bytes]() {
+    auto prefer_1x1x1 = [&args, positive_attr, negative_attr,
+                         workspace_limit_in_bytes]() {
         const size_t MAX_BATCH_SIZE_FOR_1x1x1_MAT_ALGO = 4;
         size_t batch_size = args.src_layout->shape[0];
         if (batch_size > MAX_BATCH_SIZE_FOR_1x1x1_MAT_ALGO) {
             return false;
         }
-        return sm_algo_pack.a1x1x1.is_available_reproducible(
-                args, reproducible, workspace_limit_in_bytes);
+        return sm_algo_pack.a1x1x1.is_available_attribute(
+                args, positive_attr, negative_attr, workspace_limit_in_bytes);
     };
 
     auto get_cudnn_algo =
-            [this, &args, workspace_limit_in_bytes,
-             reproducible]() -> Convolution3DForwardImpl::AlgoBase* {
+            [this, &args, workspace_limit_in_bytes, positive_attr,
+             negative_attr]() -> Convolution3DForwardImpl::AlgoBase* {
         auto cudnn_handle = cuda::cudnn_handle(this->handle());
         cudnnConvolutionFwdAlgo_t algo;
         CUDNNForwardDescs desc;
@@ -77,11 +82,12 @@ Convolution3DForwardImpl::get_algorithm_heuristic(
         bool got = cudnn_get_convolution_fwd_algo_helper(
                 cudnn_handle, desc.src_desc.desc, desc.filter_desc.desc,
                 desc.conv_desc.desc, desc.dst_desc.desc,
-                workspace_limit_in_bytes, &algo, reproducible);
+                workspace_limit_in_bytes, &algo, positive_attr, negative_attr);
         if (got) {
             return static_cast<AlgoBase*>(
-                    megdnn::get_reproducible_algo<Convolution3DForwardImpl>(
-                            sm_algo_pack.cudnn_from_enum(algo), reproducible));
+                    megdnn::get_algo_match_attribute<Convolution3DForwardImpl>(
+                            sm_algo_pack.cudnn_from_enum(algo), positive_attr,
+                            negative_attr));
         } else {
             return nullptr;
         }
@@ -107,15 +113,9 @@ Convolution3DForwardImpl::get_algorithm_heuristic(
         args = orig_args;
     }
 
-    if (reproducible) {
-        return megdnn::get_reproducible_algo<Convolution3DForwardImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d fwd");
-    } else {
-        return megdnn::get_usable_algo<Convolution3DForwardImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d fwd");
-    }
+    return megdnn::get_algo_match_attribute<Convolution3DForwardImpl>(
+            sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
+            "cuda conv3d fwd", positive_attr, negative_attr);
 }
 
 std::vector<Convolution3DForwardImpl::Algorithm*>
@@ -168,28 +168,30 @@ Convolution3DBackwardDataImpl::Algorithm*
 Convolution3DBackwardDataImpl::get_algorithm_heuristic(
         const TensorLayout& filter, const TensorLayout& diff,
         const TensorLayout& grad, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto fm = check_layout_fwd(grad, filter, diff);
     return get_algorithm_heuristic(fm, diff, grad, workspace_limit_in_bytes,
-                                   reproducible);
+                                   positive_attr, negative_attr);
 }
 
 Convolution3DBackwardDataImpl::Algorithm*
 Convolution3DBackwardDataImpl::get_algorithm_heuristic(
         const CanonizedFilterMeta& filter, const TensorLayout& diff,
         const TensorLayout& grad, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     AlgoBase::SizeArgs args(this, filter, diff, grad);
 
     if (args.filter_meta.group > 1 &&
-        sm_algo_pack.chanwise.is_available_reproducible(
-                args, reproducible, workspace_limit_in_bytes)) {
+        sm_algo_pack.chanwise.is_available_attribute(
+                args, positive_attr, negative_attr, workspace_limit_in_bytes)) {
         return &sm_algo_pack.chanwise;
     }
 
     auto get_cudnn_algo =
-            [this, &args, workspace_limit_in_bytes,
-             reproducible]() -> Convolution3DBackwardDataImpl::AlgoBase* {
+            [this, &args, workspace_limit_in_bytes, positive_attr,
+             negative_attr]() -> Convolution3DBackwardDataImpl::AlgoBase* {
         auto cudnn_handle = cuda::cudnn_handle(this->handle());
         cudnnConvolutionBwdDataAlgo_t algo;
         CUDNNBwdDataDescs desc;
@@ -197,11 +199,12 @@ Convolution3DBackwardDataImpl::get_algorithm_heuristic(
         bool got = cudnn_get_convolution_bwd_data_algo_helper(
                 cudnn_handle, desc.filter_desc.desc, desc.diff_desc.desc,
                 desc.conv_desc.desc, desc.grad_desc.desc,
-                workspace_limit_in_bytes, &algo, reproducible);
+                workspace_limit_in_bytes, &algo, positive_attr, negative_attr);
         if (got) {
-            return static_cast<AlgoBase*>(megdnn::get_reproducible_algo<
+            return static_cast<AlgoBase*>(megdnn::get_algo_match_attribute<
                                           Convolution3DBackwardDataImpl>(
-                    sm_algo_pack.cudnn_from_enum(algo), reproducible));
+                    sm_algo_pack.cudnn_from_enum(algo), positive_attr,
+                    negative_attr));
         } else {
             return nullptr;
         }
@@ -223,15 +226,9 @@ Convolution3DBackwardDataImpl::get_algorithm_heuristic(
         args = orig_args;
     }
 
-    if (reproducible) {
-        return megdnn::get_reproducible_algo<Convolution3DBackwardDataImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d bwd data");
-    } else {
-        return megdnn::get_usable_algo<Convolution3DBackwardDataImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d bwd data");
-    }
+    return megdnn::get_algo_match_attribute<Convolution3DBackwardDataImpl>(
+            sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
+            "cuda conv3d bwd data", positive_attr, negative_attr);
 }
 
 size_t Convolution3DBackwardDataImpl::get_workspace_in_bytes(
@@ -268,28 +265,30 @@ Convolution3DBackwardFilterImpl::Algorithm*
 Convolution3DBackwardFilterImpl::get_algorithm_heuristic(
         const TensorLayout& src, const TensorLayout& diff,
         const TensorLayout& grad, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto fm = check_layout_fwd(src, grad, diff);
     return get_algorithm_heuristic(src, diff, fm, workspace_limit_in_bytes,
-                                   reproducible);
+                                   positive_attr, negative_attr);
 }
 
 Convolution3DBackwardFilterImpl::Algorithm*
 Convolution3DBackwardFilterImpl::get_algorithm_heuristic(
         const TensorLayout& src, const TensorLayout& diff,
         const CanonizedFilterMeta& grad, size_t workspace_limit_in_bytes,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     AlgoBase::SizeArgs args(this, src, diff, grad);
 
     if (args.grad_filter_meta.group > 1 &&
-        sm_algo_pack.chanwise.is_available_reproducible(
-                args, reproducible, workspace_limit_in_bytes)) {
+        sm_algo_pack.chanwise.is_available_attribute(
+                args, positive_attr, negative_attr, workspace_limit_in_bytes)) {
         return &sm_algo_pack.chanwise;
     }
 
     auto get_cudnn_algo =
-            [this, &args, workspace_limit_in_bytes,
-             reproducible]() -> Convolution3DBackwardFilterImpl::AlgoBase* {
+            [this, &args, workspace_limit_in_bytes, positive_attr,
+             negative_attr]() -> Convolution3DBackwardFilterImpl::AlgoBase* {
         auto cudnn_handle = cuda::cudnn_handle(this->handle());
         cudnnConvolutionBwdFilterAlgo_t algo;
         CUDNNBwdFilterDescs desc;
@@ -297,11 +296,12 @@ Convolution3DBackwardFilterImpl::get_algorithm_heuristic(
         bool got = cudnn_get_convolution_bwd_filter_algo_helper(
                 cudnn_handle, desc.src_desc.desc, desc.diff_desc.desc,
                 desc.conv_desc.desc, desc.grad_desc.desc,
-                workspace_limit_in_bytes, &algo, reproducible);
+                workspace_limit_in_bytes, &algo, positive_attr, negative_attr);
         if (got) {
-            return static_cast<AlgoBase*>(megdnn::get_reproducible_algo<
+            return static_cast<AlgoBase*>(megdnn::get_algo_match_attribute<
                                           Convolution3DBackwardFilterImpl>(
-                    sm_algo_pack.cudnn_from_enum(algo), reproducible));
+                    sm_algo_pack.cudnn_from_enum(algo), positive_attr,
+                    negative_attr));
         } else {
             return nullptr;
         }
@@ -322,15 +322,9 @@ Convolution3DBackwardFilterImpl::get_algorithm_heuristic(
         args = orig_args;
     }
 
-    if (reproducible) {
-        return megdnn::get_reproducible_algo<Convolution3DBackwardFilterImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d bwd filter");
-    } else {
-        return megdnn::get_usable_algo<Convolution3DBackwardFilterImpl>(
-                sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
-                "cuda conv3d bwd filter");
-    }
+    return megdnn::get_algo_match_attribute<Convolution3DBackwardFilterImpl>(
+            sm_algo_pack.non_cudnn_algos, args, workspace_limit_in_bytes,
+            "cuda conv3d bwd filter", positive_attr, negative_attr);
 }
 
 size_t Convolution3DBackwardFilterImpl::get_workspace_in_bytes(

@@ -2,7 +2,7 @@
  * \file src/opr/impl/tensor_gen.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -46,11 +46,13 @@ void Alloc::outshape_by_symvar_do_get_output_shape(
 void Alloc::scn_do_execute() {
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Alloc) {
     MGB_MARK_USED_VAR(wrt_idx);
     MGB_MARK_USED_VAR(out_grad);
     return InvalidGrad::make(opr, 0);
 }
+#endif
 
 /* ======================= Linspace ======================= */
 
@@ -123,6 +125,7 @@ void Linspace::record_execute_deps(ExecDependencyArray& deps) {
             std::make_unique<intl::MegDNNGraphDep>(std::move(m_megdnn_opr)));
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Linspace) {
     if (wrt_idx == 2)
         return InvalidGrad::make(opr, wrt_idx);
@@ -134,6 +137,7 @@ MGB_IMPL_OPR_GRAD(Linspace) {
     return opr::Dot::make(og,
             opr::Linspace::make(i0, i1, opr.input(2), opr.param())).node();
 }
+#endif
 
 /* ======================= Eye ======================= */
 
@@ -195,9 +199,10 @@ void Eye::record_execute_deps(ExecDependencyArray& deps) {
             std::make_unique<intl::MegDNNGraphDep>(std::move(m_megdnn_opr)));
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Eye) {
     return InvalidGrad::make(opr, wrt_idx);
 }
-
+#endif
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
 

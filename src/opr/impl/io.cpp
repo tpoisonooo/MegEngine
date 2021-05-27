@@ -2,7 +2,7 @@
  * \file src/opr/impl/io.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -142,8 +142,10 @@ void intl::DeviceTensorHolder::add_output(DType dtype) {
 }
 
 void intl::DeviceTensorHolder::record_execute_deps(ExecDependencyArray& deps) {
-    deps.emplace_back(
-            std::make_unique<DevValueExecDep>(get_dev_tensor().storage()));
+    if (!output(0)->contain_flag(VarNode::Flag::MEMORY_NO_NEED)) {
+        deps.emplace_back(
+                std::make_unique<DevValueExecDep>(get_dev_tensor().storage()));
+    }
 }
 
 /* ===================== Host2DeviceCopy ===================== */
@@ -281,11 +283,11 @@ void Host2DeviceCopy::record_execute_deps(ExecDependencyArray& deps) {
 /* ===================== SharedDeviceTensor related ===================== */
 
 intl::SharedDeviceTensorBase::SharedDeviceTensorBase(
-        ComputingGraph &graph, const std::shared_ptr<DeviceTensorND> &dev_data,
-        const OperatorNodeConfig &config):
-    Super{&graph, config, "shared", {}},
-    m_dev_data{dev_data}
-{
+        ComputingGraph& graph, const std::shared_ptr<DeviceTensorND>& dev_data,
+        bool const_value, const OperatorNodeConfig& config)
+        : Super{&graph, config, "shared", {}},
+          m_dev_data{dev_data},
+          m_const_value(const_value) {
     if (config.has_comp_node_set()) {
         mgb_assert(config.get_single_comp_node() == dev_data->comp_node());
     }
@@ -313,20 +315,22 @@ cg::static_infer::SourceType SharedDeviceTensor::static_infer_src_type() const {
 
 SymbolVar SharedDeviceTensor::make(ComputingGraph &graph,
         const std::shared_ptr<DeviceTensorND> &dev_data,
+        bool const_value,
         const OperatorNodeConfig &config) {
     return graph.insert_opr(std::make_unique<SharedDeviceTensor>(
-                graph, dev_data, config))->output(0);
+                graph, dev_data, const_value, config))->output(0);
 }
 
 SymbolVar SharedDeviceTensor::make(ComputingGraph &graph,
         const HostTensorND &value,
+        bool const_value,
         const OperatorNodeConfig &config) {
     auto cn = value.comp_node();
     if (config.has_comp_node_set())
         cn = config.get_single_comp_node();
     auto dev_v = std::make_shared<DeviceTensorND>();
     dev_v->comp_node(cn).copy_from(value).sync();
-    return make(graph, dev_v, config);
+    return make(graph, dev_v, const_value, config);
 }
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(SharedDeviceTensor);
@@ -342,7 +346,7 @@ SymbolVar VolatileSharedDeviceTensor::make(ComputingGraph &graph,
         const std::shared_ptr<DeviceTensorND> &dev_data,
         const OperatorNodeConfig &config) {
     return graph.insert_opr(std::make_unique<VolatileSharedDeviceTensor>(
-                graph, dev_data, config))->output(0);
+                graph, dev_data, false, config))->output(0);
 }
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(VolatileSharedDeviceTensor);
@@ -354,10 +358,10 @@ void SharedDeviceTensorWithFormat::init_output_format() {
 
 SymbolVar SharedDeviceTensorWithFormat::make(
         ComputingGraph& graph, const std::shared_ptr<DeviceTensorND>& dev_data,
-        const OperatorNodeConfig& config) {
+        bool const_value, const OperatorNodeConfig& config) {
     auto&& opr =
             graph.insert_opr(std::make_unique<SharedDeviceTensorWithFormat>(
-                                     graph, dev_data, config))
+                                     graph, dev_data, const_value, config))
                     ->cast_final_safe<SharedDeviceTensorWithFormat>();
     return opr.output(0);
 }
@@ -382,7 +386,7 @@ class ImmutableTensor::Value {
         void setup(CompNode cn, const HostTensorND &val);
 
         bool initialized() const {
-            return !m_dev.empty();
+            return m_dev.shape_valid();
         }
 
         //! value on comp node
@@ -400,8 +404,9 @@ class ImmutableTensor::Value {
 };
 
 void ImmutableTensor::Value::setup(CompNode cn, const HostTensorND &val) {
-    mgb_assert(m_dev.empty() && !val.empty());
+    mgb_assert(m_dev.empty() && !m_dev.shape_valid());
     m_dev.comp_node(cn).copy_from(val).sync();
+    mgb_assert(val.empty() == m_dev.empty());
 
     auto one_elem = [](const TensorShape& shape) {
         for (size_t i = 0; i < shape.ndim; ++i) {
@@ -414,7 +419,7 @@ void ImmutableTensor::Value::setup(CompNode cn, const HostTensorND &val) {
     if (one_elem(val.shape())) {
         float v;
         static_cast_dtype(&v, val.dtype(), val.raw_ptr());
-        m_summary = ssprintf("%.3g", v);
+        m_summary = ssprintf("const<%.3g>", v);
         if (val.shape().ndim != 1) {
             m_summary += val.shape().to_string();
         }
@@ -446,6 +451,7 @@ class ImmutableTensor::DevValueCache final: public UserDataContainer::UserData {
         HostTensorND m_val_ref;
 
         const dt_byte* val_ptr() const {
+            mgb_assert(m_trait.size_bytes);
             return m_val.empty() ? m_val_ref.raw_ptr() : m_val.data();
         }
 
@@ -454,9 +460,8 @@ class ImmutableTensor::DevValueCache final: public UserDataContainer::UserData {
             TensorKey(const HostTensorND &v):
                 m_val_ref{v}
             {
-                mgb_assert(v.layout().is_contiguous());
+                mgb_assert(v.layout().is_contiguous() || v.layout().is_empty());
                 m_trait.size_bytes = v.layout().span().high_byte;
-                mgb_assert(m_trait.size_bytes);
 
                 auto &&layout = m_trait.layout;
                 // zero to enable byte-comparison
@@ -467,15 +472,19 @@ class ImmutableTensor::DevValueCache final: public UserDataContainer::UserData {
                     layout.shape[i] = v.layout().shape[i];
                     layout.stride[i] = v.layout().stride[i];
                 }
-                m_trait.hash = XXHash{}.
-                    update(v.raw_ptr(), m_trait.size_bytes).
-                    update(&m_trait.layout, sizeof(m_trait.layout)).
-                    digest();
+                XXHash hasher;
+                if (!v.empty()) {
+                    hasher.update(v.raw_ptr(), m_trait.size_bytes);
+                }
+                hasher.update(&m_trait.layout, sizeof(m_trait.layout));
+                m_trait.hash = hasher.digest();
             }
 
             bool operator == (const TensorKey &rhs) const {
                 return !memcmp(&m_trait, &rhs.m_trait, sizeof(Trait)) &&
-                    !memcmp(val_ptr(), rhs.val_ptr(), m_trait.size_bytes);
+                       ((m_trait.size_bytes == 0 &&
+                         rhs.m_trait.size_bytes == 0) ||
+                        !memcmp(val_ptr(), rhs.val_ptr(), m_trait.size_bytes));
             }
 
             size_t hash() const {
@@ -485,6 +494,7 @@ class ImmutableTensor::DevValueCache final: public UserDataContainer::UserData {
             //! copy from m_val_ref to m_val, to avoid refed value being
             //! modified
             void copy_val_permanent() {
+                if (m_trait.size_bytes == 0) return;
                 mgb_assert(m_val.empty());
                 m_val.resize(m_trait.size_bytes);
                 memcpy(m_val.data(), m_val_ref.raw_ptr(), m_trait.size_bytes);
@@ -544,7 +554,6 @@ class ImmutableTensor::DevValueCache final: public UserDataContainer::UserData {
         }
 
         const Value& get(const HostTensorND &tensor) {
-            mgb_assert(!tensor.empty());
             if (tensor.shape().is_scalar()) {
                 return get(DTypeScalar::make_from_raw(
                             tensor.dtype(), tensor.raw_ptr()));
@@ -595,6 +604,7 @@ ImmutableTensor::ImmutableTensor(ComputingGraph &graph,
 
     add_output(value.dev().dtype());
     add_equivalence_component<ScalarHash<const void*>>(&value);
+    output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
 }
 
 ImmutableTensor::~ImmutableTensor() noexcept = default;
@@ -630,6 +640,9 @@ SymbolVar ImmutableTensor::make(ComputingGraph &graph, const DTypeScalar &val,
 
 const DeviceTensorND& ImmutableTensor::value() const {
     return m_value.dev();
+}
+const DeviceTensorND& ImmutableTensor::host_value()  {
+    return const_cast<Value*>(&m_value)->static_infer();
 }
 
 SymbolVar ImmutableTensor::make_from_value(
@@ -758,11 +771,13 @@ Copy::NodeProp* Copy::do_make_node_prop() const {
     return rst;
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Copy) {
     mgb_assert(wrt_idx == 0);
     return Copy::make(out_grad[0],
             OperatorNodeConfig{}.follow_comp_node(opr.input(0))).node();
 }
+#endif
 
 void Copy::add_input_layout_constraint() {
     if (input(0)->comp_node() != output(0)->comp_node()) {
@@ -788,13 +803,18 @@ class intl::MultipleDeviceTensorHolderBase::DevValuesExecDep final
     SmallVector<DeviceTensorStorage> m_vals;
 
 public:
-    explicit DevValuesExecDep(const ValueArray& vals) {
-        for (auto&& val : vals) {
-            m_vals.emplace_back(std::move(val->storage()));
+    explicit DevValuesExecDep(const ValueArray& vals,
+                              MultipleDeviceTensorHolderBase* opr) {
+        mgb_assert(vals.size() == opr->output().size(),
+                   "the output value size is diff from output var size");
+        for (size_t index = 0; index < vals.size(); index++) {
+            if (!opr->output(index)->contain_flag(
+                        VarNode::Flag::MEMORY_NO_NEED)) {
+                m_vals.emplace_back(std::move(vals[index]->storage()));
+            }
         }
     }
 };
-
 
 intl::MultipleDeviceTensorHolderBase::MultipleDeviceTensorHolderBase(
         ComputingGraph& graph, ValueArray values,
@@ -874,8 +894,7 @@ intl::MultipleDeviceTensorHolderBase::do_make_node_prop() const {
 
 void intl::MultipleDeviceTensorHolderBase::record_execute_deps(
         ExecDependencyArray& deps) {
-    deps.emplace_back(
-            std::make_unique<DevValuesExecDep>(values()));
+    deps.emplace_back(std::make_unique<DevValuesExecDep>(values(), this));
 }
 
 /* ===================== MultipleDeviceTensorHolder ===================== */

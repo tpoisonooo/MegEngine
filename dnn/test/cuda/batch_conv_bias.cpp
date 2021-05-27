@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/batch_conv_bias.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -241,10 +241,14 @@ void benchmark_target_algo(Handle* handle, const std::vector<BenchArgs>& args,
     "v" V(CUDNN_MAJOR) "." V(CUDNN_MINOR) "." V(CUDNN_PATCHLEVEL)
     benchmarker_cudnn.set_before_exec_callback(
             conv_bias::ConvBiasAlgoChecker<ConvBiasForward>(
-                    "CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_"
-                    "GEMM" CUDNN_VERSION_STRING));
-    benchmarker_matmul.set_before_exec_callback(
-            AlgoChecker<BatchedMatrixMul>("BRUTE_FORCE-CUBLAS"));
+                    ConvBiasForward::algo_name<ConvBias::DefaultParam>(
+                            "CUDNN:ConvBiasActivation:"
+                            "CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_"
+                            "GEMM" CUDNN_VERSION_STRING,
+                            {})
+                            .c_str()));
+    benchmarker_matmul.set_before_exec_callback(AlgoChecker<BatchedMatrixMul>(
+            ExecutionPolicyAlgoName{"BRUTE_FORCE", {{"CUBLAS", {}}}}));
 
     benchmarker.set_dtype(0, src_dtype)
             .set_dtype(1, filter_dtype)
@@ -279,7 +283,7 @@ void benchmark_target_algo(Handle* handle, const std::vector<BenchArgs>& args,
 
             benchmarker.set_param(bparam);
             if (!algo) {
-                benchmarker.proxy()->target_algo = nullptr;
+                benchmarker.proxy()->target_execution_policy.algo.reset();
             }
             auto time_in_ms =
                     benchmarker.execs(
@@ -309,6 +313,9 @@ void benchmark_target_algo(Handle* handle, const std::vector<BenchArgs>& args,
                         arg.f / (1e12);
             TensorShape src{arg.n, arg.ci, arg.hi, arg.wi},
                     filter{arg.co, arg.ci, arg.f, arg.f};
+            if (!algo){
+                algo = "no_name";
+            }
             printf("src=%s, filter=%s, time(algo=%s)=%.2f %.2fTops, "
                    "time(cudnn)=%.2f %.2fTops, time(batched_matmul)=%.2f "
                    "%.2fTops, "

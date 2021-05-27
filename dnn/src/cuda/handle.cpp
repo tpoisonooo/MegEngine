@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/handle.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -46,7 +46,7 @@ HandleImpl::HandleImpl(megcoreComputingHandle_t comp_handle):
         cuda_check(cudaGetDevice(&dev_id));
     }
     m_device_id = dev_id;
-    cuda_check(cudaGetDeviceProperties(&m_device_prop, dev_id));
+    m_device_prop = get_device_prop(dev_id);
     // Get stream from MegCore computing handle.
     megdnn_assert(CUDNN_VERSION == cudnnGetVersion(),
         "cudnn version mismatch: compiled with %d; detected %zu at runtime",
@@ -54,6 +54,12 @@ HandleImpl::HandleImpl(megcoreComputingHandle_t comp_handle):
 #if CUDA_VERSION >= 10010
     megdnn_assert(cublasLtGetVersion() >= 10010,
         "cuda library version is too low to run cublasLt");
+#endif
+#if CUDNN_VERSION >= 8000
+    megdnn_log_warn(R"(
+        Cudnn8 will jit ptx code with cache. You can set 
+        CUDA_CACHE_MAXSIZE and CUDA_CACHE_PATH environment var to avoid repeat jit(very slow).
+        For example `export CUDA_CACHE_MAXSIZE=2147483647` and `export CUDA_CACHE_PATH=/data/.cuda_cache`)");
 #endif
     cudnn_check(cudnnCreate(&m_cudnn_handle));
     cublas_check(cublasCreate(&m_cublas_handle));
@@ -80,7 +86,7 @@ HandleImpl::HandleImpl(megcoreComputingHandle_t comp_handle):
     cuda_check(cudaStreamSynchronize(stream()));
 
     // check tk1
-    m_is_tegra_k1 = (strcmp(m_device_prop.name, "GK20A") == 0);
+    m_is_tegra_k1 = (strcmp(m_device_prop->name, "GK20A") == 0);
     m_cusolver_handle = nullptr;
 }
 
@@ -104,7 +110,7 @@ void HandleImpl::ConstScalars::init() {
 
 size_t HandleImpl::alignment_requirement() const {
     auto &&prop = m_device_prop;
-    return std::max(prop.textureAlignment, prop.texturePitchAlignment);
+    return std::max(prop->textureAlignment, prop->texturePitchAlignment);
 }
 
 bool HandleImpl::check_cross_dev_copy_constraint(const TensorLayout& src) {
@@ -121,6 +127,10 @@ void HandleImpl::initialize_cusolver() {
 size_t HandleImpl::image2d_pitch_alignment() const {
     size_t align = device_prop().texturePitchAlignment;
     return align;
+}
+
+HandleImpl::HandleVendorType HandleImpl::vendor_type() const {
+    return HandleVendorType::CUDA;
 }
 
 } // namespace cuda

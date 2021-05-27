@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/reduce/reduce.cu
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -36,6 +36,7 @@ MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
 INST(dt_float16, dt_float16, float)
 INST(dt_float16, float, float)
 INST(float, dt_float16, float)
+INST(int, float, float)
 
 #undef cb
 #undef INST

@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/conv_bias/group_conv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -50,6 +50,10 @@ ConvBiasForwardImpl::AlgoGroupConvGeneral::AlgoGroupConvGeneral(AlgoBase* impl)
 
 bool ConvBiasForwardImpl::AlgoGroupConvGeneral::is_available(
         const SizeArgs& args) const {
+    if (args.src_layout->dtype == args.filter_layout->dtype &&
+        args.src_layout->dtype == dtype::BFloat16()) {
+        return false;
+    }
     if (args.z_layout->ndim > 0 || args.filter_meta.group <= 1)
         return false;
     auto&& param = args.opr->param();
@@ -105,7 +109,8 @@ void ConvBiasForwardImpl::AlgoGroupConvGeneral::exec(
         auto sub_args = args;
         sub_args.dst_tensor = &conv_dst_tensor;
         sub_args.dst_layout = &conv_dst_tensor.layout;
-        TensorND tsrc{*args.src_tensor}, tdst{conv_dst_tensor}, tbias{*args.bias_tensor};
+        TensorND tsrc{*args.src_tensor}, tdst{conv_dst_tensor},
+                tbias{*args.bias_tensor};
         SmallVector<size_t> flt_shape(0);
         std::vector<ptrdiff_t> flt_stride(0);
         size_t idx = 0;

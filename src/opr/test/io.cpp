@@ -2,7 +2,7 @@
  * \file src/opr/test/io.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -150,6 +150,36 @@ TEST(TestOprIO, ImmutableTensor) {
 
 }
 
+TEST(TestOprIO, ImmutableTensorHostvalue) {
+    HostTensorGenerator<> gen;
+    TensorShape shape({2, 3});
+    auto host_x = gen(shape);
+    auto graph = ComputingGraph::make();
+    auto x = opr::ImmutableTensor::make(*graph, *host_x);
+    auto y = x.node()->owner_opr()
+                     ->cast_final_safe<opr::ImmutableTensor>()
+                     .host_value();
+    for (size_t i = 0; i < shape.total_nr_elems(); ++i) {
+        ASSERT_EQ(host_x->ptr<float>()[i], y.ptr<float>()[i]);
+    }
+}
+
+TEST(TestOprIO, ImmutableTensorHostvalueGPU) {
+    REQUIRE_GPU(1);
+    auto gpu_cn = CompNode::load("gpu0");
+    HostTensorGenerator<> gen;
+    TensorShape shape({2, 3});
+    auto host_x = gen(shape);
+    auto graph = ComputingGraph::make();
+    auto x = opr::ImmutableTensor::make(*graph, *host_x, {gpu_cn});
+    auto y = x.node()->owner_opr()
+                     ->cast_final_safe<opr::ImmutableTensor>()
+                     .host_value();
+    for (size_t i = 0; i < shape.total_nr_elems(); ++i) {
+        ASSERT_EQ(host_x->ptr<float>()[i], y.ptr<float>()[i]);
+    }
+}
+
 TEST(TestOprIO, ImmutableTensorLarge) {
     HostTensorGenerator<> gen;
     auto host_x = gen({1025});
@@ -175,6 +205,17 @@ TEST(TestOprIO, ImmutableTensorLarge) {
     for (size_t i = 0; i < 1025; ++ i) {
         MGB_ASSERT_FLOAT_EQ(px[i] * 2, py[i]);
     }
+}
+
+TEST(TestOprIO, ImmutableTensorEmpty) {
+    HostTensorGenerator<> gen;
+    auto graph = ComputingGraph::make();
+    auto host_x = gen({1, 9, 1, 9, 8, 1, 0});
+    auto x = opr::ImmutableTensor::make(*graph, *host_x);
+    HostTensorND host_x2;
+    auto func = graph->compile({make_callback_copy(x, host_x2)});
+    func->execute();
+    ASSERT_TRUE(host_x2.shape().is_empty());
 }
 
 TEST(TestOprIO, SharedDeviceTensor) {
@@ -489,10 +530,10 @@ TEST(TestOprIO, MultipleDeviceTensorWithFormatHolderCpu) {
              conv2 = opr::Convolution::make(conv1, w2, param);
 
         auto y = opr::Elemwise::make({conv2}, opr::Elemwise::Param::Mode::RELU);
-        SymbolVar y_opt = gopt::optimize_for_inference(
-                                  {y}, gopt::OptimizeForInferenceOptions{}
-                                               .enable_use_nhwcd4())[0]
-                                  .rename("out");
+        auto options = gopt::OptimizeForInferenceOptions{};
+        options.enable_nhwcd4();
+        SymbolVar y_opt =
+                gopt::optimize_for_inference({y}, options)[0].rename("out");
 
         auto dumper = serialization::GraphDumper::make(
                 serialization::OutputFile::make_fs(fname.c_str()));

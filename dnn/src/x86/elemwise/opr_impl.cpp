@@ -2,11 +2,12 @@
  * \file dnn/src/x86/elemwise/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #include "src/x86/elemwise/opr_impl.h"
 #include "src/x86/elemwise_op.h"
@@ -28,9 +29,6 @@ void check_mkl_error(const char* func) {
     MEGDNN_MARK_USED_VAR(func);
     int err = vmlClearErrStatus();
     if (err != VML_STATUS_OK) {
-#if MEGDNN_ENABLE_MANGLING
-        megdnn_throw("mkl error");
-#else
         const char* name;
         switch (err) {
 #define ON(x)      \
@@ -50,10 +48,9 @@ void check_mkl_error(const char* func) {
         }
         MEGDNN_MARK_USED_VAR(name);
         megdnn_throw(
-                ssprintf("MKL func %s reported error: code=%d(%s); "
-                         "possibly due to input data corruption.",
+                ssprintf("MKL func %s reported error: code=%d(%s);possibly due "
+                         "to input data corruption.",
                          func, err, name));
-#endif
     }
 }
 #endif
@@ -152,7 +149,11 @@ bool ElemwiseImpl::exec_unary() {
         auto mkl_dispatch = [&]() {
             switch (param().mode) {
                 DISPATCH_MKL(ABS, vsAbs);
-                DISPATCH_MKL(LOG, vsLn);
+                //! Delete the calculation support of MKL LOG because it will
+                //! cause VML_STATUS_SING error, the reason is At least one of
+                //! the input array values causes a divide-by-zero exception or
+                //! produces an invalid (QNaN) result.
+                // DISPATCH_MKL(LOG, vsLn);
                 DISPATCH_MKL(COS, vsCos);
                 DISPATCH_MKL(SIN, vsSin);
                 DISPATCH_MKL(TANH, vsTanh);
@@ -360,13 +361,14 @@ bool ElemwiseImpl::exec_binary() {
         return true;                                                          \
     }
         {
-            bool normal_case = is_vector(src1.layout) &&
-                               is_broadcastedx_channel_like(src0.layout, binfo);
+            bool normal_case =
+                    is_vector(src1.layout) &&
+                    is_broadcastedx_channel_like<8>(src0.layout, binfo);
             bool swap_case = false;
             bool commutable = mode_trait().commutable;
             if (!normal_case && commutable) {
                 swap_case = is_vector(src0.layout) &&
-                            is_broadcastedx_channel_like(src1.layout, binfo);
+                            is_broadcastedx_channel_like<8>(src1.layout, binfo);
             }
 
             if ((swap_case || normal_case) &&

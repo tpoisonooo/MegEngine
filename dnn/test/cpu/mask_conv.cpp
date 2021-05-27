@@ -2,7 +2,7 @@
  * \file dnn/test/cpu/mask_conv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -25,9 +25,11 @@ TEST_F(CPU, MASK_CONV) {
     mask_conv_test(handle());
 }
 
+#if MEGDNN_WITH_BENCHMARK
 TEST_F(CPU, MASK_CONV_BENCHMARK) {
     mask_conv_benchmark(handle());
 }
+#endif
 
 TEST_F(CPU, MASK_PROPAGATE) {
     param::MaskPropagate mask_param;
@@ -75,8 +77,8 @@ TEST_F(CPU, MASK_PROPAGATE) {
         auto dst = TensorND{dst_ptr, dst_layout};
         WorkspaceWrapper workspace{
                 handle(), opr->get_workspace_in_bytes(src.layout, filter.layout,
-                                                      dst.layout)};
-        opr->exec(src, filter, dst, workspace.workspace());
+                                                      dst.layout, nullptr)};
+        opr->exec(src, filter, dst, nullptr, workspace.workspace());
         for (size_t i = 0; i < dst.layout.total_nr_elems(); ++i) {
             mask_dst.ptr<int>()[i] = dst_ptr[i] > 0;
         }

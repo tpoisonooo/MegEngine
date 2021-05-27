@@ -2,7 +2,7 @@
  * \file dnn/src/naive/convolution/convolution.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,15 +26,14 @@ using namespace megdnn;
 using namespace naive;
 
 void ConvolutionForwardImpl::exec(_megdnn_tensor_in src,
-        _megdnn_tensor_in filter,
-        _megdnn_tensor_out dst,
-        _megdnn_workspace workspace)
-{
+                                  _megdnn_tensor_in filter,
+                                  _megdnn_tensor_out dst,
+                                  const PreprocessedFilter* preprocessed_filter,
+                                  _megdnn_workspace workspace) {
     MIDOUT_BEGIN(megdnn_naive_conv_fwd) {
-
-    auto filter_meta = check_exec(
-            src.layout, filter.layout, dst.layout, workspace.size);
-    using ComputeMode = Param::ComputeMode;
+        auto filter_meta = check_exec(src.layout, filter.layout, dst.layout,
+                                      workspace.size, preprocessed_filter);
+        using ComputeMode = Param::ComputeMode;
 #define DISPATCH_CMODE(in_dt, out_dt, in_ct, out_ct, comp_ct, cmode)      \
     do {                                                                  \
         using namespace dtype;                                            \
@@ -52,21 +51,28 @@ void ConvolutionForwardImpl::exec(_megdnn_tensor_in src,
 #define cb(dt)                                                     \
     DISPATCH(dt, dt, DTypeTrait<dt>::ctype, DTypeTrait<dt>::ctype, \
              DTypeTrait<dt>::ctype)
-    MEGDNN_FOREACH_COMPUTING_DTYPE_FLOAT(cb);
+        MEGDNN_FOREACH_COMPUTING_DTYPE_FLOAT(cb);
 #undef cb
-    DISPATCH(Int8, Int16, dt_int8, dt_int16, dt_int16);
-    DISPATCH(Int8, Int32, dt_int8, dt_int32, dt_int32);
-    DISPATCH(QuantizedS8, QuantizedS32, dt_int8, dt_int32, dt_int32);
-    MEGDNN_INC_FLOAT16(DISPATCH_CMODE(Float16, Float16, dt_float16, dt_float16,
-                                      dt_float32, ComputeMode::FLOAT32));
-    DISPATCH(Quantized8Asymm, QuantizedS32, dt_quint8, dt_qint32, dt_qint32);
-    DISPATCH(QuantizedS8, QuantizedS8, dt_int8, dt_int8, dt_int32);
+        DISPATCH(Int8, Int16, dt_int8, dt_int16, dt_int16);
+        DISPATCH(Int8, Int32, dt_int8, dt_int32, dt_int32);
+        DISPATCH(QuantizedS8, QuantizedS32, dt_int8, dt_int32, dt_int32);
+        DNN_INC_FLOAT16(DISPATCH_CMODE(Float16, Float16, dt_float16,
+                                          dt_float16, dt_float32,
+                                          ComputeMode::FLOAT32));
+        DNN_INC_FLOAT16(DISPATCH_CMODE(BFloat16, BFloat16, dt_bfloat16,
+                                          dt_bfloat16, dt_float32,
+                                          ComputeMode::FLOAT32));
+        DISPATCH(Quantized8Asymm, QuantizedS32, dt_quint8, dt_qint32,
+                 dt_qint32);
+        DISPATCH(QuantizedS8, QuantizedS8, dt_int8, dt_int8, dt_int32);
 #undef DISPATCH
-    megdnn_throw(ssprintf("unsupported Conv(%s, %s) -> %s with cmode = %d",
-                          src.layout.dtype.name(), filter.layout.dtype.name(),
-                          dst.layout.dtype.name(),
-                          static_cast<int>(param().compute_mode)));
-    } MIDOUT_END();
+        megdnn_throw(ssprintf("unsupported Conv(%s, %s) -> %s with cmode = %d",
+                              src.layout.dtype.name(),
+                              filter.layout.dtype.name(),
+                              dst.layout.dtype.name(),
+                              static_cast<int>(param().compute_mode)));
+    }
+    MIDOUT_END();
 }
 
 size_t ConvolutionBackwardDataImpl::get_workspace_in_bytes(const TensorLayout& filter,
@@ -77,7 +83,7 @@ size_t ConvolutionBackwardDataImpl::get_workspace_in_bytes(const TensorLayout& f
     auto grad_dt = grad.dtype.enumv();
     auto diff_dt = diff.dtype.enumv();
 #if !MEGDNN_DISABLE_FLOAT16
-    if (flt_dt == DTypeEnum::Float16) {
+    if (flt_dt == DTypeEnum::Float16 || flt_dt == DTypeEnum::BFloat16) {
         megdnn_assert(flt_dt == grad_dt && flt_dt == diff_dt);
         workspace_size = grad.span().dist_elem() * dtype::Float32().size();
     }
@@ -128,6 +134,20 @@ void ConvolutionBackwardDataImpl::exec(_megdnn_tensor_in filter,
         type_cvt->exec(grad_fp32, grad);
         return;
     }
+    if (filter.layout.dtype == dtype::BFloat16() &&
+        cmode == ComputeMode::FLOAT32) {
+        TensorND grad_fp32;
+        grad_fp32.layout = grad.layout;
+        grad_fp32.layout.dtype = dtype::Float32();
+        grad_fp32.raw_ptr = workspace.raw_ptr;
+        auto&& type_cvt = handle()->create_operator<TypeCvt>();
+        type_cvt->exec(grad, grad_fp32);
+        MEGDNN_DISPATCH_CPU_KERN_OPR(
+                (convolution::backward_data<dt_bfloat16, dt_bfloat16, dt_float32>(
+                        filter, diff, grad_fp32, filter_meta)););
+        type_cvt->exec(grad_fp32, grad);
+        return;
+    }
 #endif
     auto flt_dt = filter.layout.dtype.enumv();
     auto grad_dt = grad.layout.dtype.enumv();
@@ -174,7 +194,7 @@ size_t ConvolutionBackwardFilterImpl::get_workspace_in_bytes(
     auto src_dt = src.dtype.enumv();
     auto grad_dt = grad.dtype.enumv();
     auto diff_dt = diff.dtype.enumv();
-    if (src_dt == DTypeEnum::Float16) {
+    if (src_dt == DTypeEnum::Float16 || src_dt == DTypeEnum::BFloat16) {
         megdnn_assert(src_dt == grad_dt && src_dt == diff_dt);
         workspace_size = grad.span().dist_elem() * dtype::Float32().size();
     }
@@ -221,6 +241,22 @@ void ConvolutionBackwardFilterImpl::exec(_megdnn_tensor_in src,
         type_cvt->exec(grad_fp32, grad);
         return;
     }
+    if (src.layout.dtype == dtype::BFloat16() &&
+        cmode == ComputeMode::FLOAT32) {
+        TensorND grad_fp32;
+        grad_fp32.layout = grad.layout;
+        grad_fp32.layout.dtype = dtype::Float32();
+        grad_fp32.raw_ptr = workspace.raw_ptr;
+        auto&& type_cvt = handle()->create_operator<TypeCvt>();
+        type_cvt->exec(grad, grad_fp32);
+        MEGDNN_DISPATCH_CPU_KERN_OPR(
+                (convolution::backward_filter<dt_bfloat16, dt_bfloat16,
+                                              dt_float32>(src, diff, grad_fp32,
+                                                          filter_meta)););
+        type_cvt->exec(grad_fp32, grad);
+        return;
+    }
+
 #endif
 
     megdnn_assert_internal(0);
@@ -236,17 +272,20 @@ ConvolutionForwardImpl:: get_all_algorithms(const TensorLayout &,
 ConvolutionForward::Algorithm* ConvolutionForwardImpl::get_algorithm_heuristic(
         const TensorLayout& /* src */, const TensorLayout& /* diff */,
         const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto algo =
             static_cast<HandleImpl*>(handle())->default_conv_fwd_algo();
-    if (reproducible) {
-        megdnn_assert(algo->is_reproducible(),
-                      "require reproducible algorithm, but heuristic "
-                      "algorithm(%s) is not "
-                      "reproducible",
-                      algo->name());
-    }
+    algo->check_attribute(positive_attr, negative_attr);
     return algo;
+}
+
+ConvolutionForward::Algorithm* ConvolutionForwardImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret =
+            static_cast<HandleImpl*>(handle())->default_conv_fwd_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
 }
 
 std::vector<ConvolutionBackwardData::Algorithm *>
@@ -260,17 +299,21 @@ ConvolutionBackwardData::Algorithm*
 ConvolutionBackwardDataImpl::get_algorithm_heuristic(
         const TensorLayout& /* filter */, const TensorLayout& /* diff */,
         const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto algo =
             static_cast<HandleImpl*>(handle())->default_conv_bwd_data_algo();
-    if (reproducible) {
-        megdnn_assert(algo->is_reproducible(),
-                      "require reproducible algorithm, but heuristic "
-                      "algorithm(%s) is not "
-                      "reproducible",
-                      algo->name());
-    }
+    algo->check_attribute(positive_attr, negative_attr);
     return algo;
+}
+
+ConvolutionBackwardData::Algorithm*
+ConvolutionBackwardDataImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret =
+            static_cast<HandleImpl*>(handle())->default_conv_bwd_data_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
 }
 
 std::vector<ConvolutionBackwardFilter::Algorithm *>
@@ -284,17 +327,21 @@ ConvolutionBackwardFilter::Algorithm*
 ConvolutionBackwardFilterImpl::get_algorithm_heuristic(
         const TensorLayout& /* src */, const TensorLayout& /* diff */,
         const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto algo =
             static_cast<HandleImpl*>(handle())->default_conv_bwd_filter_algo();
-    if (reproducible) {
-        megdnn_assert(algo->is_reproducible(),
-                      "require reproducible algorithm, but heuristic "
-                      "algorithm(%s) is not "
-                      "reproducible",
-                      algo->name());
-    }
+    algo->check_attribute(positive_attr, negative_attr);
     return algo;
+}
+
+ConvolutionBackwardFilter::Algorithm*
+ConvolutionBackwardFilterImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret =
+            static_cast<HandleImpl*>(handle())->default_conv_bwd_filter_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
 }
 
 const char* ConvolutionForwardImpl::get_algorithm_set_name() const {

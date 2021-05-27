@@ -2,7 +2,7 @@
  * \file src/tensorrt/impl/opr_replace.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,6 +26,9 @@
 #include "megbrain/gopt/basic_arith.h"
 #include "megbrain/gopt/inference.h"
 #include "megbrain/gopt/misc.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 using namespace mgb;
 using namespace gopt;
@@ -1404,6 +1407,7 @@ void TensorRTReplacePass::Impl::detect_replace() {
 
             m_graph_map[opr] = max;
             if (max > m_tensorrt_graphs.size()) {
+                opr->output(0)->comp_node().activate();
                 m_tensorrt_graphs.push_back(
                         std::make_shared<TensorRTGraph>(feature_bits));
             }
@@ -1727,8 +1731,17 @@ void TensorRTReplacePass::Impl::TensorRTGraph::mark_varnode_format_nchw4() {
     }
 }
 
-void mgb::tensorrt::transform_dest_vars_inplace(mgb::cg::VarNodeArray& dest_vars) {
+void mgb::tensorrt::transform_dest_vars_inplace(
+        mgb::cg::VarNodeArray& dest_vars,
+        cg::GraphCommonOptimizeOptions& options) {
     gopt::GraphOptimizer optimizer;
+    //! As in megengine, the layout is NCHW, while tensorrt pass currently
+    //! only support NCHW4(int8), so we transform layout to nchw4 firstly.
+    if (options.has_set_nchw4()) {
+        options.disable_nchw4();
+        optimizer.add_pass<FuseConvBiasNonlinPass>();
+        optimizer.add_pass(EnableNCHW4Pass::make_nchw4_converter());
+    }
     optimizer.add_pass<ExpandFusedArithPass>();
     optimizer.add_pass<gopt::TensorRTReplacePass>();
     optimizer.add_pass<ArithFusePass>();
@@ -1739,6 +1752,7 @@ void mgb::tensorrt::transform_dest_vars_inplace(mgb::cg::VarNodeArray& dest_vars
     optimizer.apply_inplace(dest_vars);
 }
 
+#pragma GCC diagnostic pop
 #endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

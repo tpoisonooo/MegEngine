@@ -2,7 +2,7 @@
  * \file src/opr/impl/internal/indexing_helper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -91,8 +91,6 @@ FancyIndexingHelper::FancyIndexingHelper(
 
 void FancyIndexingHelper::init(const IndexDesc &index_desc) {
     mgb_assert(input().size() == m_idx_inp_start);
-    mgb_throw_if(index_desc.empty(), GraphError,
-            "empty index desc for subtensor opr");
     mgb_assert(m_index_desc.empty());
 
     m_input2idxonly_axis_indexer.resize(input().size(), nullptr);
@@ -373,9 +371,11 @@ serialization::IndexDescMaskDump::from_index_desc(const IndexDesc &desc) {
     ret.nr_item = desc.size();
     for (size_t i = 0; i < desc.size(); ++ i) {
         auto &&s = desc[i];
-        ret.items[i] = {
-            static_cast<int8_t>(s.axis.get_raw()),
-            s.begin.node(), s.end.node(), s.step.node(), s.idx.node()};
+        ret.items[i] = {static_cast<int8_t>(s.axis.get_raw()),
+                        static_cast<bool>(s.begin.node()),
+                        static_cast<bool>(s.end.node()),
+                        static_cast<bool>(s.step.node()),
+                        static_cast<bool>(s.idx.node())};
     }
     return ret;
 }

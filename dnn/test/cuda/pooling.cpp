@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/pooling.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -28,7 +28,7 @@ TEST_F(CUDA, POOLING_FORWARD)
 {
     auto args = pooling::get_args();
     using Format = param::Pooling::Format;
-    std::vector<DType> dtypes{dtype::Float16(), dtype::Float32()};
+    std::vector<DType> dtypes{dtype::Float16(), dtype::BFloat16(), dtype::Float32()};
     if (check_compute_capability(6, 0)) {
         // int pooling is supported only for Pascal or higher
         dtypes.push_back(dtype::Int8());
@@ -47,6 +47,8 @@ TEST_F(CUDA, POOLING_FORWARD)
             // different versions of cuDNN differs in rounding behavior;
             // setting eps to 1 to allow for rounding errors.
             checker.set_epsilon(1 + 1e-3);
+        } else if (dtype == dtype::BFloat16()) {
+            checker.set_epsilon(2e-2);
         } else {
             checker.set_epsilon(1e-2);
         }
@@ -75,7 +77,10 @@ TEST_F(CUDA, POOLING_FORWARD)
             // different versions of cuDNN differs in rounding behavior;
             // setting eps to 1 to allow for rounding errors.
             checker.set_epsilon(1 + 1e-3);
-        } else {
+        } else if (dtype == dtype::BFloat16()) {
+            checker.set_epsilon(2e-2);
+        }
+        else {
             checker.set_epsilon(1e-2);
         }
         checker.set_param(param)
@@ -153,6 +158,12 @@ TEST_F(CUDA, POOLING_BACKWARD)
             .set_epsilon(1e-2)
             .exec(TensorShapeArray{
                     ilayout, olayout, olayout, ilayout});
+        BFloat16PeriodicalRNG bf16_rng;
+        set_dtype(dtype::BFloat16());
+        checker.set_param(arg.param)
+                .set_rng(0, &bf16_rng)
+                .set_epsilon(1e-2)
+                .exec(TensorShapeArray{ilayout, olayout, olayout, ilayout});
     }
 
     /* add test for new Mode temporarily */
@@ -223,6 +234,12 @@ TEST_F(CUDA, POOLING_BACKWARD)
             .set_epsilon(1e-2)
             .exec(TensorShapeArray{
                     ilayout, olayout, olayout, ilayout});
+        BFloat16PeriodicalRNG bf16_rng;
+        set_dtype(dtype::BFloat16());
+        checker.set_param(arg.param)
+                .set_rng(0, &bf16_rng)
+                .set_epsilon(1e-2)
+                .exec(TensorShapeArray{ilayout, olayout, olayout, ilayout});
     }
 }
 
@@ -273,6 +290,46 @@ TEST_F(CUDA, POOLING_FORWARD_CHWN4) {
     }
 }
 
+TEST_F(CUDA, POOLING_FORWARD_INT8_NCHW4) {
+    require_compute_capability(6, 1);
+    using Param = param::Pooling;
+    Checker<Pooling> checker(handle_cuda());
+    Param param;
+    auto i8_min = std::numeric_limits<int8_t>().min();
+    auto i8_max = std::numeric_limits<int8_t>().max();
+    UniformIntRNG int_rng{i8_min, i8_max};
+    checker.set_dtype(0, dtype::QuantizedS8(0.1f));
+    param.format = Param::Format::NCHW4;
+    for (auto mode : {Param::Mode::MAX, Param::Mode::AVERAGE,
+                      Param::Mode::AVERAGE_COUNT_EXCLUDE_PADDING}) {
+        param.mode = mode;
+        checker.set_epsilon(1e-3).set_rng(0, &int_rng);
+        checker.set_param(param).exec({{64, 8, 28, 28, 4}, {}});
+        checker.set_param(param).exec({{15, 8, 28, 28, 4}, {}});
+        checker.set_param(param).exec({{30, 8, 28, 28, 4}, {}});
+    }
+}
+
+TEST_F(CUDA, POOLING_FORWARD_INT8_NCHW32) {
+    require_compute_capability(6, 1);
+    using Param = param::Pooling;
+    Checker<Pooling> checker(handle_cuda());
+    Param param;
+    auto i8_min = std::numeric_limits<int8_t>().min();
+    auto i8_max = std::numeric_limits<int8_t>().max();
+    UniformIntRNG int_rng{i8_min, i8_max};
+    checker.set_dtype(0, dtype::QuantizedS8(0.1f));
+    param.format = Param::Format::NCHW32;
+    for (auto mode : {Param::Mode::MAX, Param::Mode::AVERAGE,
+                      Param::Mode::AVERAGE_COUNT_EXCLUDE_PADDING}) {
+        param.mode = mode;
+        checker.set_epsilon(1e-3).set_rng(0, &int_rng);
+        checker.set_param(param).exec({{64, 8, 28, 28, 32}, {}});
+        checker.set_param(param).exec({{15, 8, 28, 28, 32}, {}});
+        checker.set_param(param).exec({{30, 8, 28, 28, 32}, {}});
+    }
+}
+
 #if MEGDNN_WITH_BENCHMARK
 TEST_F(CUDA, BENCHMARK_POOLING_CHWN4) {
     CUBenchmarker<Pooling> bencher(handle_cuda());
@@ -294,13 +351,17 @@ TEST_F(CUDA, BENCHMARK_POOLING_CHWN4) {
         param.format = Param::Format::CHWN4;
         bencher.set_param(param);
         auto time_chwn4 = bencher.execs({{C / 4, H, W, N, 4}, {}}) / nr_times;
+        auto time_nchw32 =
+                bencher.execs({{N, C / 32, H, W, 32}, {}}) / nr_times;
         size_t oh = infer_conv_shape(H, window, stride, padding),
                ow = infer_conv_shape(W, window, stride, padding);
         float io = (N * C * H * W + N * C * oh * ow) * sizeof(int8_t);
-        printf("time(cudnn)=%.2f ms, time(chwn4)=%.2f ms, "
-               "bandwidth(cudnn)=%.2f Gb/s, bandwidth(chwn4)=%.2f Gb/s\n",
-               time_cudnn, time_chwn4, io / (1e6 * time_cudnn),
-               io / (1e6 * time_chwn4));
+        printf("time(cudnn)=%.2f ms, time(chwn4)=%.2f ms, time(nchw32)=%.2f "
+               "ms, "
+               "bandwidth(cudnn)=%.2f Gb/s, bandwidth(chwn4)=%.2f Gb/s, "
+               "bandwidth(nchw32)=%.2f Gb/s\n",
+               time_cudnn, time_chwn4, time_nchw32, io / (1e6 * time_cudnn),
+               io / (1e6 * time_chwn4), io / (1e6 * time_nchw32));
     };
     run_bench(64, 64, 112, 112, 2, 1, 2);
     run_bench(256, 64, 112, 112, 2, 1, 2);

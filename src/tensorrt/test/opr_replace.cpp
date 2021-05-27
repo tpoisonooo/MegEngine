@@ -2,7 +2,7 @@
  * \file src/tensorrt/test/opr_replace.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -223,7 +223,7 @@ TEST(TestTensorRTReplace, ElemAddFusion) {
     ASSERT_EQ(3u, trt_opr->cast_final_safe<opr::TensorRTOpr>()
                           .trt_manager()
                           .iobuf_size());
-    MGB_ASSERT_TENSOR_NEAR(host_z1, host_z2, 1e-4);
+    MGB_ASSERT_TENSOR_NEAR(host_z1, host_z2, 5e-4);
 }
 
 TEST(TestTensorRTReplace, BatchedMatrixMulBasic) {
@@ -1930,7 +1930,7 @@ TEST(TestTensorRTReplace, FuseConvAdd) {
     param.stride_h = param.stride_w = 1;
     param.pad_h = param.pad_w = 1;
     auto y = opr::Convolution::make(x, w, param);
-    
+
     auto nchw2nchw4 = [](SymbolVar x) {
         auto xshp = opr::GetVarShape::make(x);
 
@@ -1977,6 +1977,73 @@ TEST(TestTensorRTReplace, FuseConvAdd) {
     MGB_ASSERT_TENSOR_NEAR(outputs[0], outputs[2], 1e-3);
     MGB_ASSERT_TENSOR_NEAR(outputs[1], outputs[3], 1e-3);
 }
+
+TEST(TestTensorRTReplace, FuseConvAddNchw2nchw4) {
+    REQUIRE_GPU(1);
+    auto cn = CompNode::load("gpu0");
+    cn.activate();
+    REQUIRE_CUDA_COMPUTE_CAPABILITY(6, 1);
+
+    HostTensorGenerator<dtype::Float32, RandomDistribution::UNIFORM> gen{
+            1.2f, 127 * 127};
+    auto graph = ComputingGraph::make();
+    graph->options().graph_opt_level = 0;
+    auto mkvar = [&](const char* name, const TensorShape& shp,
+                     const DType& dtype) {
+        return opr::TypeCvt::make(
+                opr::Host2DeviceCopy::make(*graph, gen(shp)).rename(name),
+                dtype);
+    };
+    auto mkcvar = [&](const char* name, const TensorShape& shp,
+                      const DType& dtype) {
+        return opr::TypeCvt::make(
+                opr::SharedDeviceTensor::make(*graph, *gen(shp))
+                        .rename(name),
+                dtype);
+    };
+
+    auto x = mkvar("x", {32, 4, 28, 28}, dtype::QuantizedS8(2.5f)),
+         w = mkcvar("w", {16, 4, 3, 3}, dtype::QuantizedS8(2.5f)),
+         b = mkcvar("b", {1, 16, 1, 1}, dtype::QuantizedS32(6.25f));
+    opr::ConvBias::Param param;
+    param.format = opr::ConvBias::Param::Format::NCHW;
+    param.stride_h = param.stride_w = 1;
+    param.pad_h = param.pad_w = 1;
+    auto y = opr::ConvBias::make(x, w, b, param, {},
+                                 OperatorNodeConfig{dtype::QuantizedS8{2.5f}});
+    auto z = opr::TypeCvt::make(y, dtype::Float32());
+
+    SymbolVar trt_z;
+    SymbolVar mgb_z;
+
+    ComputingGraph::Options opt;
+    opt.graph_opt_level = 0;
+    unpack_vector(
+            gopt::GraphOptimizer{}
+                    .add_pass<gopt::FuseConvBiasNonlinPass>()
+                    .add_pass(gopt::EnableNCHW4Pass::make_nchw4_converter())
+                    .add_pass<gopt::ExpandFusedArithPass>()
+                    .add_pass<gopt::TensorRTReplacePass>()
+                    .add_pass<gopt::ArithFusePass>()
+                    .apply({{z}})
+                    .endpoint_vars(),
+            trt_z);
+
+    opt.graph_opt_level = 0;
+    unpack_vector(gopt::GraphOptimizer{}.apply({{z}}).endpoint_vars(),
+                  mgb_z);
+
+    ComputingGraph::OutputSpec outspec(2);
+    SmallVector<HostTensorND> outputs(2);
+    outspec[0] = make_callback_copy(trt_z, outputs[0], false);
+    outspec[1] = make_callback_copy(mgb_z, outputs[1], false);
+    graph->options().graph_opt.tensorrt = false;
+    auto func = graph->compile(outspec);
+    func->execute();
+
+    MGB_ASSERT_TENSOR_NEAR(outputs[0], outputs[1], 1e-3);
+}
+
 
 #endif  // MGB_ENABLE_TENSOR_RT
 

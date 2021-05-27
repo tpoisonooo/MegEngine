@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/roi_align/roi_align.cu
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -175,6 +175,7 @@ void backward_proxy(const int nthreads, const T* top_diff,
             const int, const T*, T*, cudaStream_t);
 INST(dt_float32)
 INST(dt_float16)
+INST(dt_bfloat16)
 #undef INST
 
 }  // namespace roi_align

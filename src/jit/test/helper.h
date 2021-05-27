@@ -2,7 +2,7 @@
  * \file src/jit/test/helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -15,7 +15,7 @@
 
 namespace mgb {
 namespace jit {
-enum class Backend { NONE, HALIDE, NVRTC };
+enum class Backend { NONE, HALIDE, NVRTC, MLIR };
 
 void set_backend(Backend backend);
 
@@ -65,6 +65,13 @@ public:
         return *this;
     }
 
+    //! set jit level, default is 2, see graph_opt.jit in graph options
+    //! for more details
+    FusionChecker& set_jit_level(uint8_t jit_level) {
+        m_jit_level = jit_level;
+        return *this;
+    }
+
     /*!
      * \brief run and check correctness
      *
@@ -76,6 +83,7 @@ private:
     bool m_check_opr_type = true;
     bool m_direct_build = false;
     const size_t m_nr_input;
+    uint8_t m_jit_level = 2;
     const CompNode m_comp_node;
     HostTensorGenerator<> m_input_gen;
     SmallVector<std::shared_ptr<HostTensorND>> m_inputs_val;

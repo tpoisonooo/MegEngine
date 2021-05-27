@@ -2,7 +2,7 @@
  * \file src/opr/impl/tensor_manip.sereg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -30,31 +30,6 @@ namespace serialization {
     template<>
     struct OprMaker<opr::GetVarShape, 0>:
     public OprMakerVariadic<opr::GetVarShape>{};
-
-    template<>
-    struct OprLoadDumpImpl<opr::ParamPackConcat, 0>
-    {
-        using ParamPackConcat = opr::ParamPackConcat;
-        using Param = opr::ParamPackConcat::Param;
-
-        static void dump(OprDumpContext &ctx,
-                const cg::OperatorNodeBase &opr_) {
-            auto &&opr = opr_.cast_final_safe<ParamPackConcat>();
-            ctx.write_param<Param>(opr.param());
-        }
-
-        static cg::OperatorNodeBase* load(
-                OprLoadContext &ctx, const cg::VarNodeArray &inputs,
-                const OperatorNodeConfig &config) {
-             auto param = ctx.read_param<Param>();
-             mgb_assert(!inputs.empty());
-             SymbolVarArray ivar{inputs.size() - 1};
-             for (size_t i = 0; i < inputs.size() - 1; ++ i)
-                 ivar[i] = inputs[i];
-             return ParamPackConcat::make(ivar, inputs.back(),
-                     param, config).node()->owner_opr();
-        }
-    };
 
     template<>
     struct OprLoadDumpImpl<opr::Split, 0> {
@@ -151,7 +126,6 @@ namespace opr {
     MGB_SEREG_OPR(Dimshuffle, 1);
     MGB_SEREG_OPR(AxisAddRemove, 1);
     MGB_SEREG_OPR(Concat, 0);
-    MGB_SEREG_OPR(ParamPackConcat, 0);
     using GetVarShapeV1 = opr::GetVarShape;
     MGB_SEREG_OPR(GetVarShapeV1, 0);
     using ReshapeV1 = opr::Reshape;
@@ -185,15 +159,33 @@ namespace opr {
             const cg::OperatorNodeBase &opr_, const VarNodeArray &inputs,
             const OperatorNodeConfig &config){
          auto &&opr = opr_.cast_final_safe<ParamPackSplit>();
+         auto &&offsets = opr.get_offsets();
          auto &&shape = opr.get_output_shapes();
 
-         return ParamPackSplit::make(inputs[0], inputs[1], shape, config).at(0).
+         return ParamPackSplit::make(inputs[0], offsets, shape, config).at(0).
              node()->owner_opr();
     }
 
     MGB_REG_OPR_SHALLOW_COPY(ParamPackSplit, opr_shallow_copy_param_pack_split);
-    MGB_SEREG_OPR(RelayoutFormat, 1);
-    MGB_SEREG_OPR(WinogradFilterPreprocess, 1);
+
+    cg::OperatorNodeBase* opr_shallow_copy_param_pack_concat(
+            const serialization::OprShallowCopyContext &ctx,
+            const cg::OperatorNodeBase &opr_, const VarNodeArray &inputs,
+            const OperatorNodeConfig &config){
+         auto &&opr = opr_.cast_final_safe<ParamPackConcat>();
+         auto &&offsets = opr.get_offsets();
+         
+         SymbolVarArray ivar{inputs.size() - 1};
+         for (size_t i = 0; i < inputs.size() - 1; ++i)
+             ivar[i] = inputs[i];
+         return ParamPackConcat::make(ivar, inputs.back(), offsets, config).
+             node()->owner_opr();
+    }
+
+    MGB_REG_OPR_SHALLOW_COPY(ParamPackConcat, opr_shallow_copy_param_pack_concat);
+    
+    using RelayoutFormatV1 = opr::RelayoutFormat;
+    MGB_SEREG_OPR(RelayoutFormatV1, 1);
 } // namespace opr
 
 } // namespace mgb

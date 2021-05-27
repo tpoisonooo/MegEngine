@@ -2,7 +2,7 @@
  * \file dnn/src/common/matrix_inverse.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -34,10 +34,9 @@ void MatrixInverse::canonize_params(const TensorLayout& layout, size_t* batch,
                           layout[layout.ndim - 2] == layout[layout.ndim - 1],
                   "invalid MatrixInverse layout: %s",
                   layout.to_string().c_str());
-    megdnn_assert(
-            MEGDNN_FLOAT16_SELECT(layout.dtype == dtype::Float16(), false) ||
-                    layout.dtype == dtype::Float32(),
-            "MatrixInverse only supports f16 & f32");
+    megdnn_assert(DNN_FLOAT16_SELECT(layout.dtype == dtype::Float16(), false) ||
+                          layout.dtype == dtype::Float32(),
+                  "MatrixInverse only supports f16 & f32");
     if (batch) {
         *batch = 1;
         for (size_t i = 0; i < layout.ndim - 2; ++i) {

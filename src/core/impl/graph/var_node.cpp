@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -230,32 +230,36 @@ VarNode& VarNode::format(TensorFormat format) {
 
 bool VarNode::set_fwd_in2out_readonly(
         VarNode *input, const SubTensorSpec &sub) {
-    return static_cast<ComputingGraphImpl*>(owner_graph())
+    if (owner_graph()->options().imperative_proxy_graph) {
+        return false;
+    }
+    return ComputingGraphImpl::downcast(owner_graph())
         ->var_node_mem_manager().fwd_in2out_readonly(input, sub, this);
 }
 
 VarNode& VarNode::set_fwd_in2out_writable(VarNode *input) {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
         ->var_node_mem_manager().fwd_in2out_writable(input, this);
     return *this;
 }
 
 
 VarNode& VarNode::set_fwd_in2out_writable_force(VarNode *input) {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    mgb_assert(!owner_graph()->options().imperative_proxy_graph);
+    ComputingGraphImpl::downcast(owner_graph())
         ->var_node_mem_manager().fwd_in2out_writable_force(input, this);
     return *this;
 }
 
 VarNode& VarNode::add_layout_constraint(LayoutConstraintCallback callback) {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
         ->var_node_mem_manager().add_layout_constraint(
                 this, std::move(callback));
     return *this;
 }
 
 VarNode& VarNode::add_layout_constraint_contiguous() {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
             ->var_node_mem_manager()
             .add_layout_constraint_level(
                     this, VarNodeMemManager::LayoutConstraintLevel::CONTIG);
@@ -263,7 +267,7 @@ VarNode& VarNode::add_layout_constraint_contiguous() {
 }
 
 VarNode& VarNode::add_layout_constraint_monotone() {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
             ->var_node_mem_manager()
             .add_layout_constraint_level(
                     this, VarNodeMemManager::LayoutConstraintLevel::MONOTONE);
@@ -303,7 +307,7 @@ VarNode& VarNode::shape(const TensorShape &shape) {
     return *this;
 }
 
-VarNode& VarNode::shape_alloc(const TensorShape &shape) {
+VarNode& VarNode::shape_alloc(const TensorShape &shape, size_t size_req) {
     mgb_assert(shape.ndim, "got empty shape in shape_alloc: "
             "var=%s owner_opr=%s{%s}", cname(), owner_opr()->cname(),
             owner_opr()->dyn_typeinfo()->name);
@@ -311,8 +315,8 @@ VarNode& VarNode::shape_alloc(const TensorShape &shape) {
                 "shape_alloc() could only be used for vars with"
                 " NO_SYS_MEM_ALLOC flag; actual var: %s",
                 cg::dump_var_info({this}).c_str());
-    static_cast<ComputingGraphImpl*>(owner_graph())
-        ->var_node_mem_manager().var_alloc_with_shape(this, shape);
+    ComputingGraphImpl::downcast(owner_graph())
+        ->var_node_mem_manager().var_alloc_with_shape(this, shape, size_req);
     return *this;
 }
 
@@ -326,7 +330,7 @@ bool VarNode::reset_dev_tensor_from_other_var(VarNode* src_var) {
                 "dynamic storage on src is required for dynamic readonly "
                 "forwarding: vars=%s",
                 dump_var_info({src_var, this}).c_str());
-        auto&& trait = static_cast<ComputingGraphImpl*>(owner_graph())
+        auto&& trait = ComputingGraphImpl::downcast(owner_graph())
                                ->var_node_mem_manager()
                                .get_var_node_mem_trait_at(src_var);
         if (trait.seq_force_update_dest ||
@@ -392,6 +396,108 @@ VarNode& VarNode::comp_node(const CompNode &cn) {
 }
 
 #if MGB_ENABLE_JSON
+std::shared_ptr<json::Value>
+VarNode::dump_static_infer_info_to_json() const {
+    using namespace cg::static_infer;
+    auto&& mgr = static_cast<cg::ComputingGraphImpl*>(
+            owner_graph())->static_infer_manager_impl();
+    auto get_dep_type = [](const DepType& type) -> std::string {
+        switch (type) {
+#define cb(name) \
+case DepType::name: \
+    return #name;
+            cb(SHAPE)
+            cb(VALUE)
+#undef cb
+            default:
+                mgb_throw(MegBrainError, "unknown dep type");
+        }
+    };
+    auto get_infer_type = [](const InferType::Flag& type) {
+        switch (type) {
+#define cb(name) \
+case InferType::Flag::name: \
+    return json::String::make(#name);
+            cb(NO_DESC)
+            cb(CONST)
+            cb(RT_STATIC)
+            cb(MISSING_INP)
+#undef cb
+            default:
+                mgb_throw(MegBrainError, "unknown infer type");
+        }
+    };
+    auto make_tag = [&](const DepType& type) {
+        VarNode* self = const_cast<VarNode*>(this);
+        auto c_deps = mgr.get_deps({self, type});
+        auto deps = json::Array::make();
+        for (auto&& i : c_deps) {
+            mgb_assert(i.dest);
+            deps->add(json::Object::make({
+                {"var", json::String::make(i.dest->id_str())},
+                {"dep_type", json::String::make(get_dep_type(i.type))}
+            }));
+        }
+        auto infer_type_handle = mgr.get_infer_type(self);
+        auto inferred_result = json::Null::make();
+        auto infer_type = type == DepType::SHAPE ? infer_type_handle.shape
+                                                 : infer_type_handle.value;
+        if (infer_type != InferType::Flag::NO_DESC) {
+            if (type == DepType::SHAPE) {
+                if (auto shape = mgr.infer_shape_fallible(self)) {
+                    auto inferred_shape = json::Array::make();
+                    for (size_t i = 0; i < shape->ndim; ++ i) {
+                        inferred_shape->add(json::Number::make((*shape)[i]));
+                    }
+                    inferred_result = inferred_shape;
+                }
+            } else {
+                if (auto p = mgr.infer_value_fallible(self)) {
+                    auto&& dev = *p;
+                    if (dev.shape().ndim == 1 &&
+                        dev.shape(0) < TensorShape::MAX_NDIM &&
+                        mgb_likely(dev.comp_node() == CompNode::default_cpu())) {
+                        MGB_TRY {
+                            size_t nr_elems = dev.shape(0);
+                            auto&& dtype = dev.dtype();
+                            void* vptr = dev.raw_ptr();
+                            double data[nr_elems];
+                            HostTensorND contig;
+                            if (!dev.layout().is_contiguous()) {
+                                // both src and dst are placed on default cpu,
+                                // no need for sync
+                                contig.copy_from(dev);
+                                mgb_assert(contig.layout().is_contiguous());
+                                vptr = contig.raw_ptr();
+                            } 
+                            static_cast_dtype(data, dtype, vptr, nr_elems);
+                            auto inferred_value = json::Array::make();
+                            for (size_t i = 0; i < nr_elems; ++ i) {
+                                inferred_value->add(json::Number::make(data[i]));
+                            }
+                            inferred_result = inferred_value;
+                        }
+                        MGB_CATCH(ConversionError&, {});
+                    } else {
+                        inferred_result = json::String::make("Large Array");
+                    }
+                }
+            }
+        }
+        return json::Object::make({
+            {"node_type", json::String::make("static_infer_tag")},
+            {"infer_type", get_infer_type(infer_type)},
+            {"inferred_result", inferred_result},
+            {"deps", deps}
+        });
+    };
+    return json::Object::make({
+#define TAG(type) {get_dep_type(type), make_tag(type)}
+        TAG(DepType::SHAPE), TAG(DepType::VALUE)
+#undef TAG
+    });
+}
+
 std::shared_ptr<json::Value> VarNode::to_json() const {
     auto get_var = [](VarNode *p) -> std::shared_ptr<json::Value> {
         if(p)
@@ -399,7 +505,7 @@ std::shared_ptr<json::Value> VarNode::to_json() const {
         return json::Null::make();
     };
 
-    auto &&trait = static_cast<ComputingGraphImpl*>(owner_graph()
+    auto &&trait = ComputingGraphImpl::downcast(owner_graph()
             )->var_node_mem_manager().get_var_node_mem_trait(this);
     auto flag = json::Array::make();
     {
@@ -439,8 +545,10 @@ std::shared_ptr<json::Value> VarNode::to_json() const {
         {"dev_ptr", json::Null::make()},
         {"prev_dev_ptr", json::NumberInt::make(reinterpret_cast<size_t>(
                     m_prev_dev_ptr))},
-        {"flag", flag}
+        {"flag", flag},
+        {"static_infer_tags", dump_static_infer_info_to_json()}
     });
+
     if (m_prev_dev_ptr) {
         (*rst)["prev_dev_ptr_end"] = json::NumberInt::make(
                 reinterpret_cast<size_t>(m_prev_dev_ptr) +
@@ -455,7 +563,7 @@ std::shared_ptr<json::Value> VarNode::to_json() const {
 #endif
 
 MemAllocPlan& VarNode::init_mem_plan(const DeviceTensorND* fixed_alloc) {
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
             ->var_node_mem_manager()
             .init_single_var_mem_plan(this, fixed_alloc);
     return m_mem_plan;
@@ -468,12 +576,12 @@ VarNode& VarNode::add_flag(Flag flag) {
 
 void VarNode::modify_flag(Flag delta, Flag new_flag) {
     if (contain_flag(Flag::FLAG_FREEZED)) {
-        mgb_assert((delta & (
-                    Flag::NO_MEM_RECLAIM |
-                    Flag::NO_SYS_STATIC_MEM_ALLOC |
-                    Flag::RT_FORCE_DYNAMIC_MEM_ALLOC)) == delta);
+        mgb_assert(
+                (delta & (Flag::NO_MEM_RECLAIM | Flag::NO_SYS_STATIC_MEM_ALLOC |
+                          Flag::RT_FORCE_DYNAMIC_MEM_ALLOC)) == delta ||
+                (new_flag & Flag::MEMORY_NO_NEED));
 
-        mgb_assert(!static_cast<ComputingGraphImpl*>(owner_graph())->
+        mgb_assert(!ComputingGraphImpl::downcast(owner_graph())->
                 var_node_mem_manager().optimize_started(),
                 "could not modify var flags after optimization started");
     }

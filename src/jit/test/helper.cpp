@@ -2,7 +2,7 @@
  * \file src/jit/test/helper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -34,6 +34,9 @@ void jit::set_backend(Backend backend) {
             return;
         case Backend::NVRTC:
             setenv("MGB_JIT_BACKEND", "NVRTC", 1);
+            return;
+        case Backend::MLIR:
+            setenv("MGB_JIT_BACKEND", "MLIR", 1);
             return;
         default:
             mgb_assert(0);
@@ -85,7 +88,7 @@ void FusionChecker::ensure_init_graph() {
 
     SymbolVar jit_y;
     if (m_direct_build) {
-        auto ig_gen = std::make_unique<InternalGraphGenrator>(
+        auto ig_gen = std::make_unique<InternalGraphGenerator>(
                 m_truth_y.node()->owner_opr());
         ThinHashSet<VarNode*> endpoints_set;
         for (size_t i = 0; i < m_nr_input; ++i) {
@@ -98,7 +101,7 @@ void FusionChecker::ensure_init_graph() {
     } else {
         ComputingGraph::Options opt;
         opt.graph_opt_level = 3;
-        opt.graph_opt.jit = 2;
+        opt.graph_opt.jit = m_jit_level;
         unpack_vector(gopt::GraphOptimizer{}
                               .add_preset_passes(true, nullptr, &opt)
                               .apply({{m_truth_y}})

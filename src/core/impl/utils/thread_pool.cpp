@@ -2,7 +2,7 @@
  * \file src/core/impl/utils/thread_pool.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -74,6 +74,7 @@ void ThreadPool::add_task(const TaskElem& task_elem) {
     //! Make sure the main thread have bind
     if (m_main_affinity_flag &&
         m_core_binding_function != nullptr) {
+        std::lock_guard<std::mutex> lock(m_mutex_task);
         m_core_binding_function(m_nr_threads - 1);
         m_main_affinity_flag = false;
     }
@@ -85,10 +86,10 @@ void ThreadPool::add_task(const TaskElem& task_elem) {
         }
         return;
     } else {
+        std::lock_guard<std::mutex> lock(m_mutex_task);
         mgb_assert(m_task_iter.load(std::memory_order_acquire) <= 0,
                    "The init value of m_all_sub_task is not zero.");
         active();
-        std::lock_guard<std::mutex> lock(m_mutex_task);
         //! Set the task number, task iter and task
         m_nr_parallelism = parallelism;
         m_task_iter.exchange(parallelism, std::memory_order_relaxed);
@@ -113,6 +114,7 @@ void ThreadPool::add_task(const TaskElem& task_elem) {
 
 void ThreadPool::set_affinity(AffinityCallBack affinity_cb) {
     mgb_assert(affinity_cb, "The affinity callback must not be nullptr");
+    std::lock_guard<std::mutex> lock(m_mutex_task);
     m_core_binding_function = affinity_cb;
     for (size_t i = 0; i < m_nr_threads - 1; i++) {
         m_workers[i]->affinity_flag = true;
@@ -147,10 +149,12 @@ void ThreadPool::active() {
     }
 }
 void ThreadPool::deactive() {
+    std::lock_guard<std::mutex> lock_task(m_mutex_task);
     std::unique_lock<std::mutex> lock(m_mutex);
     m_active = false;
 }
 ThreadPool::~ThreadPool() {
+    std::lock_guard<std::mutex> lock_task(m_mutex_task);
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_stop = true;

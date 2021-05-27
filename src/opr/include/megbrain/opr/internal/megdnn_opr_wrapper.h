@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/internal/megdnn_opr_wrapper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -294,7 +294,7 @@ namespace intl {
             void scn_do_execute() override;
             void get_output_var_shape(
                     const TensorShapeArray &inp_shape,
-                    TensorShapeArray &out_shape) const override final;
+                    TensorShapeArray &out_shape) const override;
 
             void record_execute_deps(
                     cg::GraphExecutable::ExecDependencyArray& deps) override {

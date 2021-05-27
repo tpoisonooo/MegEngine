@@ -2,7 +2,7 @@
  * \file dnn/src/naive/local_share/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -150,6 +150,91 @@ void LocalShareBackwardFilterImpl::exec(_megdnn_tensor_in src,
     MEGDNN_DISPATCH_CPU_KERN_OPR(
             (naive_kern<dt_float32, dt_float32, dt_float32, dt_float32,
                         StrategyBwdFlt>(src, grad, diff, param())););
+}
+
+std::vector<LocalShareForward::Algorithm*>
+LocalShareForwardImpl::get_all_algorithms(const TensorLayout&,
+                                          const TensorLayout&,
+                                          const TensorLayout&) {
+    return {static_cast<HandleImpl*>(handle())->default_local_share_fwd_algo()};
+}
+
+LocalShareForward::Algorithm* LocalShareForwardImpl::get_algorithm_heuristic(
+        const TensorLayout& /* src */, const TensorLayout& /* diff */,
+        const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
+    auto algo =
+            static_cast<HandleImpl*>(handle())->default_local_share_fwd_algo();
+    algo->check_attribute(positive_attr, negative_attr);
+    return algo;
+}
+
+LocalShareForward::Algorithm*
+LocalShareForwardImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret =
+            static_cast<HandleImpl*>(handle())->default_local_share_fwd_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
+}
+
+std::vector<LocalShareBackwardData::Algorithm*>
+LocalShareBackwardDataImpl::get_all_algorithms(const TensorLayout&,
+                                               const TensorLayout&,
+                                               const TensorLayout&) {
+    return {static_cast<HandleImpl*>(handle())
+                    ->default_local_share_bwd_data_algo()};
+}
+
+LocalShareBackwardData::Algorithm*
+LocalShareBackwardDataImpl::get_algorithm_heuristic(
+        const TensorLayout& /* filter */, const TensorLayout& /* diff */,
+        const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
+    auto algo = static_cast<HandleImpl*>(handle())
+                        ->default_local_share_bwd_data_algo();
+    algo->check_attribute(positive_attr, negative_attr);
+    return algo;
+}
+
+LocalShareBackwardData::Algorithm*
+LocalShareBackwardDataImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret = static_cast<HandleImpl*>(handle())
+                             ->default_local_share_bwd_data_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
+}
+
+std::vector<LocalShareBackwardFilter::Algorithm*>
+LocalShareBackwardFilterImpl::get_all_algorithms(const TensorLayout&,
+                                                 const TensorLayout&,
+                                                 const TensorLayout&) {
+    return {static_cast<HandleImpl*>(handle())
+                    ->default_local_share_bwd_filter_algo()};
+}
+
+LocalShareBackwardFilter::Algorithm*
+LocalShareBackwardFilterImpl::get_algorithm_heuristic(
+        const TensorLayout& /* src */, const TensorLayout& /* diff */,
+        const TensorLayout& /* grad */, size_t /* workspace_limit_in_bytes */,
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
+    auto algo = static_cast<HandleImpl*>(handle())
+                        ->default_local_share_bwd_filter_algo();
+    algo->check_attribute(positive_attr, negative_attr);
+    return algo;
+}
+
+LocalShareBackwardFilter::Algorithm*
+LocalShareBackwardFilterImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret = static_cast<HandleImpl*>(handle())
+                             ->default_local_share_bwd_filter_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
 }
 
 // vim: syntax=cpp.doxygen

@@ -2,7 +2,7 @@
  * \file src/plugin/include/megbrain/plugin/var_sanity_check.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -19,6 +19,13 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
+
+namespace mgb {
+class VarSanityCheckError : public MegBrainError {
+public:
+    using MegBrainError::MegBrainError;
+};
+}  // namespace mgb
 
 namespace mgb {
 
@@ -87,10 +94,7 @@ class VarSanityCheck final : public PluginBase {
 public:
     VarSanityCheck(cg::ComputingGraph* graph);
 
-    class Error : public MegBrainError {
-    public:
-        using MegBrainError::MegBrainError;
-    };
+    using Error = VarSanityCheckError;
 
     /*!
      * \brief perform basic sanity check after opr exec

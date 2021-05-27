@@ -2,7 +2,7 @@
  * \file src/core/impl/system.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -127,7 +127,7 @@ std::pair<size_t, size_t> sys::get_ram_status_bytes() {
     mgb_assert(!err);
     std::pair<size_t, size_t> ret;
     ret.first = info.totalram * info.mem_unit;
-    ret.second = (info.totalram + info.bufferram) * info.mem_unit;
+    ret.second = (info.freeram + info.bufferram) * info.mem_unit;
     return ret;
 #endif
 }
@@ -488,7 +488,7 @@ class TimedFuncInvokerImpl final: public TimedFuncInvoker {
             return iter->second.direct_call(param);
 
         if (!m_fork_exec_impl) {
-            mgb_log_error("timeout is set, but no fork_exec_impl not given; "
+            mgb_log_warn("timeout is set, but no fork_exec_impl not given; "
                     "timeout would be ignored");
             return iter->second.direct_call(param);
         }

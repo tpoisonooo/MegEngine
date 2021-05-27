@@ -2,7 +2,7 @@
  * \file dnn/src/fallback/conv_bias/algos.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,21 +20,34 @@ namespace fallback {
 
 class ConvBiasImpl::AlgoNaive final : public AlgoBase {
 public:
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override{
+        return AlgoAttribute::REPRODUCIBLE | AlgoAttribute::NAIVE;
+    }
     const char* name() const override { return "FALLBACK_NAIVE"; }
-    bool usable(ConvBiasImpl* opr, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    SmallVector<NCBKern> dispatch_kerns(ConvBiasImpl*,
-                                        const NCBKernSizeParam&) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
+    SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam&) const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        auto support_data_type = static_cast<AlgoDataType>(
+                static_cast<uint32_t>(AlgoDataType::FLOAT16) |
+                static_cast<uint32_t>(AlgoDataType::FLOAT32) |
+                static_cast<uint32_t>(AlgoDataType::INT8X8X16) |
+                static_cast<uint32_t>(AlgoDataType::QINT8X8X32) |
+                static_cast<uint32_t>(AlgoDataType::QUINT8X8X32));
+        return {support_data_type, AlgoCategory::NAIVE};
+    }
+    MEGDNN_DECL_ALGO_TYPE(FB_NAIVE)
 };
 
 class ConvBiasImpl::AlgoWinogradF32 final : public AlgoBase {
 public:
     AlgoWinogradF32(MatrixMulImpl::AlgoBase* matmul_algo)
             : m_matmul_algo{matmul_algo} {}
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE | AlgoAttribute::NAIVE;
+    }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -43,12 +56,15 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(ConvBiasImpl* opr, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    SmallVector<NCBKern> dispatch_kerns(ConvBiasImpl*,
-                                        const NCBKernSizeParam&) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
+    SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam&) const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::FLOAT32, AlgoCategory::WINOGRAD};
+    }
+    MEGDNN_DECL_ALGO_TYPE(FB_WINOGRAD_F32)
 
 private:
     MatrixMulImpl::AlgoBase* m_matmul_algo;
@@ -60,7 +76,9 @@ class ConvBiasImpl::AlgoWinogradF32_4x4 final : public AlgoBase {
 public:
     AlgoWinogradF32_4x4(MatrixMulImpl::AlgoBase* matmul_algo)
             : m_matmul_algo{matmul_algo} {}
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE | AlgoAttribute::NAIVE;
+    }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -69,12 +87,15 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(ConvBiasImpl* opr, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    SmallVector<NCBKern> dispatch_kerns(ConvBiasImpl*,
-                                        const NCBKernSizeParam&) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
+    SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam&) const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::FLOAT32, AlgoCategory::WINOGRAD};
+    }
+    MEGDNN_DECL_ALGO_TYPE(FB_WINOGRAD_4X4_F32)
 
 private:
     MatrixMulImpl::AlgoBase* m_matmul_algo;
@@ -86,7 +107,9 @@ class ConvBiasImpl::AlgoWinogradQS8 final : public AlgoBase {
 public:
     AlgoWinogradQS8(MatrixMulImpl::AlgoBase* matmul_algo)
             : m_matmul_algo{matmul_algo} {}
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE | AlgoAttribute::NAIVE;
+    }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -95,12 +118,15 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(ConvBiasImpl* opr, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    SmallVector<NCBKern> dispatch_kerns(ConvBiasImpl*,
-                                        const NCBKernSizeParam&) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
+    SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam&) const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::QINT8X8X32, AlgoCategory::WINOGRAD};
+    }
+    MEGDNN_DECL_ALGO_TYPE(FB_WINOGRAD_QS8)
 
 private:
     MatrixMulImpl::AlgoBase* m_matmul_algo;
@@ -112,7 +138,9 @@ class ConvBiasImpl::AlgoWinogradQS8_8x8 final : public AlgoBase {
 public:
     AlgoWinogradQS8_8x8(MatrixMulImpl::AlgoBase* matmul_algo)
             : m_matmul_algo{matmul_algo} {}
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE | AlgoAttribute::NAIVE;
+    }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -121,12 +149,15 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(ConvBiasImpl* opr, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    SmallVector<NCBKern> dispatch_kerns(ConvBiasImpl*,
-                                        const NCBKernSizeParam&) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
+    SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam&) const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::QINT8X8X32, AlgoCategory::WINOGRAD};
+    }
+    MEGDNN_DECL_ALGO_TYPE(FB_WINOGRAD_8X8_QS8)
 
 private:
     MatrixMulImpl::AlgoBase* m_matmul_algo;

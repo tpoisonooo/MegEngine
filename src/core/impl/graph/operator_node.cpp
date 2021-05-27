@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/operator_node.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -45,6 +45,10 @@ class PostExecActions {
         }
     };
     CompNode m_comp_node;
+    // VarNodes in m_items should be listed in the same order as in the
+    // output of the owner_opr, because opr would generate input_wating_spec()
+    // according to this order
+    // see `SeqCompNodeOptimizerImpl::init_ready_event()` for more details
     SmallVector<Item> m_items;
     MGB_IF_COND_EXEC(ExecutionMask* m_mask = nullptr);
 
@@ -93,14 +97,17 @@ OperatorNodeBase::OperatorNodeBase(ComputingGraph *owner,
 }
 
 OperatorNodeBase::~OperatorNodeBase() noexcept {
-    auto &&pool = static_cast<ComputingGraphImpl*>(
-            owner_graph())->var_node_pool();
     for (auto i: m_output) {
-        pool.free(i);
+        owner_graph()->free_varnode(i);
     }
 }
 
 void OperatorNodeBase::execute(ExecEnv &env) {
+    if (owner_graph()->options().imperative_proxy_graph) {
+        do_execute(env);
+        return;
+    }
+
     owner_graph()->event().signal_inplace<event::OprExecStart>(this, &env);
 
     // dispatch waiting commands
@@ -119,7 +126,7 @@ void OperatorNodeBase::execute(ExecEnv &env) {
     }
 
     // allocate output with dynamic storage
-    static_cast<ComputingGraphImpl*>(owner_graph())
+    ComputingGraphImpl::downcast(owner_graph())
             ->var_node_mem_manager()
             .alloc_var_node_mem_dynamic(env, this);
 
@@ -130,11 +137,11 @@ void OperatorNodeBase::execute(ExecEnv &env) {
     // static_infer_manager so the value would be up-to-date; however for shape
     // deps, oprs would access the shape directly, so we need to insert some
     // code here to ensure it is up-to-date.
-    if (!static_cast<ComputingGraphImpl*>(owner_graph())
+    if (!ComputingGraphImpl::downcast(owner_graph())
                  ->eager_eval_manager()
                  .enabled()) {
         VarNodeArray vars_to_set;
-        auto cg = static_cast<ComputingGraphImpl*>(owner_graph());
+        auto cg = ComputingGraphImpl::downcast(owner_graph());
         auto step_cur = cg->opr_step_num_in_cur_comp_seq(this).val();
         mgb_assert(step_cur < std::numeric_limits<size_t>::max());
         using DT = NodeProp::DepType;
@@ -259,8 +266,7 @@ VarNode* OperatorNodeBase::add_output(const Maybe<std::string> &name) {
     mgb_assert(!m_inserted_in_graph && !m_node_prop.valid(),
             "add output on opr after it has been inserted into graph");
 
-    auto ptr = static_cast<ComputingGraphImpl*>(
-                owner_graph())->var_node_pool().alloc(
+    auto ptr = owner_graph()->alloc_varnode(
                 name.valid() ? this->name() + ":" + name.val() : name, this);
     m_output.push_back(ptr);
     return ptr;
@@ -485,14 +491,14 @@ OperatorNodeConfig& OperatorNodeConfig::comp_node_arr(
 
 size_t OperatorNodeConfig::hash() const {
     return hash_pair_combine(
-            hash_pair_combine(mgb::hash(m_instance_id), mgb::hash(m_comp_node)),
+            hash_pair_combine(m_instance_id_hashed, mgb::hash(m_comp_node)),
             mgb::hash(m_output_dtype.handle()));
 }
 
 bool OperatorNodeConfig::is_same_st(const Hashable &rhs_) const {
     auto &&rhs = static_cast<const OperatorNodeConfig&>(rhs_);
     return m_comp_node == rhs.m_comp_node &&
-           m_instance_id == rhs.m_instance_id &&
+           m_instance_id_hashed == rhs.m_instance_id_hashed &&
            m_output_dtype == rhs.m_output_dtype;
 }
 
@@ -671,7 +677,7 @@ void mixin::IOSameShapeOperatorNode::get_output_var_shape(
 
 void PostExecActions::add(VarNode* var) {
     mgb_assert(m_comp_node == var->comp_node());
-    auto graph = static_cast<ComputingGraphImpl*>(var->owner_graph());
+    auto graph = ComputingGraphImpl::downcast(var->owner_graph());
 
     auto&& infer_mgr = graph->static_infer_manager_impl();
     auto&& extra_info = graph->current_comp_seq_extra_info();

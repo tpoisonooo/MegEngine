@@ -2,7 +2,7 @@
  * \file src/core/impl/comp_node/cuda/comp_node.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -39,6 +39,16 @@ namespace {
             // max(300 MiB, 0.05 * available)
             return std::max<size_t>(300 * 1024 * 1024, available / 20);
         }
+    }
+    using CudaHostFunc = megdnn::thin_function<void()>;
+    void CUDART_CB cuda_host_func_caller(void* ud) {
+        mgb_assert(ud);
+        CudaHostFunc* func_ptr = reinterpret_cast<CudaHostFunc*>(ud);
+        MGB_TRY {
+            (*func_ptr)();
+        } MGB_FINALLY(
+            delete func_ptr;
+        );
     }
 } // anonymous namespace
 
@@ -86,6 +96,46 @@ public:
                             cudaGetErrorString(cuda_error));
         msg.append(CudaError::get_cuda_extra_info());
         mgb_throw_raw(MegBrainError{msg});
+    }
+};
+
+class CudaHostAllocator : public RawAllocator {
+public:
+    void* alloc(size_t size) override {
+        void* addr;
+        cudaError_t cuda_error = cudaHostAlloc(&addr, size, cudaHostAllocDefault);
+        if (cuda_error == cudaSuccess) {
+            mgb_assert(addr);
+            return addr;
+        }
+        auto msg = mgb_ssprintf_log(
+                "cudaHostAlloc failed while requesting %zd bytes (%.3fMiB)"
+                " of pinned host memory; error: %s",
+                size, size / (1024.0 * 1024), cudaGetErrorString(cuda_error));
+        msg.append(CudaError::get_cuda_extra_info());
+        if (cuda_error == cudaErrorMemoryAllocation) {
+            mgb_log_error("%s", msg.c_str());
+            // clear cuda error
+            cudaGetLastError();
+            mgb_assert(cudaGetLastError() == cudaSuccess);
+            return nullptr;
+        }
+        mgb_throw_raw(MemAllocError{msg});
+    }
+
+    void free(void* ptr) override {
+        cudaError_t cuda_error = cudaFreeHost(ptr);
+        if (cuda_error == cudaSuccess)
+            return;
+        auto msg = ssprintf("cudaFreeHost failed for %p: %s", ptr,
+                            cudaGetErrorString(cuda_error));
+        msg.append(CudaError::get_cuda_extra_info());
+        mgb_throw_raw(MemAllocError{msg});
+    }
+
+    void get_mem_info(size_t& free, size_t& tot) override {
+        free = 0;
+        tot = 0;
     }
 };
 
@@ -165,19 +215,9 @@ class CudaCompNode::CompNodeImpl final: public CompNode::Impl {
 
         void free_device(void *ptr);
 
-        void *alloc_host(size_t size) override {
-            activate();
-            void *ptr;
-            MGB_CUDA_CHECK(cudaMallocHost(&ptr, size));
-            return ptr;
-        }
+        void *alloc_host(size_t size) override;
 
-        void free_host(void *ptr) {
-            if (!check_global_finalized()) {
-                activate();
-            }
-            MGB_CUDA_CHECK(cudaFreeHost(ptr));
-        }
+        void free_host(void *ptr);
 
         void copy_to_host(void *host_ptr,
                 const void *device_ptr, size_t size) override {
@@ -223,6 +263,32 @@ class CudaCompNode::CompNodeImpl final: public CompNode::Impl {
         Locator locator_logical() override {
             return m_locator_logical;
         }
+
+        void add_callback(CudaHostFunc&& cb) override {
+#if CUDART_VERSION >= 10000
+            activate();
+            CudaHostFunc* func_ptr = new CudaHostFunc(std::move(cb));
+            MGB_TRY {
+                MGB_CUDA_CHECK(cudaLaunchHostFunc(m_env.cuda_env().stream,
+                        cuda_host_func_caller, static_cast<void*>(func_ptr)));
+            } MGB_CATCH(..., {
+                delete func_ptr;
+                throw;
+            });
+#else
+            MGB_MARK_USED_VAR(cb);
+            MGB_MARK_USED_VAR(cuda_host_func_caller);
+            mgb_throw(
+                    MegBrainError,
+                    "add_callback only support in cuda10.0 and later version");
+#endif
+        }
+
+        uint64_t get_uid() override {
+            return m_uid;
+        }
+    private:
+        uint64_t m_uid;
 };
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(CudaCompNode::CompNodeImpl);
 
@@ -248,14 +314,18 @@ struct CudaCompNodeImpl::StaticData {
 
     mem_alloc::DevMemAlloc::PreAllocConfig prealloc_config;
 
+    std::unique_ptr<mem_alloc::SimpleCachingAlloc> host_alloc;
     CudaCompNode::CompNodeImpl node[MAX_NR_COMP_NODE];
     DeviceInfo dev_info[MAX_NR_DEVICE];
     int nr_node = 0,        //!< number of loaded node[]
         nr_dev_used = 0;    //!< number of used dev_info[]
 
-    StaticData() {
+    StaticData() : host_alloc(
+            mem_alloc::SimpleCachingAlloc::make(
+                std::make_unique<mem_alloc::CudaHostAllocator>())) {
         prealloc_config.max_overhead = 0;
         prealloc_config.alignment = 1;
+        host_alloc->alignment(1);
     }
 
     ~StaticData() {
@@ -287,6 +357,17 @@ void CudaCompNodeImpl::init(
     m_locator = locator;
     m_locator_logical = locator_logical;
     m_initialized = true;
+
+#if defined(__linux__) || defined(TARGET_OS_MAC)
+    FILE *fp;
+    fp = fopen("/dev/urandom", "r");
+    mgb_assert(fread(&m_uid, sizeof(m_uid), 1, fp) == 1);
+    fclose(fp);
+#else
+    m_uid = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+#endif
 
     auto on_succ = [this](cudaStream_t stream) {
         auto locator = m_locator;
@@ -339,6 +420,17 @@ void CudaCompNodeImpl::free_device(void *ptr) {
 
     activate();
     m_mem_alloc->free(ptr);
+}
+
+void* CudaCompNodeImpl::alloc_host(size_t size) {
+    // need activate because it create cuda cuda context in current device
+    activate();
+    return sd->host_alloc->alloc(size);
+}
+
+void CudaCompNodeImpl::free_host(void* ptr) {
+    if (check_global_finalized()) return;
+    sd->host_alloc->free(ptr);
 }
 
 void CudaCompNodeImpl::peer_copy_to(
@@ -626,7 +718,7 @@ CompNode::Impl* CudaCompNode::load_cuda(
     for (int i = 0; i < sd.nr_node; ++ i) {
         auto &&cur = sd.node[i];
         if (cur.m_initialized) {
-            if (cur.m_locator_logical == locator_logical) {
+            if (cur.m_locator == locator && cur.m_locator_logical == locator_logical) {
                 return &cur;
             }
         } else {
@@ -637,10 +729,10 @@ CompNode::Impl* CudaCompNode::load_cuda(
     if (!available_node) {
         mgb_assert(sd.nr_node < sd.MAX_NR_COMP_NODE,
                 "too many CompNode allocated");
-        mgb_assert(locator.device < sd.MAX_NR_COMP_NODE,
-                "device number too large");
         available_node = &sd.node[sd.nr_node ++];
     }
+    mgb_assert(locator.device < sd.MAX_NR_DEVICE,
+            "device number too large");
 
     mgb_assert(!available_node->m_initialized);
     available_node->init(locator, locator_logical);
@@ -723,6 +815,30 @@ size_t CudaCompNode::get_device_count(bool warn) {
     return cnt;
 }
 
+void CudaCompNode::set_prealloc_config(size_t alignment, size_t min_req, 
+                                       size_t max_overhead,
+                                       double growth_factor) {
+    auto &&sdptr = CudaCompNodeImpl::sd;
+    {
+        MGB_LOCK_GUARD(CudaCompNodeImpl::sd_mtx);
+        if (!sdptr) {
+            using T = CudaCompNodeImpl::StaticData;
+            static std::aligned_storage_t<sizeof(T), alignof(T)> storage;
+            sdptr = new(&storage)T;
+            sdptr->prealloc_config.alignment = alignment;
+            sdptr->prealloc_config.min_req = min_req;
+            sdptr->prealloc_config.growth_factor = growth_factor;
+            sdptr->prealloc_config.max_overhead = max_overhead;
+        } else {
+            mgb_log_warn(
+                "invalid call to set_prealloc_config, will fallback to "
+                "default config; "
+                "prealloc_config should be specified before any CUDA "
+                "memory allocation");
+        }
+    }
+}
+
 #else
 
 bool CudaCompNode::available() {
@@ -742,6 +858,10 @@ CudaCompNode::Impl* CudaCompNode::load_cuda(const Locator&, const Locator&) {
 }
 void CudaCompNode::sync_all() {
 }
+
+void CudaCompNode::set_prealloc_config(size_t alignment, size_t min_req, 
+                                       size_t max_overhead,
+                                       double growth_factor) {}
 
 #undef err
 

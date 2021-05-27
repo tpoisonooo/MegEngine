@@ -2,7 +2,7 @@
  * \file dnn/src/common/basic_types.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,6 +20,7 @@
 #include <mutex>
 #include <numeric>
 #include <tuple>
+#include <type_traits>
 
 using namespace megdnn;
 
@@ -35,6 +36,26 @@ class DefaultErrorHandler final : public ErrorHandler {
 #endif
     }
 };
+
+template <typename T>
+void serialize_pod(const T& val, std::string& result) {
+    static_assert(std::is_standard_layout<T>::value, "invalid type");
+    result.append(reinterpret_cast<const char*>(&val), sizeof(T));
+}
+
+template <typename T>
+void serialize_vec(const T* val, size_t size, std::string& result) {
+    result.append(reinterpret_cast<const char*>(val), sizeof(T) * size);
+}
+
+template <typename T>
+T deserialize_pod(const std::string& data, size_t& offset) {
+    T ret;
+    memcpy(&ret, data.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    return ret;
+}
+
 }  // namespace
 ErrorHandler* ErrorHandler::sm_inst;
 
@@ -126,17 +147,23 @@ bool TensorShape::eq_shape(const TensorShape& rhs) const {
         size_t eq = 0;
         switch (ndim) {
             case 7:
-                eq += shape[6] == rhs.shape[6]; MEGDNN_FALLTHRU
+                eq += shape[6] == rhs.shape[6];
+                MEGDNN_FALLTHRU
             case 6:
-                eq += shape[5] == rhs.shape[5]; MEGDNN_FALLTHRU
+                eq += shape[5] == rhs.shape[5];
+                MEGDNN_FALLTHRU
             case 5:
-                eq += shape[4] == rhs.shape[4]; MEGDNN_FALLTHRU
+                eq += shape[4] == rhs.shape[4];
+                MEGDNN_FALLTHRU
             case 4:
-                eq += shape[3] == rhs.shape[3]; MEGDNN_FALLTHRU
+                eq += shape[3] == rhs.shape[3];
+                MEGDNN_FALLTHRU
             case 3:
-                eq += shape[2] == rhs.shape[2]; MEGDNN_FALLTHRU
+                eq += shape[2] == rhs.shape[2];
+                MEGDNN_FALLTHRU
             case 2:
-                eq += shape[1] == rhs.shape[1]; MEGDNN_FALLTHRU
+                eq += shape[1] == rhs.shape[1];
+                MEGDNN_FALLTHRU
             case 1:
                 eq += shape[0] == rhs.shape[0];
         }
@@ -386,14 +413,12 @@ TensorLayout::Span TensorLayout::span() const {
 
 TensorLayout TensorLayout::broadcast(const TensorShape& tshape) const {
     megdnn_throw_if(!ndim || !tshape.ndim, tensor_reshape_error,
-                    megdnn_mangle("broadcast involves empty tensor"));
+                    "broadcast involves empty tensor");
 
     if (is_scalar()) {
         TensorLayout result{dtype, format};
         result.ndim = tshape.ndim;
         for (size_t i = 0; i < tshape.ndim; i++) {
-            megdnn_throw_if(!tshape.shape[i], tensor_reshape_error,
-                            megdnn_mangle("target shape is 0"));
             result.shape[i] = tshape.shape[i];
             result.stride[i] = (tshape.shape[i] == 1);
         }
@@ -401,25 +426,21 @@ TensorLayout TensorLayout::broadcast(const TensorShape& tshape) const {
     }
 
     megdnn_throw_if(tshape.ndim < ndim, tensor_reshape_error,
-                    megdnn_mangle(ssprintf(
-                            "dimension for broadcast less than "
-                            "dst_shape: src_shape=%s dst_shape=%s",
-                            to_string().c_str(), tshape.to_string().c_str())));
+                    ssprintf("dimension for broadcast less than "
+                             "dst_shape: src_shape=%s dst_shape=%s",
+                             to_string().c_str(), tshape.to_string().c_str()));
     TensorLayout result{dtype, format};
     for (size_t i = 0; i < tshape.ndim; ++i) {
         int target_idx = tshape.ndim - i - 1;
         int cur_idx = ndim - i - 1;
-        megdnn_throw_if(!tshape.shape[target_idx], tensor_reshape_error,
-                        megdnn_mangle("target shape is 0"));
         size_t cur_shape = (cur_idx >= 0 ? shape[cur_idx] : 1),
                cur_stride = (cur_idx >= 0 ? stride[cur_idx] : 0);
         if (tshape.shape[target_idx] != cur_shape) {
             megdnn_throw_if(
                     cur_shape != 1 && cur_stride != 0, tensor_reshape_error,
-                    megdnn_mangle(ssprintf(
-                            "brodcast on dim with shape not equal to 1: "
-                            "src_shape=%s dst_shape=%s",
-                            to_string().c_str(), tshape.to_string().c_str())));
+                    ssprintf("broadcast on dim with shape not equal to 1: "
+                             "src_shape=%s dst_shape=%s",
+                             to_string().c_str(), tshape.to_string().c_str()));
             result.shape[target_idx] = tshape.shape[target_idx];
             result.stride[target_idx] = 0;
         } else {
@@ -434,25 +455,35 @@ TensorLayout TensorLayout::broadcast(const TensorShape& tshape) const {
 bool TensorLayout::try_reshape(TensorLayout& result,
                                const TensorShape& tshp) const {
     megdnn_assert(tshp.ndim);
+
+    bool is_empty_shape = false;
     for (size_t i = 0; i < tshp.ndim; ++i) {
-        megdnn_throw_if(!tshp.shape[i], tensor_reshape_error,
-                        megdnn_mangle(ssprintf("bad target tshp: %s",
-                                               tshp.to_string().c_str())));
+        if (!tshp.shape[i]) {
+            megdnn_throw_if(
+                    !format.is_default(), tensor_reshape_error,
+                    ssprintf("bad target tshp: %s", tshp.to_string().c_str()));
+            is_empty_shape = true;
+            break;
+        }
     }
 
     megdnn_throw_if(
             !tshp.ndim || total_nr_elems() != tshp.total_nr_elems(),
             tensor_reshape_error,
-            megdnn_mangle(ssprintf(
-                    "number of elements do not match "
-                    "in reshape: src=%s dest=%s",
-                    static_cast<const TensorShape&>(*this).to_string().c_str(),
-                    tshp.to_string().c_str())));
+            ssprintf("number of elements do not match "
+                     "in reshape: src=%s dest=%s",
+                     static_cast<const TensorShape&>(*this).to_string().c_str(),
+                     tshp.to_string().c_str()));
 
     auto cont = collapse_contiguous();
     result.dtype = this->dtype;
     result.format = this->format;
     result.TensorShape::operator=(tshp);
+
+    if (is_empty_shape) {
+        result.init_contiguous_stride();
+        return true;
+    }
 
     size_t sdim = 0, prod = 1, cont_sdim = 0;
     for (size_t i = 0; i < tshp.ndim; ++i) {
@@ -482,9 +513,8 @@ TensorLayout TensorLayout::reshape(const TensorShape& shape) const {
     TensorLayout ret;
     auto succ = try_reshape(ret, shape);
     megdnn_throw_if(!succ, tensor_reshape_error,
-                    megdnn_mangle(ssprintf("can not reshape from %s to %s",
-                                           to_string().c_str(),
-                                           shape.to_string().c_str())));
+                    ssprintf("can not reshape from %s to %s",
+                             to_string().c_str(), shape.to_string().c_str()));
     return ret;
 }
 
@@ -503,7 +533,35 @@ std::string TensorLayout::to_string() const {
         rst.append(" @ ");
         rst.append(format.impl()->to_string());
     }
+    rst.append(std::string(" ") + dtype.name());
     rst.append("}");
+    return rst;
+}
+
+std::string TensorLayout::serialize() const {
+    std::string rst;
+    serialize_pod<size_t>(ndim, rst);
+    serialize_vec<size_t>(shape, ndim, rst);
+    serialize_vec<ptrdiff_t>(stride, ndim, rst);
+    rst.append(format.impl()->to_string());
+
+    //! serialize dtype
+    serialize_pod(dtype.enumv(), rst);
+    if (dtype.has_param()) {
+        switch (dtype.enumv()) {
+#define cb(_dt)                                                       \
+    case DTypeTrait<dtype::_dt>::enumv:                               \
+        serialize_pod(dtype::_dt::downcast_from(dtype).param(), rst); \
+        break;
+            MEGDNN_FOREACH_PARAMETERIZED_DTYPE(cb)
+#undef cb
+            default:
+                megdnn_assert(false,
+                              "cannot serialize unknown parameterized DType");
+                break;
+        }
+    }
+
     return rst;
 }
 

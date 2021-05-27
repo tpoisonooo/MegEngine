@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node_mem_mgr.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -174,6 +174,14 @@ class VarNodeMemManager {
         bool alloc_var_node_mem_static();
 
         /*!
+         * \brief free the memory of var with MEMORY_NO_NEED flag
+         *
+         * \return whether memory of MEMORY_NO_NEED var or related other var
+         * memory changed
+         */
+        bool free_combine_memory_no_need_var();
+
+        /*!
          * \brief initialize static memory allocation plan
          *
          * This can be used with custom StaticDeviceMemoryAllocator so static
@@ -294,7 +302,13 @@ class VarNodeMemManager {
         void add_layout_constraint_level(
                 VarNode *dest, LayoutConstraintLevel level);
 
-        void var_alloc_with_shape(VarNode *var, const TensorShape &shape);
+        /**
+         * \brief alloc var memory with shape.
+         *
+         * Alloc memory of size_seq if size_req != 0.
+         */
+        void var_alloc_with_shape(VarNode* var, const TensorShape& shape,
+                                  size_t size_req = 0);
 
         /*!
          * \brief initialize mem plan for a single var
@@ -401,7 +415,8 @@ class VarNodeMemManager {
             bool check_need_realloc();
         };
 
-        bool m_first_static_plan_run = true, m_optimize_started = false;
+        bool m_first_static_plan_run = true, m_optimize_started = false,
+             m_already_free_no_need_mem = false;
         ComputingGraphImpl *m_owner_graph;
         ThinHashMap<VarNode*, VarNodeMemTrait> m_node_mem_trait;
         NullableHashMap<OperatorNodeBase*, DynamicAllocOprInfo>
@@ -431,10 +446,10 @@ class VarNodeMemManager {
         SyncableCounter m_cpu_async_release_barrier;
 
 
-#if MGB_CUDA
-        //! release dynamic var on after cuda event finishes
-        class CUDAAsyncVarReleaser;
-        std::unique_ptr<CUDAAsyncVarReleaser> m_cuda_asyn_var_releaser;
+#if MGB_CUDA || MGB_ATLAS || MGB_CAMBRICON 
+        //! release dynamic var on after compnode event finishes
+        class AsyncVarReleaser;
+        std::unique_ptr<AsyncVarReleaser> m_asyn_var_releaser;
 #endif
 
         VarDevMemDefragmenter m_var_dev_mem_defragmenter{this};

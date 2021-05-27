@@ -2,7 +2,7 @@
  * \file dnn/src/naive/convpooling/conv_pooling.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -97,7 +97,7 @@ void ConvPoolingForwardImpl::exec(const _megdnn_in TensorND src,
     TensorND conv_dst((float*)(workspace.raw_ptr), conv_dst_layout);
     //convFwd->check_layout(src.layout, filter.layout, workspace.layout, empty_wsp.layout);
     check_layout(src.layout, filter.layout, bias.layout, dst.layout, workspace.size);
-    convFwd->exec(src, filter, conv_dst, empty_wsp);
+    convFwd->exec(src, filter, conv_dst, nullptr, empty_wsp);
 
     // calculate bias
     int conv_dst_batch = conv_dst.layout.shape[0];

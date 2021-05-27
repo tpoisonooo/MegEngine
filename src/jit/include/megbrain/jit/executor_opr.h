@@ -2,7 +2,7 @@
  * \file src/jit/include/megbrain/jit/executor_opr.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -13,6 +13,7 @@
 
 #include "megbrain/graph/operator_node.h"
 #include "megbrain/jit/internal_graph.h"
+#include "megbrain/opr/internal/identical_fwd.h"
 
 #if MGB_JIT
 
@@ -31,10 +32,12 @@ class Compiler;
  * JITExecutor generates runtime Args for this specific inputs, and calls
  * methods in Compiler to get the Executable object for actual computing.
  */
-MGB_DEFINE_OPR_CLASS(JITExecutor, cg::SingleCNOperatorNodeBase) // {
+MGB_DEFINE_OPR_CLASS(JITExecutor, cg::SingleCNOperatorNodeBase,
+        opr::mixin::FwdIn2OutWritableHelper) // {
     using ModeTrait = megdnn::Elemwise::ModeTrait;
 
     InternalGraphPtr m_internal_graph;
+    using DimshuffleParam = std::pair<std::vector<int>, uint32_t>;
 
 public:
     using Mode = opr::Elemwise::Mode;
@@ -55,6 +58,8 @@ public:
     void add_input_layout_constraint() override;
 
     void init_output_mem_plan(bool dynamic) override;
+
+    void mem_plan_fwd_in2out_writable() override;
 
     const InternalGraph& internal_graph() const { return *m_internal_graph; }
 
@@ -112,6 +117,11 @@ public:
         return static_cast<bool>(m_feature_bits & JITFeatureBits::DIMSHUFFLE);
     }
 
+    const ThinHashMap<jit::JITPlaceholder*, DimshuffleParam>&
+    dimshuffle_params() const {
+        return m_jitph2dimshuffle;
+    }
+
     //! get broadcasted shape of inputs
     megdnn::TensorShape broadcasted_input_shape() const;
 
@@ -124,8 +134,14 @@ private:
     Compiler* const m_compiler = nullptr;
     Executable* m_executable = nullptr;
     std::vector<bool> m_input_broadcastable;
+    // JITPlaceHolder -> pair of (dimshuffle pattern, ndim)
+    // do DFS on internal graph only once in prepare_dimshuffle(), so we can
+    // easily get the dimshuffle param which should be applied on given
+    // JITPlaceholder
+    ThinHashMap<jit::JITPlaceholder*, DimshuffleParam> m_jitph2dimshuffle;
     void update_args();
     void do_dimshuffle();
+    void prepare_dimshuffle();
 
     NodeProp* do_make_node_prop() const override;
 };

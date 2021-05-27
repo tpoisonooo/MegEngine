@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/warp_affine/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -73,8 +73,7 @@ void warp_affine_cv_exec(_megdnn_tensor_in src, _megdnn_tensor_in mat,
             }
 
         } else {
-            megdnn_throw(
-                megdnn_mangle("Unsupported datatype of Warpaffine optr."));
+            megdnn_throw("Unsupported datatype of Warpaffine optr.");
         }
 
         trans_ptr += 2 * 3;

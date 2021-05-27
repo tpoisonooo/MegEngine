@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/topo_sort.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -260,7 +260,7 @@ void TopoSorter::DFSDepDiscover::proc_add_dep_comp_order1() {
 void TopoSorter::DFSDepDiscover::proc_find_missing_inp() {
     auto frame = m_cur_frame;
     auto opr = frame->opr;
-    auto&& mgr = static_cast<ComputingGraphImpl*>(opr->owner_graph())
+    auto&& mgr = ComputingGraphImpl::downcast(opr->owner_graph())
                          ->static_infer_manager_impl();
     auto&& missing_inp = frame->missing_inputs;
 

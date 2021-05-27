@@ -2,19 +2,23 @@
  * \file src/jit/impl/utils.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  */
 
-#include "megbrain/jit/utils.h"
 #include "megbrain_build_config.h"
 
 #if MGB_JIT
 
 #include "megbrain/utils/debug.h"
+#include "megbrain/jit/utils.h"
+
+#if MGB_CUDA
+#include "megbrain/utils/cuda_helper.h"
+#endif
 
 #include <atomic>
 
@@ -249,6 +253,19 @@ ExecutableHelper& ::ExecutableHelper::get() {
 std::string jit::next_kernel_name() {
     static std::atomic_uint_fast64_t cnt;
     return "fusion" + std::to_string(cnt.fetch_add(1));
+}
+
+std::vector<std::string> mgb::jit::get_cuda_include_opts() {
+#if MGB_CUDA
+    std::vector<std::string> opts;
+    auto paths = mgb::get_cuda_include_path();
+    for (auto path:paths) {
+        opts.emplace_back("-I" + path);
+    }
+    return opts;
+#else
+    mgb_throw(MegBrainError, "cuda disabled at compile time");
+#endif  // MGB_CUDA
 }
 
 #endif  // MGB_JIT

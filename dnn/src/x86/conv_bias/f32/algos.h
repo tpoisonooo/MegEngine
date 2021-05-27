@@ -2,14 +2,16 @@
  * \file dnn/src/x86/conv_bias/f32/algos.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #pragma once
+#include "src/common/nchw_nchwxx_valid.h"
 #include "src/x86/conv_bias/opr_impl.h"
 
 using namespace megdnn;
@@ -20,34 +22,37 @@ class ConvBiasImpl::AlgoDirect final : public AlgoBase {
     SmallVector<NCBKern> get_kimpls(const NCBKernSizeParam& param) const;
     WorkspaceBundle get_bundle(const NCBKernSizeParam& param) const;
 
-    static void copy_padding_kern(WorkspaceBundle bundle,
+    static void copy_padding_kern(const WorkspaceBundle& bundle,
                                   const NCBKernParam& kern_param,
-                                  const NCBKernIndex& ncb_index);
-    static void do_conv_kern(WorkspaceBundle bundle,
+                                  const NCBKernIndex& ncb_index,
+                                  const CpuNDRange& workspace_ids);
+    static void do_conv_kern(const WorkspaceBundle& bundle,
                              const NCBKernParam& kern_param,
-                             const NCBKernIndex& ncb_index);
-    bool m_large_group;
+                             const NCBKernIndex& ncb_index,
+                             const CpuNDRange& workspace_ids);
 
 public:
-    AlgoDirect(bool large_group) : m_large_group(large_group) {}
-    bool is_reproducible() const override { return true; }
-    const char* name() const override {
-        return m_large_group ? "X86_CONV_BIAS_DIRECT_STRIDE1_LARGE_GROUP"
-                             : "X86_CONV_BIAS_DIRECT_STRIDE1_SMALL_GROUP";
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
     }
-    bool usable(FallbackConvBiasImpl* opr, const NCBKernSizeParam& param,
+    const char* name() const override {
+        return "X86_CONV_BIAS_DIRECT_STRIDE1_LARGE_GROUP";
+    }
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
 
-    size_t get_workspace(FallbackConvBiasImpl* opr,
-                         const NCBKernSizeParam& param) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
 
     virtual SmallVector<NCBKern> dispatch_kerns(
-            fallback::ConvBiasImpl*,
+
             const NCBKernSizeParam& param) const override {
         return get_kimpls(param);
     }
 
-    void* type() const override;
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::FLOAT32, AlgoCategory::DIRECT};
+    }
+    MEGDNN_DECL_ALGO_TYPE(X86_DIRECT)
 };
 
 /* ===================== direct-stride2 algo ===================== */
@@ -55,34 +60,37 @@ class ConvBiasImpl::AlgoDirectStride2 final : public AlgoBase {
     SmallVector<NCBKern> get_kimpls(const NCBKernSizeParam& param) const;
     WorkspaceBundle get_bundle(const NCBKernSizeParam& param) const;
 
-    static void copy_padding_kern(WorkspaceBundle bundle,
+    static void copy_padding_kern(const WorkspaceBundle& bundle,
                                   const NCBKernParam& kern_param,
-                                  const NCBKernIndex& ncb_index);
-    static void do_conv_kern(WorkspaceBundle bundle,
+                                  const NCBKernIndex& ncb_index,
+                                  const CpuNDRange& workspace_ids);
+    static void do_conv_kern(const WorkspaceBundle& bundle,
                              const NCBKernParam& kern_param,
-                             const NCBKernIndex& ncb_index);
-    bool m_large_group;
+                             const NCBKernIndex& ncb_index,
+                             const CpuNDRange& workspace_ids);
 
 public:
-    AlgoDirectStride2(bool large_group) : m_large_group(large_group) {}
-    bool is_reproducible() const override { return true; }
-    const char* name() const override {
-        return m_large_group ? "X86_CONV_BIAS_DIRECT_STRIDE2_LARGE_GROUP"
-                             : "X86_CONV_BIAS_DIRECT_STRIDE2_SMALL_GROUP";
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
     }
-    bool usable(FallbackConvBiasImpl* opr, const NCBKernSizeParam& param,
+    const char* name() const override {
+        return "X86_CONV_BIAS_DIRECT_STRIDE2_LARGE_GROUP";
+    }
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy algo_selection_strategy) const override;
 
-    size_t get_workspace(FallbackConvBiasImpl* opr,
-                         const NCBKernSizeParam& param) const override;
+    size_t get_workspace(const NCBKernSizeParam& param) const override;
 
     virtual SmallVector<NCBKern> dispatch_kerns(
-            fallback::ConvBiasImpl*,
+
             const NCBKernSizeParam& param) const override {
         return get_kimpls(param);
     }
 
-    void* type() const override;
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::FLOAT32, AlgoCategory::DIRECT};
+    }
+    MEGDNN_DECL_ALGO_TYPE(X86_DIRECT_STRD2)
 };
 /* =========================== winograd ======================== */
 class ConvBiasImpl::AlgoFP32WinogradF63_8x8 final : public AlgoBase {
@@ -90,7 +98,6 @@ public:
     AlgoFP32WinogradF63_8x8(fallback::MatrixMulImpl::AlgoBase* matmul_algo,
                             uint32_t tile_size)
             : m_matmul_algo{matmul_algo}, m_tile_size{tile_size} {}
-    bool is_reproducible() const override { return true; }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -98,19 +105,11 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(fallback::ConvBiasImpl* opr, const NCBKernSizeParam& param,
-                AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(fallback::ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    virtual SmallVector<NCBKern> dispatch_kerns(
-            fallback::ConvBiasImpl* opr,
-            const NCBKernSizeParam& param) const override;
-    void* type() const override;
-
-private:
-    fallback::MatrixMulImpl::AlgoBase* m_matmul_algo;
-    mutable std::string m_name;
-    uint32_t m_tile_size;
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
+    MEGDNN_WINOGRAD_ALGO_FUN_DECLARE(AlgoDataType::FLOAT32);
+    MEGDNN_DECL_ALGO_TYPE(X86_WINOGRAD_F63_8x8_F32)
 };
 
 class ConvBiasImpl::AlgoFP32WinogradF23_8x8 final : public AlgoBase {
@@ -118,7 +117,6 @@ public:
     AlgoFP32WinogradF23_8x8(fallback::MatrixMulImpl::AlgoBase* matmul_algo,
                             uint32_t tile_size)
             : m_matmul_algo{matmul_algo}, m_tile_size{tile_size} {}
-    bool is_reproducible() const override { return true; }
     const char* name() const override {
         if (m_name.empty()) {
             m_name = ConvBiasImpl::algo_name<ConvBias::WinogradParam>(
@@ -126,91 +124,46 @@ public:
         }
         return m_name.c_str();
     }
-    bool usable(fallback::ConvBiasImpl* opr, const NCBKernSizeParam& param,
-                AlgoSelectionStrategy algo_selection_strategy) const override;
-    size_t get_workspace(fallback::ConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override;
-    virtual SmallVector<NCBKern> dispatch_kerns(
-            fallback::ConvBiasImpl* opr,
-            const NCBKernSizeParam& param) const override;
-    void* type() const override;
-
-private:
-    fallback::MatrixMulImpl::AlgoBase* m_matmul_algo;
-    mutable std::string m_name;
-    uint32_t m_tile_size;
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
+    MEGDNN_WINOGRAD_ALGO_FUN_DECLARE(AlgoDataType::FLOAT32);
+    MEGDNN_DECL_ALGO_TYPE(X86_WINOGRAD_F23_8x8_F32)
 };
 
-/* ===================== matmul algo ===================== */
-class ConvBiasImpl::AlgoMatrixMul final : public AlgoBase {
-    static MatrixMul* get_matmul_opr();
-    static WorkspaceBundle get_bundle(const NCBKernSizeParam& param);
-    static void kimpl(const NCBKernParam& param, const NCBKernIndex&);
-
-public:
-    bool is_reproducible() const override { return true; }
-    const char* name() const override { return "X86_CONV_BIAS_MATMUL"; }
-
-    bool usable(FallbackConvBiasImpl*, const NCBKernSizeParam& param,
-                AlgoSelectionStrategy) const override {
-        auto&& fm = param.filter_meta;
-        return fm.format == Param::Format::NCHW && fm.spatial_ndim == 2 &&
-               param.src_type.enumv() == DTypeEnum::Float32 &&
-               param.filter_type.enumv() == DTypeEnum::Float32 &&
-               param.dst_type.enumv() == DTypeEnum::Float32 &&
-               fm.dilation[0] == 1 && fm.dilation[1] == 1 &&
-               //! The matmul opr is only used in single thread
-               //! TODO:support the no pack matmul algo in fallback im2col +
-               //! matmul
-               param.nr_threads == 1_z;
-    }
-
-    bool is_preferred(FallbackConvBiasImpl*,
-                      const NCBKernSizeParam&) const override;
-
-    size_t get_workspace(FallbackConvBiasImpl*,
-                         const NCBKernSizeParam& param) const override {
-        return get_bundle(param).total_size_in_bytes();
-    }
-    SmallVector<NCBKern> dispatch_kerns(
-            FallbackConvBiasImpl* /*opr*/,
-            const NCBKernSizeParam& param) const override {
-        size_t group = param.filter_meta.group;
-        return {{kimpl, {group, 1_z, 1_z}}};
-    }
-
-    void* type() const override;
-};
-
-#if defined(MEGDNN_X86_WITH_MKL_DNN)
+#if MEGDNN_X86_WITH_MKL_DNN
 class ConvBiasImpl::AlgoMkldnnConv final : public AlgoBase {
     static void kern_mkldnn_fp32(const NCBKernParam& param,
                                  const NCBKernIndex&);
 
 public:
     AlgoMkldnnConv() {}
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
     const char* name() const override { return "MKLDNN_CONV_FP32"; }
-    bool usable(FallbackConvBiasImpl*, const NCBKernSizeParam& param,
+    bool usable(const NCBKernSizeParam& param,
                 AlgoSelectionStrategy) const override {
         auto&& fm = param.filter_meta;
 
-        bool ok = (fm.format == param::ConvBias::Format::NCHW88) &&
-                  fm.spatial_ndim == 2 &&
-                  param.src_type.enumv() == DTypeEnum::Float32 &&
-                  param.filter_type.enumv() == DTypeEnum::Float32 &&
-                  param.dst_type.enumv() == DTypeEnum::Float32 &&
-                  fm.dilation[0] == 1 && fm.dilation[1] == 1;
-        return ok;
+        bool nchw_nchw88_ok = nchw_nchwxx_valid<NchwNchwxxType::NCHW88>(
+                param.src_type.enumv(), param.filter_type.enumv(),
+                param.dst_type.enumv(), param.filter_meta, param.bias_mode,
+                param.nonlineMode);
+
+        bool normal_conv_ok = (fm.format == param::ConvBias::Format::NCHW88) &&
+                              fm.spatial_ndim == 2 &&
+                              param.src_type.enumv() == DTypeEnum::Float32 &&
+                              param.filter_type.enumv() == DTypeEnum::Float32 &&
+                              param.dst_type.enumv() == DTypeEnum::Float32 &&
+                              fm.dilation[0] == 1 && fm.dilation[1] == 1;
+
+        return nchw_nchw88_ok || normal_conv_ok;
     };
 
-    size_t get_workspace(FallbackConvBiasImpl* /*opr*/,
-                         const NCBKernSizeParam&) const override {
-        return 0;
-    }
+    size_t get_workspace(const NCBKernSizeParam&) const override { return 0; }
 
     SmallVector<NCBKern> dispatch_kerns(
-            FallbackConvBiasImpl* /*opr*/,
             const NCBKernSizeParam& /*param*/) const override {
         auto kern = [](const NCBKernParam& param,
                        const NCBKernIndex& ncb_index) {
@@ -218,7 +171,11 @@ public:
         };
         return {{kern, {1_z, 1_z, 1_z}}};
     }
-    void* type() const override;
+
+    ConvAlgoTypePack get_algo_type() const override {
+        return {AlgoDataType::FLOAT32, AlgoCategory::DIRECT};
+    }
+    MEGDNN_DECL_ALGO_TYPE(X86_MKLDNN)
 };
 #endif
 // vim: syntax=cpp.doxygen

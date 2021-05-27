@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/convolution/helper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,6 +16,10 @@ using namespace cuda;
 using namespace convolution;
 
 bool convolution::is_cudnn_supported(const ForwardSizeArgs &args) {
+    if (args.src_layout->dtype == args.filter_layout->dtype &&
+        args.src_layout->dtype == dtype::BFloat16()) {
+        return false;
+    }
 
     // CUDNN_STATUS_EXECUTION_FAILED on Tegra K1, so disable CUDNN
     // on Tegra K1.
@@ -44,7 +48,7 @@ bool convolution::is_cudnn_supported(const ForwardSizeArgs &args) {
     return supported;
 }
 
-WorkspaceBundle convolution::matmul_get_workspace_bundle(
+SmallVector<size_t> convolution::matmul_get_workspace_bundle(
         const ForwardSizeArgs &args) {
     auto dtype = args.src_layout->dtype;
     auto &&fm = args.filter_meta;
@@ -63,7 +67,7 @@ WorkspaceBundle convolution::matmul_get_workspace_bundle(
     if (args.filter_meta.should_flip) {
         sizes.push_back(dtype.size() * OC * IC * FH * FW);
     }
-    return {nullptr, std::move(sizes)};
+    return sizes;
 }
 
 void convolution::flip_filter(const ForwardSizeArgs &args,

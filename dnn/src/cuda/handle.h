@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/handle.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -42,7 +42,7 @@ class HandleImpl: public HandleImplHelper {
         bool check_cross_dev_copy_constraint(const TensorLayout &src) override;
 
         const cudaDeviceProp& device_prop() const {
-            return m_device_prop;
+            return *m_device_prop;
         }
 
         template <typename Opr>
@@ -123,6 +123,7 @@ class HandleImpl: public HandleImplHelper {
         TypeCvt* typecvt_opr() { return get_helper_opr<TypeCvt, 0>(this); }
 
         size_t image2d_pitch_alignment() const override;
+        HandleVendorType vendor_type() const override;
     private:
         bool m_is_tegra_k1;
         int m_device_id;
@@ -137,7 +138,7 @@ class HandleImpl: public HandleImplHelper {
         cusolverDnHandle_t m_cusolver_handle;
         std::once_flag m_cusolver_initialized;
 
-        cudaDeviceProp m_device_prop;
+        const cudaDeviceProp* m_device_prop;
 
         struct ConstScalars {
             union FP16 {

@@ -2,7 +2,7 @@
  * \file dnn/src/x86/elemwise_helper/kimpl/add.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -92,6 +92,8 @@ OP(dt_int8, SIMDType::AVX2, "avx2", __m256i, __m256ix2, __m256i, mm256, epi8,
         using AddOpBase::operator();                                   \
     };
 
+OP(dt_int32, SIMDType::NONE);
+OP(dt_int16, SIMDType::NONE);
 OP(dt_float32, SIMDType::NONE);
 #undef OP
 }  // namespace x86

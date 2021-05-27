@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/event.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -28,6 +28,9 @@ MGB_TYPEINFO_OBJ_IMPL(CompSeqExecBeforeStart);
 MGB_TYPEINFO_OBJ_IMPL(CompSeqExecFinished);
 MGB_TYPEINFO_OBJ_IMPL(CompSeqExecError);
 MGB_TYPEINFO_OBJ_IMPL(SubgraphAssociated);
+#if MGB_ENABLE_VAR_DEV_MEM_DEFRAGMENTER
+MGB_TYPEINFO_OBJ_IMPL(BeforeMemDefrag);
+#endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
 

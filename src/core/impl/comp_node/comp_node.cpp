@@ -2,7 +2,7 @@
  * \file src/core/impl/comp_node/comp_node.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -12,9 +12,14 @@
 #include "megbrain/comp_node.h"
 #include "megbrain/comp_node_env.h"
 #include "megbrain/graph/exc_extra_info.h"
+#include "megbrain/common.h"
+#include "megbrain/comp_node/alloc.h"
 
 #include "./cuda/comp_node.h"
 #include "./cpu/comp_node.h"
+#include "./rocm/comp_node.h"
+#include "./cambricon/comp_node.h"
+#include "./atlas/comp_node.h"
 
 #include <cstring>
 #include <atomic>
@@ -40,6 +45,12 @@ namespace {
                 return "gpu";
             case DT::CPU:
                 return "cpu";
+            case DT::ATLAS:
+                return "atlas";
+            case DT::ROCM:
+                return "rocm";
+            case DT::CAMBRICON:
+                return "cambricon";
             case DT::MULTITHREAD:
                 return "multithread";
             default:
@@ -80,8 +91,8 @@ namespace {
 
 /* ==================== EventPool ==================== */
 
-CompNode::EventPool::EventPool(CompNode cn):
-    m_cn{cn}
+CompNode::EventPool::EventPool(CompNode cn, size_t flags):
+    m_cn{cn}, m_flags{flags}
 {
 }
 
@@ -96,7 +107,7 @@ CompNode::Event* CompNode::EventPool::alloc() {
         m_free.pop_back();
         return rst;
     }
-    m_allocated.push_back(m_cn.create_event());
+    m_allocated.push_back(m_cn.create_event(m_flags));
     return m_allocated.back().get();
 }
 
@@ -127,25 +138,52 @@ CompNode::Locator CompNode::Locator::parse(const std::string &id) {
     // current parsing location
     const char *ptr = id.data();
     if (id == "cpu:default") {
-        return {DeviceType::CPU, DEVICE_CPU_DEFAULT, 0};
+        return {DeviceType::CPU, DEVICE_CPU_DEFAULT, {0}};
     }
     if (!strncmp(ptr, "multithread:default", 19)) {
         //! the multithread default compnode string like "multithread:default:x"
-        ptr += 20;
-        int nr_thread =std::stoi(ptr);
-        return {DeviceType::MULTITHREAD, DEVICE_MULTITHREAD_DEFAULT, nr_thread};
+        if (id.size() > 20) {
+            ptr += 20;
+            int nr_thread = std::stoi(ptr);
+            return {DeviceType::MULTITHREAD,
+                    DEVICE_MULTITHREAD_DEFAULT,
+                    {nr_thread}};
+        } else {
+            err();
+        }
     }
 
     DeviceType dev_type;
 
     // parse dev_type
-    if (ptr[0] == 'm') {
-        if (strncmp(ptr, "multithread", 11)) {
+    if (ptr[0] == 'a') {
+        if (strncmp(ptr, "atlas", 5)) {
             err();
         }
-        dev_type = DeviceType::MULTITHREAD;
-        ptr += 11;
-    } else {
+        dev_type = DeviceType::ATLAS;
+        ptr += 5;
+    }
+    else if (ptr[0] == 'r') {
+        if (strncmp(ptr, "rocm", 4)) {
+            err();
+        }
+        dev_type = DeviceType::ROCM;
+        ptr += 4;
+    }
+    else if (ptr[2] == 'm') {
+        if (strncmp(ptr, "cambricon", 9)) {
+            err();
+        }
+        dev_type = DeviceType::CAMBRICON;
+        ptr += 9;
+    } else if (ptr[0] == 'm') {
+            if (strncmp(ptr, "multithread", 11)) {
+                err();
+            }
+            dev_type = DeviceType::MULTITHREAD;
+            ptr += 11;
+    }
+    else {
         if (ptr[1] != 'p' || ptr[2] != 'u') {
             err();
         }
@@ -192,8 +230,16 @@ CompNode::Locator CompNode::Locator::parse(const std::string &id) {
     int num_stream = parse_int();
     if (*ptr)
         err();
-
-    return {dev_type, num_dev, num_stream};
+    //! multi thread with thread number(num_stream) being zero is illegal
+    if (dev_type == DeviceType::MULTITHREAD) {
+        if (num_dev == 0) {
+            err();
+        }
+        //! num_steam store the nr_thread
+        std::swap(num_dev, num_stream);
+    }
+    
+    return {dev_type, num_dev, {num_stream}};
 }
 
 void CompNode::Locator::set_device_map(DeviceType type, int from, int to) {
@@ -205,6 +251,10 @@ void CompNode::Locator::set_device_map(DeviceType type, int from, int to) {
 
 void CompNode::Locator::set_unspec_device_type(DeviceType type) {
     mgb_assert(type != DeviceType::UNSPEC);
+    if (type != DeviceType::CPU && type != DeviceType::CUDA) {
+        mgb_log_warn("to resolve unspec device type as one except "
+                "CUDA and CPU may lead to unknown problems.");
+    }
     g_unspec_locator_type = type;
 }
 
@@ -242,15 +292,21 @@ CompNode::Locator CompNode::Locator::to_physical() const {
             stream_physical = 1023;
         }
     }
-    return {type_physical, device_physical, stream_physical};
+    return {type_physical, device_physical, {stream_physical}};
 }
 
 std::string CompNode::Locator::to_string() const {
     if (device == DEVICE_CPU_DEFAULT) {
         return "cpu:default";
     } else if (device == DEVICE_MULTITHREAD_DEFAULT) {
-        std::string ret="multithread:default:";
+        std::string ret = "multithread:default:";
         ret.append(get_stream_str(stream));
+        return ret;
+    } else if (type == DeviceType::MULTITHREAD) {
+        std::string ret("multithread");
+        ret.append(get_stream_str(stream))
+                .append(":")
+                .append(get_stream_str(device));
         return ret;
     }
     char numstr[32];
@@ -371,6 +427,21 @@ void CompNode::activate() const {
     static_cast<Impl*>(m_impl)->env().activate();
 }
 
+void CompNode::set_prealloc_config(
+    size_t alignment, 
+    size_t min_req, 
+    size_t max_overhead, 
+    double growth_factor, 
+    DeviceType device_type) {
+    switch (device_type) {
+        case DeviceType::CUDA:
+            CudaCompNode::set_prealloc_config(alignment, min_req, max_overhead, growth_factor);
+            break;
+        default:
+            mgb_log_warn("unsupported device type for set_prealloc_config");
+    };
+}
+
 void* CompNode::alloc_device(size_t size) const {
     auto ret = m_impl->alloc_device(size);
     static_cast<Impl*>(m_impl)->env().on_mem_event(size, true, ret);
@@ -458,6 +529,16 @@ CompNode CompNode::load(const Locator& locator_physical,
         case DeviceType::CPU:
             ret = CpuCompNode::load_cpu(locator_physical, locator_logical);
             break;
+        case DeviceType::ATLAS:
+            ret = AtlasCompNode::load_atlas(locator_physical, locator_logical);
+            break;
+        case DeviceType::ROCM:
+            ret = ROCmCompNode::load_rocm(locator_physical, locator_logical);
+            break;
+        case DeviceType::CAMBRICON:
+            ret = CambriconCompNode::load_cambricon(locator_physical,
+                                                    locator_logical);
+            break;
         default:
             mgb_throw(MegBrainError, "bad device type");
     }
@@ -476,20 +557,31 @@ void CompNode::finalize() {
     comp_node_detail::DepedentObjList::invoke_callback_and_clean();
     CudaCompNode::finalize();
     CpuCompNode::finalize();
+    ROCmCompNode::finalize();
+    CambriconCompNode::finalize();
+    AtlasCompNode::finalize();
 }
 
 void CompNode::try_coalesce_all_free_memory() {
     CudaCompNode::try_coalesce_all_free_memory();
+    ROCmCompNode::try_coalesce_all_free_memory();
+    CambriconCompNode::try_coalesce_all_free_memory();
 }
 
 void CompNode::sync_all() {
     CudaCompNode::sync_all();
     CpuCompNode::sync_all();
+    ROCmCompNode::sync_all();
+    CambriconCompNode::sync_all();
+    AtlasCompNode::sync_all();
 }
 
 void CompNode::foreach(thin_function<void(CompNode)> callback) {
     CudaCompNode::foreach(callback);
     CpuCompNode::foreach(callback);
+    ROCmCompNode::foreach(callback);
+    CambriconCompNode::foreach(callback);
+    AtlasCompNode::foreach(callback);
 }
 
 size_t CompNode::get_device_count(DeviceType type, bool warn) {
@@ -499,6 +591,12 @@ size_t CompNode::get_device_count(DeviceType type, bool warn) {
         case DeviceType::MULTITHREAD:
         case DeviceType::CPU:
             return CpuCompNode::get_device_count();
+        case DeviceType::ROCM:
+            return ROCmCompNode::get_device_count();
+        case DeviceType::CAMBRICON:
+            return CambriconCompNode::get_device_count();
+        case DeviceType::ATLAS:
+            return AtlasCompNode::get_device_count();
         default:
             mgb_throw(MegBrainError, "bad device type");
     }
@@ -513,6 +611,15 @@ bool CompNode::contain_flag(DeviceType device_type, Flag flag) {
         case DeviceType::MULTITHREAD:
         case DeviceType::CPU:
             cn_flag = CpuCompNode::sm_flag;
+            break;
+        case DeviceType::ROCM:
+            cn_flag = ROCmCompNode::sm_flag;
+            break;
+        case DeviceType::CAMBRICON:
+            cn_flag = CambriconCompNode::sm_flag;
+            break;
+        case DeviceType::ATLAS:
+            cn_flag = AtlasCompNode::sm_flag;
             break;
         default:
             mgb_throw(MegBrainError, "unexpected device type");
@@ -530,6 +637,10 @@ CompNode CompNode::change_stream(int dest_stream) const {
 std::unique_ptr<CompNodeSeqRecorder> CompNode::ImplBase::create_seq_recorder(
         cg::ComputingGraph*) {
     return {};
+}
+
+size_t CompNode::ImplBase::get_mem_padding() {
+    return 0;
 }
 
 void CompNode::ImplBase::add_callback(megdnn::thin_function<void()>&&) {

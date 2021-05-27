@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -149,6 +149,7 @@ SymbolVar current_grad_target(ComputingGraph &graph);
 
 struct SpecialOprStat {
     bool has_virtual_grad = false;
+    bool has_shape_hint = false;
 };
 
 /*!
@@ -182,7 +183,6 @@ SymbolVarArray replace_oprs(
  */
 SymbolVarArray replace_vars_comp_graph(
     const SymbolVarArray &dest, ComputingGraph* new_graph);
-
 
 SymbolVarArray find_h2d(const SymbolVarArray& dest);
 

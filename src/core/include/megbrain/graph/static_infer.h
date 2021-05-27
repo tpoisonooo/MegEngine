@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/static_infer.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -14,6 +14,14 @@
 #include "megbrain/tensor.h"
 
 namespace mgb {
+
+namespace imperative {
+class ProxyGraph;
+namespace proxy_graph {
+class ProxyGraph;
+} // namespace proxy_graph
+} // namespace imperative
+
 namespace cg {
 
 class VarNode;
@@ -50,6 +58,8 @@ namespace static_infer {
         const DeviceTensorND *m_value = nullptr;
 
         friend class StaticInferManagerImpl;
+        friend class imperative::ProxyGraph;
+        friend class imperative::proxy_graph::ProxyGraph;
 
         public:
             /*!
@@ -336,4 +346,3 @@ using StaticInferInpVal = static_infer::InpVal;
 } // mgb
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
-

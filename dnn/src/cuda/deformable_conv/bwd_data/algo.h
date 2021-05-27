@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/deformable_conv/bwd_data/algo.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -13,10 +13,14 @@
 
 #include "megdnn/oprs.h"
 
+#include "src/common/algo_base.h"
+#include "src/common/metahelper.h"
 #include "src/common/utils.h"
 #include "src/cuda/handle.h"
 
 #include "src/cuda/deformable_conv/opr_impl.h"
+
+#include <unordered_map>
 
 namespace megdnn {
 namespace cuda {
@@ -26,6 +30,11 @@ protected:
     ~AlgoBase() = default;
 
 public:
+    enum class AlgoType : uint32_t {
+        CUDA_MATMUL,
+    };
+    using Mapper = std::unordered_map<AlgorithmDesc, AlgoBase*>;
+    AlgoBase() : Algorithm() { m_handle_type = Handle::HandleType::CUDA; }
     struct SizeArgs {
         DeformableConvBackwardDataImpl* opr;
         HandleImpl* handle;
@@ -71,10 +80,13 @@ public:
     bool is_available_wk(const SizeArgs& args, size_t limit) {
         return is_available(args) && get_workspace_in_bytes(args) <= limit;
     }
-    bool is_available_reproducible(
-            const SizeArgs& args, bool reproducible = true,
+    bool is_available_attribute(
+            const SizeArgs& args,
+            const AlgoAttribute& positive_attr = AlgoAttribute::REPRODUCIBLE,
+            const AlgoAttribute& negative_attr = AlgoAttribute::DEFAULT,
             size_t limit = std::numeric_limits<size_t>::max()) {
-        return (!reproducible || is_reproducible()) &&
+        return contain_attribute_all(positive_attr) &&
+               !contain_attribute_any(negative_attr) &&
                is_available_wk(args, limit);
     }
     AlgoBase& check_workspace(const SizeArgs& args,
@@ -93,30 +105,33 @@ class DeformableConvBackwardDataImpl::AlgoMatmul final : public AlgoBase {
 private:
     static WorkspaceBundle get_bundle(const SizeArgs& args);
 
-    static void get_matmul_layout(const SizeArgs& args, TensorLayout& al,
-                                  TensorLayout& bl, TensorLayout& cl);
-
 public:
-    AlgoMatmul() {}
-
     bool is_available(const SizeArgs& args) const override;
     size_t get_workspace_in_bytes(const SizeArgs& args) const override;
     void exec(const ExecArgs& args) const override;
 
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
 
-    const char* name() const override { return "AlgoMatmul"; }
+    std::vector<SearchItem> get_subopr_list(
+            const TensorLayoutArray& layouts,
+            const OperatorBase* opr) const override;
+
+    const char* name() const override { return "MATMUL"; }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_MATMUL)
 };
 
-class DeformableConvBackwardDataImpl::AlgoPack {
-    AlgoPack(const AlgoPack&) = delete;
-    AlgoPack& operator=(const AlgoPack&) = delete;
+class DeformableConvBackwardDataImpl::AlgoPack : NonCopyableObj {
+    AlgoBase::Mapper m_all_algos_map;
 
 public:
     AlgoPack();
     AlgoMatmul algo_matmul;
     //! all algorithms
     std::vector<AlgoBase*> all_algos;
+
+    const AlgoBase::Mapper& all_algos_map() const { return m_all_algos_map; }
 };
 
 }  // namespace cuda

@@ -2,7 +2,7 @@
  * \file dnn/src/common/utils.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -81,21 +81,21 @@ bool megdnn::get_next_addr(size_t* idx, const size_t* shp, size_t n,
                            size_t stride) {
     auto errmsg = [&]() {
         std::string res;
-        res.append(megdnn_mangle("idx={"));
+        res.append("idx={");
         for (size_t i = 0; i < n; ++i) {
             res.append(std::to_string(idx[i]));
             if (i + 1 < n)
-                res.append(megdnn_mangle(","));
+                res.append(",");
         }
-        res.append(megdnn_mangle("}, shp={"));
+        res.append("}, shp={");
         for (size_t i = 0; i < n; ++i) {
             res.append(std::to_string(shp[i]));
             if (i + 1 < n)
-                res.append(megdnn_mangle(","));
+                res.append(",");
         }
-        res.append(megdnn_mangle("}, n="));
+        res.append("}, n=");
         res.append(std::to_string(n));
-        res.append(megdnn_mangle(", stride="));
+        res.append(", stride=");
         res.append(std::to_string(stride));
         return res;
     };
@@ -244,6 +244,25 @@ float megdnn::mul_scale(DType lhs, DType rhs) {
     megdnn_assert_internal(0);
 }
 // clang-format on
+
+bool megdnn::dtype_almost_equal(DType lhs, DType rhs) {
+    if (lhs.enumv() != rhs.enumv())
+        return false;
+    if (lhs.category() != DTypeCategory::QUANTIZED)
+        return true;
+#define cb(dt)                                \
+    if (lhs.enumv() == DTypeTrait<dt>::enumv) \
+        return almost_equal(lhs.param<dt>().scale, rhs.param<dt>().scale);
+    MEGDNN_FOREACH_QUANTIZED_DTYPE_SYMM(cb)
+#undef cb
+#define cb(dt)                                                               \
+    if (lhs.enumv() == DTypeTrait<dt>::enumv)                                \
+        return almost_equal(lhs.param<dt>().scale, rhs.param<dt>().scale) && \
+               lhs.param<dt>().zero_point == rhs.param<dt>().zero_point;
+    MEGDNN_FOREACH_QUANTIZED_DTYPE_ASYMM(cb)
+#undef cb
+    megdnn_assert_internal(false);
+}
 
 template <>
 uint8_t megdnn::convert<dt_quint4, uint8_t>(dt_quint4 src, uint8_t dst,

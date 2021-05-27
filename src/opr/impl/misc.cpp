@@ -2,7 +2,7 @@
  * \file src/opr/impl/misc.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -48,23 +48,26 @@ namespace intl {
 
 /* ================= Argmxx ================= */
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Argmax) {
     MGB_MARK_USED_VAR(out_grad);
     MGB_MARK_USED_VAR(opr);
     mgb_assert(!wrt_idx);
     return nullptr;
 }
+#endif
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(Argmax);
 MEGDNN_OPR_INIT1(Argmax, "argmax")
 
-
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Argmin) {
     MGB_MARK_USED_VAR(out_grad);
     MGB_MARK_USED_VAR(opr);
     mgb_assert(!wrt_idx);
     return nullptr;
 }
+#endif
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(Argmin);
 MEGDNN_OPR_INIT1(Argmin, "argmin")
@@ -84,12 +87,14 @@ std::array<SymbolVar, 2> ArgsortForward::make(
     return {node->output(0), node->output(1)};
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(ArgsortForward) {
     mgb_assert(out_grad.size() == 3 && wrt_idx == 0 && !out_grad[2]);
     if (!out_grad[0])
         return nullptr;
     return ArgsortBackward::make(out_grad[0], opr.output(1)).node();
 }
+#endif
 
 /* ================= ArgsortBackward =================  */
 
@@ -107,12 +112,14 @@ Cumsum::Cumsum(VarNode* opr, const Param& param,
     add_input({opr}, AddInputSortType::CUR_ADDED);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Cumsum) {
     mgb_assert(out_grad[0] && !out_grad[1]);
     auto param = opr.param();
     param.reverse = !param.reverse;
     return Cumsum::make(out_grad[0], param).node();
 }
+#endif
 
 SymbolVar Cumsum::make(SymbolVar opr, const Param& param,
                        const OperatorNodeConfig& config) {
@@ -123,6 +130,10 @@ void Cumsum::scn_do_execute() {
     megdnn_opr()->exec(input(0)->dev_tensor().as_megdnn(),
                        output(0)->dev_tensor().as_megdnn(),
                        intl::get_megdnn_workspace_from_var(output().back()));
+}
+
+void Cumsum::add_input_layout_constraint() {
+    input(0)->add_layout_constraint_contiguous();
 }
 
 void Cumsum::init_output_static_infer_desc() {
@@ -152,6 +163,88 @@ void Cumsum::init_output_static_infer_desc() {
             {SourceType::DEP, {{input(0), DepType::SHAPE}}, infer_workspace});
 }
 
+/* ================= NvOf =================  */
+
+#if MGB_CUDA
+MGB_DYN_TYPE_OBJ_FINAL_IMPL(NvOf);
+
+NvOf::NvOf(VarNode* opr, const Param& param, const OperatorNodeConfig& config)
+        : Super{opr->owner_graph(), config, "NvOf", {opr}}, m_param{param} {
+    mgb_assert(opr->dtype() == dtype::Uint8());
+    add_input({opr});
+    //! NvOf hava only one output
+    add_output(None);
+    mgb_log_debug("init nvof engine with precision: %u", m_param.precision);
+}
+
+void NvOf::init_output_dtype() {
+    output(0)->dtype(dtype::Int16());
+}
+
+SymbolVar NvOf::make(SymbolVar opr, const Param& param,
+                     const OperatorNodeConfig& config) {
+    return opr.insert_single_output_opr<NvOf>(opr.node(), param, config);
+}
+
+void NvOf::scn_do_execute() {
+    auto input_shape = this->input()[0]->shape();
+    for (size_t i = 0; i < 5; i++) {
+        vshape.push_back(input_shape[i]);
+    }
+    auto c = this->comp_node();
+    //! comp_node may init on CUDA or CPU, eg: lar with --cpu
+    //! if ON CUDA, need sync, caused by we use different stream
+    if (CompNode::DeviceType::CUDA == c.device_type()) {
+        c.sync();
+    } else {
+        mgb_log_warn(
+                "NvOf opr on non CUDA comp_node, which will triger H2D and "
+                "D2H!!");
+    }
+
+    //! create NvOF engine at same device id of comp_node, can not get
+    //! comp_node device id, when NvOf:NvOf, so init at scn_do_execute
+    std::lock_guard<std::mutex> lock(m_lock);
+    if (init_flag == false) {
+        //! nvof sdk do not imp p2p copy, so init nvof engine on the same
+        //! device with mgb comp_node
+        nv_flow_extractor = std::make_shared<NVFlowExtractor>(
+                c.locator().device, vshape, m_param.precision, true, true);
+        init_flag = true;
+    }
+
+    nv_flow_extractor->extract_flow(
+            static_cast<unsigned char*>(
+                    input(0)->dev_tensor().as_megdnn().raw_ptr),
+            vshape,
+            reinterpret_cast<int16_t*>(
+                    output(0)->dev_tensor().as_megdnn().raw_ptr));
+}
+
+void NvOf::init_output_static_infer_desc() {
+    using namespace cg::static_infer;
+    auto infer_shape = [](TensorShape& dest, const InpVal& iv) {
+        auto ishp = iv.val.at(0).shape();
+        //! nvof input format: nthwc4
+        mgb_assert(ishp.ndim == 5);
+        //! now only support RGBA format channel data
+        mgb_assert(ishp[4] == 4);
+        SmallVector<size_t> tv;
+        tv.push_back(ishp[0]);
+        tv.push_back(ishp[1] - 1);
+        tv.push_back(ishp[2] / 4);
+        tv.push_back(ishp[3] / 4);
+        tv.push_back(ishp[4] / 2);
+        dest = tv;
+
+        return true;
+    };
+    owner_graph()->static_infer_manager().register_shape_infer(
+            output(0),
+            {SourceType::DEP, {{input(0), DepType::SHAPE}}, infer_shape});
+}
+#endif
+
 /* ================= CondTake =================  */
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(CondTake);
 
@@ -170,6 +263,7 @@ CondTake::CondTake(VarNode *data, VarNode *mask,
     }
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(CondTake) {
     mgb_assert(out_grad.size() == 3 && !out_grad[2]);
     if (wrt_idx == 0 && out_grad[0]) {
@@ -181,6 +275,7 @@ MGB_IMPL_OPR_GRAD(CondTake) {
     }
     return nullptr;
 }
+#endif
 
 std::array<SymbolVar, 2> CondTake::make(
         SymbolVar data, SymbolVar mask,
@@ -288,6 +383,8 @@ void TopK::init_output_static_infer_desc() {
     }
 
     auto infer_workspace = [this](TensorShape& dst, const InpVal& iv) {
+        // active comp_node for cuda launch kernel in get_workspace_in_bytes
+        comp_node().activate();
         auto k = iv.val[3].value().ptr<int>()[0];
         auto size = megdnn_opr()->get_workspace_in_bytes(
                 k, {iv.val[0].shape(), input(0)->dtype()},
@@ -318,7 +415,10 @@ void TopK::record_execute_deps(ExecDependencyArray& deps) {
     record_megdnn_opr(deps);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(TopK) {
+    // TopK has no gradient on the input k
+    if (wrt_idx) return nullptr;
     if (opr.param().mode == TopK::Param::Mode::KTH_ONLY) {
         mgb_assert(out_grad[0] && !out_grad[1] && !out_grad[2]);
         auto add_axis = [](SymbolVar x) {
@@ -334,5 +434,6 @@ MGB_IMPL_OPR_GRAD(TopK) {
     return ArgsortBackward::make(out_grad[0], opr.output(1), opr.input(0))
             .node();
 }
+#endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

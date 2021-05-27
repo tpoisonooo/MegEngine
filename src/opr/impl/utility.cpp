@@ -2,7 +2,7 @@
  * \file src/opr/impl/utility.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -206,15 +206,17 @@ SymbolVar Timestamp::make(SymbolVar node, std::shared_ptr<HostTensorND> dest,
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(VirtualDep);
 
 VirtualDep::VirtualDep(const VarNodeArray& inputs,
-                       const OperatorNodeConfig& config)
+                       const OperatorNodeConfig& cfg)
         : Super(inputs[0]->owner_graph(),
-                setup_config_cn(config, inputs[0]->comp_node()), "virtual_dep",
-                inputs) {
+                cfg.has_comp_node_set() ? cfg : setup_config_cn(cfg, inputs[0]->comp_node()),
+                "virtual_dep", inputs) {
     for (auto inp : inputs) {
         add_input({inp});
     }
     mgb_assert(inputs[0]->dtype().valid());
-    add_output(None)->dtype(inputs[0]->dtype());
+    add_output(None)
+            ->dtype(inputs[0]->dtype())
+            .comp_node(config().get_single_comp_node());
 }
 
 cg::OperatorNodeBase::NodeProp* VirtualDep::do_make_node_prop() const {
@@ -255,9 +257,11 @@ void MarkDynamicVar::scn_do_execute() {
     o->dev_tensor().copy_from_fixlayout(i->dev_tensor());
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(MarkDynamicVar) {
     return MarkDynamicVar::make(out_grad.at(0)).node();
 }
+#endif
 
 MarkDynamicVar::MarkDynamicVar(VarNode *node, const OperatorNodeConfig &config):
     Super{node->owner_graph(), config, "mark_dyn", {node}}
@@ -381,10 +385,12 @@ CallbackInjector::mixin_get_static_infer_desc(OperatorNodeBase &opr) {
     }
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(CallbackInjector) {
     MGB_MARK_USED_VAR(wrt_idx);
     return out_grad.at(0);
 }
+#endif
 
 /* ===================== MarkNoBroadcastElemwise ===================== */
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(MarkNoBroadcastElemwise);
@@ -404,9 +410,11 @@ SymbolVar MarkNoBroadcastElemwise::make(
             input.node(), config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(MarkNoBroadcastElemwise) {
     return out_grad.at(0);
 }
+#endif
 
 /* ===================== Identity ===================== */
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(Identity);
@@ -429,9 +437,11 @@ SymbolVar Identity::make(
     return input.insert_single_output_opr<Identity>(input.node(), config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Identity) {
     return out_grad.at(0);
 }
+#endif
 
 /* ===================== AssertEqual ===================== */
 
@@ -476,7 +486,9 @@ void AssertEqual::scn_do_execute_finish(const DeviceTensorND &) {
     auto err = DTypeScalar::make_from_raw(
             m_hv.dtype(), m_hv.raw_ptr()).get_cast<float>();
     if (m_param.verbose) {
-        fprintf(stderr,
+        //! FIXME: stderr will be slow when build windows with VS clang-cl (test in VM),
+        //! but I can`t find the root case. fix it when you figure out
+        fprintf(stdout,
                 "AssertEqual: err=%g (name=%s id=%zu)\n", err, cname(), id());
     }
     if (!(err >= 0 && err <= m_param.maxerr)) {
@@ -528,6 +540,7 @@ SymbolVar SetGrad::make(SymbolVar input, const GradGetter& grad_getter,
             input.node(), grad_getter, config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(SetGrad) {
     MGB_MARK_USED_VAR(wrt_idx);
     MGB_MARK_USED_VAR(out_grad);
@@ -536,6 +549,7 @@ MGB_IMPL_OPR_GRAD(SetGrad) {
             "var returned by grad_getter belongs to a different comp graph");
     return grad.node();
 }
+#endif
 
 /* ===================== InvalidGrad ===================== */
 
@@ -688,6 +702,7 @@ VirtualLoss::NodeProp* VirtualLoss::do_make_node_prop() const {
     return ret;
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(VirtualLoss) {
     mgb_assert(out_grad.size() == 1);
     auto mid = opr.input().size() / 2;
@@ -696,6 +711,7 @@ MGB_IMPL_OPR_GRAD(VirtualLoss) {
     }
     return nullptr;
 }
+#endif
 
 #else
 VarNode* InvalidGrad::make(const OperatorNodeBase&, size_t) {
@@ -823,5 +839,58 @@ SymbolVar RequireInputDynamicStorage::make(const SymbolVar input,
     return input.insert_single_output_opr<RequireInputDynamicStorage>(
             input.node(), config);
 }
+
+/* ===================== ShapeHint ===================== */
+
+MGB_DYN_TYPE_OBJ_FINAL_IMPL(ShapeHint);
+
+void ShapeHint::scn_do_execute() {
+    mgb_assert(0);
+}
+
+void ShapeHint::init_output_static_infer_desc() {
+    using namespace cg::static_infer;
+    auto infer_shp = [this](TensorShape& dest, const InpVal&) -> bool {
+        const TensorShape* inferred = nullptr;
+        if (cg::is_static_var_shape(input(0))) {
+            inferred = owner_graph()->static_infer_manager().infer_shape_fallible(input(0));
+        }
+        if (inferred) {
+            dest = *inferred;
+            if (!dest.eq_shape(m_shape)) {
+                mgb_log_warn(
+                    "given shape hint on var %s is different from inferred shape, "
+                    "hint %s vs inferred %s", cg::dump_var_info({input(0)}).c_str(),
+                    m_shape.to_string().c_str(), dest.to_string().c_str());
+            }
+        } else {
+            dest = m_shape;
+        }
+        return dest.ndim;
+    };
+    owner_graph()->static_infer_manager().register_shape_infer(
+            output(0), {m_is_const ? SourceType::CONSTANT : SourceType::MUTABLE, {}, infer_shp});
+}
+
+ShapeHint::ShapeHint(VarNode* inp, TensorShape shape,
+                     bool is_const, const OperatorNodeConfig& config)
+    : Super{inp->owner_graph(), config, "shape_hint", {inp}},
+        m_shape(shape), m_is_const(is_const) {
+    add_input({inp});
+    add_output(None);
+}
+
+SymbolVar ShapeHint::make(SymbolVar inp, TensorShape shape,
+                          bool is_const, const OperatorNodeConfig& config) {
+    return inp.insert_single_output_opr<ShapeHint>(inp.node(), shape, is_const, config);
+}
+
+#if MGB_ENABLE_GRAD
+MGB_IMPL_OPR_GRAD(ShapeHint) {
+    // since the shape of output(0) could be inferred, no need to
+    // give hint on out_grad(0)
+    return out_grad.at(0);
+}
+#endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

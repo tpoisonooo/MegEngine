@@ -2,7 +2,7 @@
  * \file src/opr-mm/include/megbrain/opr/collective_comm.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,18 +26,21 @@ public:
 
     using Param = megdnn::param::CollectiveComm;
 
-    CollectiveComm(VarNodeArray inputs, ComputingGraph* const graph,
-                     const std::string& key, const size_t nr_devices, const uint32_t rank,
-                     const uint32_t root, std::shared_ptr<GroupClient> group_client,
-                     const Param& param, const DType& dtype, const std::string& backend,
-                     const SmallVector<std::shared_ptr<DeviceTensorND>>& dev_buffer_arr,
-                     const OperatorNodeConfig& config,
-                     const std::shared_ptr<DTypeScalar>& disable);
+    CollectiveComm(
+            VarNodeArray inputs, ComputingGraph* const graph,
+            const std::string& key, const size_t nr_devices, const bool is_root,
+            const int rank, const bool local_grad,
+            std::shared_ptr<GroupClient> group_client, const Param& param,
+            const DType& dtype, const std::string& backend,
+            const SmallVector<std::shared_ptr<DeviceTensorND>>& dev_buffer_arr,
+            const OperatorNodeConfig& config,
+            const std::shared_ptr<DTypeScalar>& disable);
 
     static SymbolVarArray make(
             const SymbolVarArray& inputs, ComputingGraph* const graph,
-            const std::string& key, const size_t nr_devices, const uint32_t rank,
-            const uint32_t root, std::shared_ptr<GroupClient> group_client,
+            const std::string& key, const size_t nr_devices, const bool is_root,
+            const int rank, const bool local_grad,
+            std::shared_ptr<GroupClient> group_client,
             const SmallVector<std::shared_ptr<DeviceTensorND>>& dev_buffer_arr,
             const Param& param, const DType& dtype = {},
             const std::string& backend = "nccl",
@@ -45,15 +48,17 @@ public:
             const std::shared_ptr<DTypeScalar>& disable =
                     std::make_shared<DTypeScalar>(0));
 
-    static SymbolVarArray make(
-            const SymbolVarArray& inputs, ComputingGraph* const graph,
-            const std::string& key, const size_t nr_devices, const uint32_t rank,
-            const uint32_t root, std::shared_ptr<GroupClient> group_client,
-            const Param& param, const DType& dtype = {},
-            const std::string& backend = "nccl",
-            const OperatorNodeConfig& config = {},
-            const std::shared_ptr<DTypeScalar>& disable =
-                    std::make_shared<DTypeScalar>(0));
+    static SymbolVarArray make(const SymbolVarArray& inputs,
+                               ComputingGraph* const graph,
+                               const std::string& key, const size_t nr_devices,
+                               const bool is_root, const int rank,
+                               const bool local_grad,
+                               std::shared_ptr<GroupClient> group_client,
+                               const Param& param, const DType& dtype = {},
+                               const std::string& backend = "nccl",
+                               const OperatorNodeConfig& config = {},
+                               const std::shared_ptr<DTypeScalar>& disable =
+                                       std::make_shared<DTypeScalar>(0));
 
     const Param& param() const { return m_param; }
     const DType& dtype() const { return m_dtype; }
@@ -67,9 +72,10 @@ public:
         return m_dev_buffers;
     }
 
-    uint32_t rank() const { return m_rank; }
-    uint32_t root() const { return m_root; }
-    bool is_root() const { return m_rank == m_root; }
+    int rank() const { return m_rank; }
+    int root() const { return m_root; }
+    bool is_root() const { return m_is_root; }
+    bool local_grad() const { return m_local_grad; }
 
     //! The key that identifies an NCCL clique.
     //! Operators with same keys belong to the same clique.
@@ -79,11 +85,15 @@ public:
         return m_group_client;
     }
 
+    void set_pack_hash(uint64_t hash) { m_pack_hash = hash; }
+
+    uint64_t pack_hash() const { return m_pack_hash; }
+
     std::shared_ptr<MegRay::Context> megray_ctx() const {
         return m_megray_ctx;
     }
 
-    VarNodeArray grad(const VarNodeArray& out_grad) const;
+    VarNode* grad(VarNode* out_grad) const;
 
 private:
     Barrier m_exec_barrier;
@@ -108,21 +118,28 @@ private:
 
     std::shared_ptr<GroupClient> m_group_client;
     size_t m_nr_devices = 0;
-    uint32_t m_rank;
+    bool m_is_root;
+    int m_rank;
+    bool m_local_grad;
     std::string m_key;
     //! XXHash generated from m_key
     size_t m_hash;
     //! root of BROADCAST and REDUCE operation
-    uint32_t m_root;
+    int m_root;
     //! rank of root of BROADCAST and REDUCE operation
-    Maybe<TensorShape> m_broadcast_output_shape = None;
-    // Whether shape infer is enabled. This is only used by BROADCAST operation,
+    Maybe<TensorShape> m_output_shape = None;
+    // Whether shape infer is enabled.
+    // This is only used by BROADCAST and SCATTER operation,
     // whose shape infer should be disabled *during* static infer phase.
     bool m_enable_shape_infer = false;
+
+    //! set in PackAllReduceScanPass and used in PackAllReduceReplacePass
+    uint64_t m_pack_hash = 0;
 
     std::shared_ptr<MegRay::Context> m_megray_ctx;
     std::shared_ptr<MegRay::Communicator> m_megray_comm;
     bool m_init = false;
+    bool m_debug_mode = false;
 
     //! dev buffers for each outputs
     SmallVector<std::shared_ptr<DeviceTensorND>> m_dev_buffers;

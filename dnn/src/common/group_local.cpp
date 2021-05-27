@@ -2,7 +2,7 @@
  * \file dnn/src/common/group_local.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -19,13 +19,12 @@ void GroupLocalBase::deduce_layout_fwd(const TensorLayout &src,
         TensorLayout &dst)
 {
     auto errmsg = [&]() {
-        return megdnn_layout_msg(src) + ", "
-            + megdnn_layout_msg(filter) + ", "
-            + megdnn_layout_msg(dst) + ", "
-            + megdnn_mangle("pad_h=") + std::to_string(param().pad_h) + ", "
-            + megdnn_mangle("pad_w=") + std::to_string(param().pad_w) + ", "
-            + megdnn_mangle("stride_h=") + std::to_string(param().stride_h) + ", "
-            + megdnn_mangle("stride_w=") + std::to_string(param().stride_w);
+        return megdnn_layout_msg(src) + ", " + megdnn_layout_msg(filter) +
+               ", " + megdnn_layout_msg(dst) + ", " +
+               "pad_h=" + std::to_string(param().pad_h) + ", " +
+               "pad_w=" + std::to_string(param().pad_w) + ", " +
+               "stride_h=" + std::to_string(param().stride_h) + ", " +
+               "stride_w=" + std::to_string(param().stride_w);
     };
     MEGDNN_MARK_USED_VAR(errmsg);
     megdnn_assert_contiguous(src);
@@ -66,7 +65,7 @@ void GroupLocalBase::check_layout_fwd(const TensorLayout &src,
     megdnn_assert_eq_dtype(src, dst);
     deduce_layout_fwd(src, filter, dst_expected);
     megdnn_assert_eq_layout(dst_expected, dst);
-    megdnn_assert(src.dtype == dtype::Float32() || MEGDNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), true));
+    megdnn_assert(src.dtype == dtype::Float32() || DNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), true));
 }
 
 void GroupLocalForward::check_exec(const TensorLayout &src,

@@ -2,7 +2,7 @@
  * \file dnn/test/common/comparator.inl
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -30,6 +30,22 @@ class DefaultComparator<dt_float32> {
         {
             return std::abs(diff(expected, actual)) < 1e-3;
         }
+};
+
+template <>
+class DefaultComparator<dt_qint8> {
+public:
+    bool is_same(dt_qint8 expected, dt_qint8 actual) const {
+        return expected.as_int8() == actual.as_int8();
+    }
+};
+
+template <>
+class DefaultComparator<dt_qint32> {
+public:
+    bool is_same(dt_qint32 expected, dt_qint32 actual) const {
+        return expected.as_int32() == actual.as_int32();
+    }
 };
 
 } // namespace test

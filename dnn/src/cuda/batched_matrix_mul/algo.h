@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/batched_matrix_mul/algo.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,6 +16,8 @@
 #include "src/common/utils.h"
 #include "src/cuda/batched_matrix_mul/opr_impl.h"
 #include "src/cuda/matrix_mul/cublasLt_wrapper.h"
+#include "src/common/metahelper.h"
+
 #if CUDA_VERSION >= 10010
 #include <cublasLt.h>
 #endif
@@ -28,6 +30,15 @@ protected:
     ~AlgoBase() = default;
 
 public:
+    enum class AlgoType : uint32_t {
+        CUDA_BRUTE_FORCE,
+        CUDA_CUBLAS,
+        CUDA_CUBLASLT,
+        CUDA_INT8X8X32,
+    };
+    using Mapper = std::unordered_map<AlgorithmDesc, AlgoBase*>;
+
+    AlgoBase() : Algorithm() { m_handle_type = Handle::HandleType::CUDA; }
     struct SizeArgs {
         BatchedMatrixMulForwardImpl* opr;
         TensorLayout layout_a, layout_b, layout_c;
@@ -57,10 +68,13 @@ public:
     bool is_available_wk(const SizeArgs& args, size_t limit) {
         return is_available(args) && get_workspace_in_bytes(args) <= limit;
     }
-    bool is_available_reproducible(
-            const SizeArgs& args, bool reproducible = true,
+    bool is_available_attribute(
+            const SizeArgs& args,
+            const AlgoAttribute& positive_attr = AlgoAttribute::REPRODUCIBLE,
+            const AlgoAttribute& negative_attr = AlgoAttribute::DEFAULT,
             size_t limit = std::numeric_limits<size_t>::max()) {
-        return (!reproducible || is_reproducible()) &&
+        return contain_attribute_all(positive_attr) &&
+               !contain_attribute_any(negative_attr) &&
                is_available_wk(args, limit);
     }
     AlgoBase& check_workspace(const SizeArgs& args,
@@ -76,19 +90,22 @@ public:
 class BatchedMatrixMulForwardImpl::AlgoBruteForce final
         : public BatchedMatrixMulForwardImpl::AlgoBase {
     using Param = MatrixMulForward::Param;
-
 private:
-    std::string m_name;
-    MatrixMulForwardImpl::AlgoBase* m_algorithm = nullptr;
     WorkspaceBundle get_workspace_bundle();
 
 public:
-    AlgoBruteForce(MatrixMulForwardImpl::AlgoBase* algo);
     bool is_available(const SizeArgs& args) const override;
     size_t get_workspace_in_bytes(const SizeArgs& /*args*/) const override;
     void exec(const ExecArgs& args) const final;
-    bool is_reproducible() const override { return true; }
-    const char* name() const override { return m_name.c_str(); }
+    AlgoAttribute attribute()const override{
+        return AlgoAttribute::REPRODUCIBLE;
+    }
+    const char* name() const override { return "BRUTE_FORCE"; }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_BRUTE_FORCE)
+
+    std::vector<SearchItem> get_subopr_list(
+            const TensorLayoutArray& layouts,
+            const OperatorBase* opr) const override;
 };
 class BatchedMatrixMulForwardImpl::AlgoCublas final
         : public BatchedMatrixMulForwardImpl::AlgoBase {
@@ -97,8 +114,11 @@ public:
     bool is_available(const SizeArgs& args) const override;
     size_t get_workspace_in_bytes(const SizeArgs& /*args*/) const override;
     void exec(const ExecArgs& args) const final;
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
     const char* name() const override { return "CUBLAS"; }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_CUBLAS)
 };
 #if CUDA_VERSION >= 10010
 class BatchedMatrixMulForwardImpl::AlgoCublasLt final : public AlgoBase {
@@ -107,8 +127,11 @@ public:
     bool is_available(const SizeArgs& args) const override;
     size_t get_workspace_in_bytes(const SizeArgs& /*args*/) const override;
     void exec(const ExecArgs& args) const final;
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
     const char* name() const override { return "CUBLAS_LT"; }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_CUBLASLT)
 };
 #endif
 class BatchedMatrixMulForwardImpl::AlgoInt8x8x32 final
@@ -118,13 +141,17 @@ public:
     bool is_available(const SizeArgs& args) const override;
     size_t get_workspace_in_bytes(const SizeArgs& /*args*/) const override;
     void exec(const ExecArgs& args) const final;
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
     const char* name() const override { return "INT8x8x32"; }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_INT8X8X32)
 };
-class BatchedMatrixMulForwardImpl::AlgoPack {
+
+class BatchedMatrixMulForwardImpl::AlgoPack : NonCopyableObj {
+private:
+    AlgoBase::Mapper m_all_algos_map;
     MatrixMulForwardImpl::AlgoPack mm_pack;
-    AlgoPack(const AlgoPack&) = delete;
-    AlgoPack& operator=(const AlgoPack&) = delete;
 
 public:
     AlgoPack();
@@ -135,7 +162,9 @@ public:
 #endif
     AlgoInt8x8x32 int8x8x32;
     std::vector<AlgoBase*> all_algos;
-    std::vector<AlgoBruteForce> brute_force_algos;
+    AlgoBruteForce brute_force;
+
+    const AlgoBase::Mapper& all_algos_map() const { return m_all_algos_map; }
 };
 }  // namespace cuda
 }  // namespace megdnn

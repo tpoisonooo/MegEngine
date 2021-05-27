@@ -2,7 +2,7 @@
  * \file dnn/src/common/megcore/cpu/api.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -40,7 +40,8 @@ CPUDispatcher* megcoreGetCPUDispatcher(megcoreComputingHandle_t handle) {
     megcoreDeviceHandle_t dev_handle = H->content->dev_handle();
     megcorePlatform_t platform;
     megcoreGetPlatform(dev_handle, &platform);
-    megdnn_assert(platform &megcorePlatformCPU);
+    megdnn_throw_if(!(platform & megcorePlatformCPU), megdnn_error,
+                    "can not be default ComputingContext");
     auto context = static_cast<megcore::cpu::DefaultComputingContext*>(
             H->content.get());
     return context->get_dispatcher();

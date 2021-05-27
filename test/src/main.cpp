@@ -3,7 +3,7 @@
  *
  * This file is part of MegBrain, a deep learning framework developed by Megvii.
  *
- * \copyright Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * \copyright Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  */
 
@@ -13,6 +13,7 @@
 #include "megbrain/test/helper.h"
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 #include <cstdlib>
 
 extern "C" int gtest_main(int argc, char** argv) {
@@ -32,7 +33,7 @@ extern "C" int gtest_main(int argc, char** argv) {
     auto&& listeners = ::testing::UnitTest::GetInstance()->listeners();
     MGB_TRY {
         srand(time(nullptr));
-        ::testing::InitGoogleTest(&argc, argv);
+        ::testing::InitGoogleMock(&argc, argv);
         listeners.Append(&mgb::RNGSeedManager::inst());
         auto rst = RUN_ALL_TESTS();
         mgb::CompNode::finalize();

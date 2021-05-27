@@ -5,7 +5,7 @@
  *
  * \brief helper functions for testing
  *
- * \copyright Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * \copyright Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  */
 
@@ -17,13 +17,6 @@
 
 #include <iostream>
 
-#ifdef _WIN32
-static inline void unsetenv(std::string name) {
-    name += "=";
-    _putenv(name.c_str());
-}
-#define setenv(name,value,overwrite) _putenv_s(name,value)
-#endif
 #if !MGB_ENABLE_EXCEPTION
 #pragma GCC diagnostic ignored  "-Wunused-variable"
 #endif
@@ -50,6 +43,7 @@ namespace megdnn {
             std::ostream &ostr, const DType &dt) {
         return ostr << dt.name();
     }
+
 } // namespace megdnn
 
 namespace mgb {
@@ -133,6 +127,11 @@ decltype(auto) container_to_vector(Container &&ct) {
 #define MGB_ASSERT_TENSOR_EQ(v0, v1) \
     MGB_ASSERT_TENSOR_NEAR(v0, v1, 1e-6)
 
+::testing::AssertionResult __assert_shape_equal(const TensorShape& v0,
+                                                const TensorShape& v1);
+
+#define MGB_ASSERT_SHAPE_EQ(v0, v1) \
+    ASSERT_TRUE(::mgb::__assert_shape_equal(v0, v1))
 
 /*!
  * \brief xorshift+ RNG, which is very fast
@@ -170,7 +169,7 @@ class RNGxorshf {
 };
 
 enum class RandomDistribution {
-    GAUSSIAN, UNIFORM
+    GAUSSIAN, UNIFORM, CONSTANT, CONSECUTIVE
 };
 
 template<class dtype>
@@ -194,6 +193,10 @@ struct RandomDistributionDTypeDefault<dtype::Int16> {
 };
 template<>
 struct RandomDistributionDTypeDefault<dtype::Int32> {
+    static constexpr auto dist = RandomDistribution::UNIFORM;
+};
+template<>
+struct RandomDistributionDTypeDefault<dtype::Bool> {
     static constexpr auto dist = RandomDistribution::UNIFORM;
 };
 template<>
@@ -246,6 +249,10 @@ struct UniformRNGDefaultRange<dtype::Uint8> {
     static constexpr dt_uint8 LO = 0, HI = 255;
 };
 template<>
+struct UniformRNGDefaultRange<dtype::Bool> {
+    static constexpr dt_bool LO = false, HI = true;
+};
+template<>
 struct UniformRNGDefaultRange<dtype::Int16> {
     static constexpr dt_int16 LO = -32767, HI = 32767;
 };
@@ -258,6 +265,10 @@ struct UniformRNGDefaultRange<dtype::QuantizedS8> {
     static const dt_qint8 LO, HI;
 };
 
+template<>
+struct UniformRNGDefaultRange<dtype::Quantized8Asymm> {
+    static const dt_quint8 LO, HI;
+};
 //! gaussian
 template<class dtype>
 class HostTensorGenerator<dtype, RandomDistribution::GAUSSIAN> final:
@@ -317,6 +328,63 @@ class HostTensorGenerator<dtype, RandomDistribution::UNIFORM> final:
         ctype m_lo, m_hi;
 };
 
+//! const value
+template<class dtype>
+class HostTensorGenerator<dtype, RandomDistribution::CONSTANT> final:
+        public HostTensorGeneratorBase {
+
+    public:
+        using ctype = typename DTypeTrait<dtype>::ctype;
+
+        HostTensorGenerator(ctype default_val)
+                : HostTensorGeneratorBase{next_rand_seed()},
+                  m_default_val{default_val} {}
+
+        std::shared_ptr<HostTensorND> operator ()(
+                const TensorShape &shape, CompNode cn = {}) override;
+        using HostTensorGeneratorBase::operator();
+
+    private:
+        ctype m_default_val;
+};
+
+//! consecutive value
+template<class dtype>
+class HostTensorGenerator<dtype, RandomDistribution::CONSECUTIVE> final:
+        public HostTensorGeneratorBase {
+
+    public:
+        using ctype = typename DTypeTrait<dtype>::ctype;
+
+        HostTensorGenerator(ctype val, ctype delta)
+                : HostTensorGeneratorBase{next_rand_seed()},
+                  m_val{val}, m_delta{delta} {}
+
+        std::shared_ptr<HostTensorND> operator ()(
+                const TensorShape &shape, CompNode cn = {}) override;
+        using HostTensorGeneratorBase::operator();
+
+    private:
+        ctype m_val;
+        ctype m_delta;
+};
+
+
+template <>
+class HostTensorGenerator<dtype::Bool, RandomDistribution::UNIFORM> final
+        : public HostTensorGeneratorBase {
+public:
+    using ctype = typename DTypeTrait<dtype::Bool>::ctype;
+
+    HostTensorGenerator(uint64_t seed = next_rand_seed())
+            : HostTensorGeneratorBase{seed} {}
+
+    std::shared_ptr<HostTensorND> operator()(const TensorShape& shape,
+                                             CompNode cn = {}) override;
+    using HostTensorGeneratorBase::operator();
+
+};
+
 template <>
 class HostTensorGenerator<dtype::QuantizedS8, RandomDistribution::UNIFORM> final
         : public HostTensorGeneratorBase {
@@ -339,6 +407,33 @@ class HostTensorGenerator<dtype::QuantizedS8, RandomDistribution::UNIFORM> final
     private:
         float m_scale;
         ctype m_lo, m_hi;
+};
+
+template <>
+class HostTensorGenerator<dtype::Quantized8Asymm, RandomDistribution::UNIFORM>
+        final : public HostTensorGeneratorBase {
+public:
+    using ctype = typename DTypeTrait<dtype::Quantized8Asymm>::ctype;
+
+    HostTensorGenerator(
+            ctype lo = UniformRNGDefaultRange<dtype::Quantized8Asymm>::LO,
+            ctype hi = UniformRNGDefaultRange<dtype::Quantized8Asymm>::HI,
+            float scale = 1.f, uint8_t zero_point = 0,
+            uint64_t seed = next_rand_seed())
+            : HostTensorGeneratorBase{seed},
+              m_scale{scale},
+              m_zero_point(zero_point),
+              m_lo{lo},
+              m_hi{hi} {}
+
+    std::shared_ptr<HostTensorND> operator()(const TensorShape& shape,
+                                             CompNode cn = {}) override;
+    using HostTensorGeneratorBase::operator();
+
+private:
+    float m_scale;
+    uint8_t m_zero_point;
+    ctype m_lo, m_hi;
 };
 
 /*!
@@ -400,8 +495,14 @@ bool check_gpu_available(size_t num);
 //! check whether given number of AMD GPUs is available
 bool check_amd_gpu_available(size_t num);
 
+//! check whether given number of cambricon devices is available
+bool check_cambricon_device_available(size_t num);
+
 //! check current capability >= major.minor
 bool check_compute_capability(int major, int minor);
+
+//! check compnode avaiable
+bool check_device_type_avaiable(CompNode::DeviceType device_type);
 
 //! hook persistent cache get calls during the lifetime
 class PersistentCacheHook {
@@ -435,6 +536,13 @@ public:
     if (!check_amd_gpu_available(n)) \
         return; \
 } while(0)
+
+//! skip a testcase if cambricon device not available
+#define REQUIRE_CAMBRICON_DEVICE(n)               \
+    do {                                          \
+        if (!check_cambricon_device_available(n)) \
+            return;                               \
+    } while (0)
 
 #if MGB_HAVE_THREAD
 #define REQUIRE_THREAD()

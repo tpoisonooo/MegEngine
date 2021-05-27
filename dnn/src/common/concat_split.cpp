@@ -2,7 +2,7 @@
  * \file dnn/src/common/concat_split.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -41,8 +41,8 @@ void ConcatSplitBase::check_layout_common(const TensorLayoutArray &srcs,
         megdnn_assert_eq_size_t(src.ndim, ndim);
 	}
 	// ensure param().axis is correct
-    auto errmsg = megdnn_mangle("param().axis=") +
-        std::to_string(param().axis) + megdnn_mangle(", ndim=") +
+    auto errmsg = "param().axis=" +
+        std::to_string(param().axis) + ", ndim=" +
         std::to_string(ndim);
     MEGDNN_MARK_USED_VAR(errmsg);
     megdnn_assert(param().axis < static_cast<int32_t>(ndim), "%s",

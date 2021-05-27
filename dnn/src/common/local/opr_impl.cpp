@@ -2,7 +2,7 @@
  * \file dnn/src/common/local/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,19 +17,21 @@ namespace megdnn {
 void LocalBase::deduce_layout_fwd(const TensorLayout &src,
         const TensorLayout &filter, TensorLayout &dst)
 {
-    auto errmsg = megdnn_layout_msg(src) + ", "
-        + megdnn_layout_msg(filter) + ", "
-        + megdnn_layout_msg(dst) + ", "
-        + megdnn_mangle("is_xcorr=")
-        + std::to_string((param().mode == Mode::CROSS_CORRELATION)) + ", "
-        + megdnn_mangle("pad_h=") + std::to_string(param().pad_h) + ", "
-        + megdnn_mangle("pad_w=") + std::to_string(param().pad_w) + ", "
-        + megdnn_mangle("stride_h=") + std::to_string(param().stride_h) + ", "
-        + megdnn_mangle("stride_w=") + std::to_string(param().stride_w) ;
+    auto errmsg = megdnn_layout_msg(src) + ", " + megdnn_layout_msg(filter) +
+                  ", " + megdnn_layout_msg(dst) + ", " + "is_xcorr=" +
+                  std::to_string((param().mode == Mode::CROSS_CORRELATION)) +
+                  ", " + "pad_h=" + std::to_string(param().pad_h) + ", " +
+                  "pad_w=" + std::to_string(param().pad_w) + ", " +
+                  "stride_h=" + std::to_string(param().stride_h) + ", " +
+                  "stride_w=" + std::to_string(param().stride_w);
     auto errmsg_c = errmsg.c_str();
     MEGDNN_MARK_USED_VAR(errmsg_c);
 
-    megdnn_assert_contiguous(src);
+    //! in batch dim we don't need contiguous
+    TensorLayout src_contig = src;
+    src_contig.init_contiguous_stride();
+    src_contig.stride[0] = src.stride[0];
+    megdnn_assert_eq_layout(src_contig, src);
     megdnn_assert_contiguous(filter);
     megdnn_assert(src.ndim == 4_z, "%s", errmsg_c);
     megdnn_assert(filter.ndim == 6_z, "%s", errmsg_c);
@@ -67,11 +69,13 @@ void LocalBase::check_layout_fwd(const TensorLayout &src,
     megdnn_assert_eq_dtype(src, filter);
     megdnn_assert_eq_dtype(src, dst);
     deduce_layout_fwd(src, filter, dst_expected);
+    //! in batch dim we don't need contiguous
+    dst_expected.stride[0] = dst.stride[0];
     megdnn_assert_eq_layout(dst_expected, dst);
 
     megdnn_assert(src.dtype == filter.dtype && src.dtype == dst.dtype);
     megdnn_assert(src.dtype == dtype::Float32() ||
-                  MEGDNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), true));
+                  DNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), true));
 }
 
 void LocalForward::deduce_layout(const TensorLayout &src,

@@ -2,7 +2,7 @@
  * \file src/opr/impl/misc.sereg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -69,6 +69,10 @@ namespace opr {
     //! current cumsum version
     using CumsumV1 = opr::Cumsum;
     MGB_SEREG_OPR(CumsumV1, 1);
+
+#if MGB_CUDA
+    MGB_SEREG_OPR(NvOf, 1);
+#endif
 
 } // namespace opr
 } // namespace mgb

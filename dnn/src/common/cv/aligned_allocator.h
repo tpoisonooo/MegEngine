@@ -2,7 +2,7 @@
  * \file dnn/src/common/cv/aligned_allocator.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,14 +18,15 @@
 
 #include "megdnn/arch.h"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(__MINGW32__)
 #include "malloc.h"
 #endif
+
 
 #if defined(__ANDROID__) || defined(ANDROID)
 #include "malloc.h"
 #define HAS_MEMALIGN
-#elif !defined(_MSC_VER)
+#elif !defined(_MSC_VER) && !defined(__MINGW32__)
 #define HAS_POSIX_MEMALIGN
 #endif
 
@@ -77,7 +78,7 @@ public:
         return result;
 #elif defined(HAS_MEMALIGN)
         return (_Tp*)memalign(_align, __n * sizeof(_Tp));
-#elif defined(_MSC_VER)
+#elif defined(_MSC_VER) || defined(__MINGW32__)
         return (_Tp*)_aligned_malloc(__n * sizeof(_Tp), _align);
 #else
 #warning \

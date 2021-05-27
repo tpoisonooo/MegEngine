@@ -2,7 +2,7 @@
  * \file dnn/include/megdnn/oprs/utils.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -90,29 +90,6 @@ class MaxTensorDiff : public OperatorBase {
     protected:
         void check_exec(const TensorLayout& layout1,
                         const TensorLayout& layout2, size_t workspace_in_bytes);
-};
-
-/*!
- * \brief winograd preprocess opr.
- *
- * for the detail \see src/fallback/conv_bias/winograd/winograd.h
- *
- */
-class WinogradFilterPreprocess : public OperatorBase {
-    DEF_OPR_PARAM(Winograd);
-    DEF_OPR_IMPL(WinogradFilterPreprocess, OperatorBase, 1, 1);
-
-public:
-    virtual void exec(_megdnn_tensor_in src, _megdnn_tensor_out dst,
-                      _megdnn_workspace) = 0;
-
-    size_t get_workspace_in_bytes(const TensorLayout&, const TensorLayout&);
-
-    void deduce_layout(const TensorLayout& src, TensorLayout& dst);
-
-protected:
-    void check_exec(const TensorLayout& src, const TensorLayout& dst,
-                    size_t workspace_in_bytes);
 };
 }  // namespace megdnn
 

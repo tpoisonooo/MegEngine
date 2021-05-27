@@ -2,16 +2,18 @@
  * \file dnn/src/fallback/conv_bias/common.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #pragma once
 
 #include <stdint.h>
 #include "megdnn/oprs.h"
+#include "src/common/postprocess.h"
 #include "src/common/utils.h"
 
 namespace megdnn {
@@ -122,11 +124,48 @@ using BiasMode = ConvBiasForward::BiasMode;
             break;                            \
     }
 
-enum class PostprocessMode : uint8_t {
-    FLOAT = 0,  ///< support all biasmode and no_nonlinemode
-    NO_PROCESS, ///<support  non bias and identity
-    QUANTIZED,///<support  NOBIAS ,BROADCAST_CHANNEL_BIAS and relu hswish identify nonline mode   
-};
+#define DISPATCH_FILTER_CHANNEL_WISE(filter, kern, arg...) \
+    switch (filter) {                                      \
+        case 2:                                            \
+            kern(2, ##arg);                                \
+            break;                                         \
+        case 3:                                            \
+            kern(3, ##arg);                                \
+            break;                                         \
+        case 5:                                            \
+            kern(5, ##arg);                                \
+            break;                                         \
+        default:                                           \
+            megdnn_assert(0);                              \
+            break;                                         \
+    }
+
+#define MEGDNN_WINOGRAD_ALGO_FUN_DECLARE(_algo_data_type)                      \
+    bool usable(const NCBKernSizeParam& param,                                 \
+                AlgoSelectionStrategy algo_selection_strategy) const override; \
+    size_t get_workspace(const NCBKernSizeParam& param) const override;        \
+    virtual SmallVector<NCBKern> dispatch_kerns(const NCBKernSizeParam& param) \
+            const override;                                                    \
+    SmallVector<TensorLayout> deduce_preprocessed_filter_layout(               \
+            const NCBKernSizeParam& param) const override;                     \
+    size_t get_preprocess_workspace(const NCBKernSizeParam& param)             \
+            const override;                                                    \
+    virtual SmallVector<NCBKern> dispatch_preprocess_kerns(                    \
+            const NCBKernSizeParam& param) const override;                     \
+    ConvAlgoTypePack get_algo_type() const override {                          \
+        return {_algo_data_type, AlgoCategory::WINOGRAD};                      \
+    }                                                                          \
+    std::string param() const override {                                       \
+        std::string ret;                                                       \
+        serialize_write_pod(m_tile_size, ret);                                 \
+        return ret;                                                            \
+    }                                                                          \
+                                                                               \
+private:                                                                       \
+    fallback::MatrixMulImpl::AlgoBase* m_matmul_algo;                          \
+    mutable std::string m_name;                                                \
+    uint32_t m_tile_size;
+
 }  // namespace megdnn
 
 // vim: syntax=cpp.doxygen

@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node_mem_mgr/static_mem_alloc/impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -45,6 +45,11 @@ class StaticMemAllocImplHelper: public StaticMemAlloc {
             return *this;
         }
 
+        StaticMemAlloc& padding(size_t padding) override final {
+            m_padding = padding;
+            return *this;
+        }
+
         size_t tot_alloc_lower_bound() const override final {
             return m_peak_lower_bound;
         }
@@ -69,7 +74,7 @@ class StaticMemAllocImplHelper: public StaticMemAlloc {
         }
 
     private:
-        size_t m_alignment = 1, m_peak_lower_bound = 0;
+        size_t m_alignment = 1, m_padding = 0, m_peak_lower_bound = 0;
 
         //! original interval storage
         std::vector<Interval> m_interval_storage;

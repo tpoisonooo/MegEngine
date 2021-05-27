@@ -2,7 +2,7 @@
  * \file dnn/src/common/opr_delegate.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,7 +24,7 @@ namespace megdnn {
  * Usually used for calling other opr impls from some opr impl. You probably
  * want to use CpuOprDelegationStorage instead.
  */
-const std::shared_ptr<Handle>& inplace_cpu_handle();
+const std::shared_ptr<Handle>& inplace_cpu_handle(int debug_level = 0);
 
 /*!
  * \brief storage for oprs on inplace CPU handle

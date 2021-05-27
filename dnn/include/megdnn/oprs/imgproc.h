@@ -2,7 +2,7 @@
  * \file dnn/include/megdnn/oprs/imgproc.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -105,15 +105,32 @@ class WarpPerspectiveBackwardData: public WarpPerspectiveBase {
          * \param[out] grad the backpropagated gradient wrt. src
          * \param[out] workspace temporary workspace to perform backward
          */
+        void exec(_megdnn_tensor_in mat,
+                _megdnn_tensor_in diff,
+                _megdnn_tensor_out grad,
+                _megdnn_workspace workspace) {
+            exec(mat, {}, diff, grad, workspace);
+        }
+
         virtual void exec(_megdnn_tensor_in mat,
+                _megdnn_tensor_in mat_idx,
                 _megdnn_tensor_in diff,
                 _megdnn_tensor_out grad,
                 _megdnn_workspace workspace) = 0;
+
+        size_t get_workspace_in_bytes(const TensorLayout &mat,
+                const TensorLayout &diff,
+                const TensorLayout &grad) {
+            return get_workspace_in_bytes(mat, {}, diff, grad);
+        }
+
         virtual size_t get_workspace_in_bytes(const TensorLayout &mat,
+                const TensorLayout &mat_idx,
                 const TensorLayout &diff,
                 const TensorLayout &grad) = 0;
     protected:
         void check_exec(const TensorLayout &mat,
+                const TensorLayout &mat_idx,
                 const TensorLayout &diff,
                 const TensorLayout &grad,
                 size_t workspace_in_bytes);
@@ -129,21 +146,82 @@ class WarpPerspectiveBackwardMat: public WarpPerspectiveBase {
          * \param[out] grad the backpropagated gradient wrt. mat
          * \param[out] workspace temporary workspace to perform backward
          */
-        virtual void exec(_megdnn_tensor_in src,
+        void exec(_megdnn_tensor_in src,
                 _megdnn_tensor_in mat,
                 _megdnn_tensor_in diff,
                 _megdnn_tensor_out grad,
+                _megdnn_workspace workspace) {
+            exec(src, mat, {}, diff, grad, workspace);
+        }
+
+        virtual void exec(_megdnn_tensor_in src,
+                _megdnn_tensor_in mat,
+                _megdnn_tensor_in mat_idx,
+                _megdnn_tensor_in diff,
+                _megdnn_tensor_out grad,
                 _megdnn_workspace workspace) = 0;
+
+        size_t get_workspace_in_bytes(const TensorLayout &src,
+                const TensorLayout &mat,
+                const TensorLayout &diff,
+                const TensorLayout &grad) {
+            return get_workspace_in_bytes(src, mat, {}, diff, grad);
+        }
+
         virtual size_t get_workspace_in_bytes(const TensorLayout &src,
                 const TensorLayout &mat,
+                const TensorLayout &mat_idx,
                 const TensorLayout &diff,
                 const TensorLayout &grad) = 0;
     protected:
         void check_exec(const TensorLayout &src,
                 const TensorLayout &mat,
+                const TensorLayout &mat_idx,
                 const TensorLayout &diff,
                 const TensorLayout &grad,
                 size_t workspace_in_bytes);
+};
+
+class DctChannelSelectForward : public OperatorBase {
+    DEF_OPR_PARAM(DctChannelSelect);
+    DEF_OPR_IMPL(DctChannelSelectForward, OperatorBase, 3, 1);
+
+public:
+    /**
+     * \param[in] DctChannelSelectForward input, must be uint8 nchw tensor
+     * \param[in] mask_offset input, must be int32 nchw tensor
+     * \param[in] mask_val input, must be int32 nchw tensor
+     * \param[dst] DctChannelSelectForward output, default fp32 nchw tensor
+     * \param[out] workspace temporary workspace to perform forward
+     */
+    virtual void exec(_megdnn_tensor_in src, 
+                      _megdnn_tensor_in mask_offset, 
+                      _megdnn_tensor_in mask_val, 
+                      _megdnn_tensor_out dst, 
+                      _megdnn_workspace workspace) = 0;
+
+    void deduce_layout(const TensorLayout& src, 
+                       const TensorLayout& mask_offset,
+                       const TensorLayout& mask_val, 
+                       TensorLayout& dst);
+                       
+    virtual size_t get_workspace_in_bytes(const TensorLayout& src, 
+                                          const TensorLayout& mask_offset,
+                                          const TensorLayout& mask_val, 
+                                          const TensorLayout& dst) = 0;
+
+protected:
+    void check_layout_fwd(const TensorLayout& src, 
+                          const TensorLayout& mask_offset,
+                          const TensorLayout& mask_val, 
+                          const TensorLayout& dst);
+                          
+    void deduce_layout_fwd(const TensorLayout& src, 
+                           const TensorLayout& mask_offset,
+                           const TensorLayout& mask_val, 
+                           TensorLayout& dst);
+
+    std::string param_msg() const;
 };
 
 } // namespace megdnn

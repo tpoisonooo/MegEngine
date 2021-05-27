@@ -2,7 +2,7 @@
  * \file src/opr/test/basic_arith/elemwise_unary_trait_def.inl
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,6 +18,15 @@
 #define _EXPAND_PARAMS \
     ctype x = inp[0][idx]
 
+#define _ALLOW_BOOL true
+#define _ALLOW_FLOAT false
+#define _ALLOW_INT false
+DEF_TRAIT(NOT, !x)
+#undef _ALLOW_INT
+#undef _ALLOW_FLOAT
+#undef _ALLOW_BOOL
+
+#define _ALLOW_BOOL false
 
 #define _ALLOW_FLOAT true
 
@@ -50,6 +59,8 @@ DEF_TRAIT(H_SWISH, do_h_swish(x))
 #undef _ALLOW_INT
 
 #undef _ALLOW_FLOAT
+
+#undef _ALLOW_BOOL
 
 #undef _CUR_ARITY
 #undef _EXPAND_PARAMS

@@ -2,7 +2,7 @@
  * \file dnn/src/common/cond_take/predicate.cuh
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -68,6 +68,7 @@ namespace cond_take {
 #define inst_eq_i(_dt) do_inst_eq_i(DTypeTrait<_dt>::ctype)
     MEGDNN_FOREACH_COMPUTING_DTYPE_FLOAT(inst_eq_f)
     MEGDNN_FOREACH_COMPUTING_DTYPE_INT(inst_eq_i)
+    inst_eq_i(::megdnn::dtype::Bool)
 #undef inst_eq_f
 #undef inst_eq_i
 

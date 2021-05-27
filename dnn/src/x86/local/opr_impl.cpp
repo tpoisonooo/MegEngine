@@ -2,7 +2,7 @@
  * \file dnn/src/x86/local/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -41,7 +41,7 @@ LocalImpl::dispatch_float_noncontig_batch(
         } else if (is_supported(SIMDType::SSE)) {
             return local_xcorr_SSE;
         } else {
-            megdnn_throw(megdnn_mangle("no fma/avx/sse detected"));
+            megdnn_throw("no fma/avx/sse detected");
         }
     } else {
         if (is_supported(SIMDType::FMA)) {
@@ -51,7 +51,7 @@ LocalImpl::dispatch_float_noncontig_batch(
         } else if (is_supported(SIMDType::SSE)) {
             return local_conv_SSE;
         } else {
-            megdnn_throw(megdnn_mangle("no fma/avx/sse detected"));
+            megdnn_throw("no fma/avx/sse detected");
         }
     }
 }

@@ -2,16 +2,21 @@
  * \file dnn/src/common/relayout_helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #pragma once
 
 #include "megdnn/oprs.h"
 #include "src/common/utils.h"
+
+#include "midout.h"
+
+MIDOUT_DECL(transpose_fallback)
 
 namespace megdnn {
 namespace relayout {
@@ -37,6 +42,12 @@ bool is_transpose(const TensorLayout& src, const TensorLayout& dst,
 namespace transpose_fallback {
 
 #if MEGDNN_X86
+constexpr size_t BLOCK_LINE_SIZE_BYTES = 64;
+#elif MEGDNN_AARCH64 || MEGDNN_ARMV7 /*BEGIN-INLINE-INTERNAL*/ || \
+        MEGDNN_MIPS /*END-INLINE-INTERNAL*/
+constexpr size_t BLOCK_LINE_SIZE_BYTES = 32;
+#elif MEGDNN_RISCV64
+//! ref U54-MC arch
 constexpr size_t BLOCK_LINE_SIZE_BYTES = 64;
 #else
 #error "unknown megdnn arch"
@@ -105,13 +116,15 @@ void transpose(size_t batch, size_t m, size_t n, T* src, T* dst) {
     auto work_block = [m, n, &batch_src, &batch_dst](
                               const size_t i, const size_t j, const size_t h,
                               const size_t w) {
-
         auto src = batch_src + i * n + j, dst = batch_dst + j * m + i;
-        if (h == B && w == B) {
-            transpose_block(src, dst, n, m);
-        } else {
-            transpose_block(src, dst, n, m, h, w);
+        MIDOUT_BEGIN(transpose_fallback, midout_iv(0)) {
+            if (h == B && w == B) {
+                transpose_block(src, dst, n, m);
+            } else {
+                transpose_block(src, dst, n, m, h, w);
+            }
         }
+        MIDOUT_END();
     };
     auto work_row = [&work_block, n](size_t i, size_t h) {
         size_t j = 0;

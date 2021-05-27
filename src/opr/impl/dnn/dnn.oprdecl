@@ -6,7 +6,7 @@ decl_opr('Convolution',
                      'convolution kernel in '
                      '(out channel, in channel, kern row, kern col) format')],
          params=[('param', 'ConvolutionV0'),
-                 ('execution_polity', 'ExecutionPolicy')],
+                 ('execution_polity', 'ExecutionPolicyV0')],
          desc='batched convolution on channeled 2D images')
 
 decl_opr('Convolution',
@@ -18,7 +18,7 @@ decl_opr('Convolution',
          params=[('param', 'Convolution'),
                  ('execution_polity', 'ExecutionPolicy')],
          desc='batched convolution on channeled 2D images',
-         version=1, has_out_dtype=True)
+         version=2, has_out_dtype=True)
 
 decl_opr('ConvolutionBackwardData',
          pyname='deconvolution_v0',
@@ -28,7 +28,7 @@ decl_opr('ConvolutionBackwardData',
                      'convolution kernel in '
                      '(out channel, in channel, kern row, kern col) format')],
          params=[('param', 'ConvolutionV0'),
-                 ('execution_polity', 'ExecutionPolicy')],
+                 ('execution_polity', 'ExecutionPolicyV0')],
          body=[
              'a, b = all_inputs',
              'all_inputs = [b, a]'
@@ -51,7 +51,7 @@ decl_opr('ConvolutionBackwardData',
          ],
          desc='batched deconvolution on channeled 2D images; the underlying '
          'computation is in fact gradient of convolution w.r.t. data',
-         version=1)
+         version=2, has_out_dtype=True)
 
 decl_opr('MaskConvolution',
          inputs=[Doc('src',
@@ -65,7 +65,7 @@ decl_opr('MaskConvolution',
          params=[('param', 'Convolution')],
          desc=('batched mask conv on channeled 2D images, mask is correspoding '
                'to output'),
-         version=1)
+         version=2)
 
 decl_opr('MaskPropagate',
          inputs=[Doc('src',
@@ -95,15 +95,31 @@ r"""
 """))
 
 decl_opr('Local',
+         pyname='local',
          inputs=[Doc('src',
                      'input image in (batch, channel, row, col) format'),
                  Doc('filter',
                      'convolution kernel in '
                      '(out row, out col, in channel, '
                      'kern row, kern col, out channel) format')],
-         params='ConvolutionV0',
+         params='Convolution',
          desc='batched convolution on channeled 2D images, but kernels are '
-         'not shared across different output positions')
+         'not shared across different output positions', version=2)
+
+"""
+decl_opr('Local',
+         pyname='local_v1',
+         inputs=[Doc('src',
+                     'input image in (batch, channel, row, col) format'),
+                 Doc('filter',
+                     'convolution kernel in '
+                     '(out row, out col, in channel, '
+                     'kern row, kern col, out channel) format')],
+         params='Convolution',
+         desc='batched convolution on channeled 2D images, but kernels are '
+         'not shared across different output positions',
+         version=1)
+"""
 
 decl_opr('GroupLocal',
          inputs=[Doc('src',
@@ -112,9 +128,10 @@ decl_opr('GroupLocal',
                      'convolution kernel in '
                      '(group, out row, out col, in channel / group, '
                      'kern row, kern col, out channel / group) format')],
-         params='ConvolutionV0',
-		 desc='batched convolution on groupped channeled 2D images, but '
-         'kernels are not shared across different output positions')
+         params=[('param', 'Convolution')],
+         desc='batched convolution on groupped channeled 2D images, but '
+         'kernels are not shared across different output positions',
+         version=2)
 
 decl_opr('LRN',
          inputs=['src'],
@@ -123,7 +140,14 @@ decl_opr('LRN',
 
 decl_opr('Pooling',
          inputs=['src'],
-         params='Pooling')
+         params='Pooling',version=1)
+
+decl_opr('AdaptivePooling',
+        inputs=[Doc('src', 'input image, shape (n, c, ih, iw)'),
+                Doc('out_shape', 'output image shape, containing two elements specifying output height and width.')],
+        params='AdaptivePooling',
+        desc='Adaptive Pooling.'
+        'The output shape is (n, c, oh, ow), where (oh, ow) is given by *out_shape*.',version=1)
 
 decl_opr('ROIPooling', outputs=[0],
          inputs=[Doc('src', 'input image, shape (n, c, ih, iw)'),
@@ -177,7 +201,7 @@ decl_opr('ConvBiasForward',
              Doc('bias', 'bias'),
          ],
          params=[('param', 'ConvBiasV1'),
-                 ('execution_policy', 'ExecutionPolicy')],
+                 ('execution_policy', 'ExecutionPolicyV0')],
          desc=('activation(convolution(src, filter) + bias) with specified '
                'dtype'),
          has_out_dtype=True)
@@ -193,7 +217,7 @@ decl_opr('ConvBiasForward',
                  ('execution_policy', 'ExecutionPolicy')],
          desc=('activation(convolution(src, filter) + bias) with specified '
                'dtype'),
-         version=3, has_out_dtype=True)
+         version=4, has_out_dtype=True)
 
 decl_opr('BatchNorm',
          pyname='batch_norm',
@@ -233,7 +257,7 @@ r"""
                       & iw=-pad_w+ow \\times stride_w \\\\
                       & grp_h = oh / (OH / spatial_groups_h) \\\\
                       & grp_w = ow / (OW / spatial_groups_w)
-"""),
+"""), version=1,
          has_out_dtype=True)
 
 decl_opr('ROIAlign', outputs=[0],
@@ -243,12 +267,12 @@ decl_opr('ROIAlign', outputs=[0],
                      'store it as a float, but it should be an integral value.'
                      ' The rois[:, 1:5] are (x0, y0, x1, y1) for each ROI, '
                      'which would be multiplied by the scale value given in '
-                     'param.')], 
+                     'param.')],
          params='ROIAlign',
          desc='ROI Align, see '
          'Mask-RCNN: https://arxiv.org/pdf/1703.06870.pdf, '
          'The output shape is (m, c, pooled_height, pooled_width), where (pooled_height, pooled_width) is given by '
-         '*Param*.')
+         '*Param*.',version=1)
 
 decl_opr('DeformableConvForward',
          pyname='deformable_conv',
@@ -258,7 +282,7 @@ decl_opr('DeformableConvForward',
                  Doc('mask', 'deformable mask in (batch, deformable group * filter row * filter col, output row, output col) format')],
          params=[('param', 'Convolution'), ('execution_policy', 'ExecutionPolicy')],
          desc=Doc(None, r""" Apply a deformable convolution to input tensor and filter tensor. The offset tensor will adjust the position of each grid of a convolution filter. The mask tensor will be applied to the deformed input tensor. """),
-         has_out_dtype=True)
+         has_out_dtype=True, version=1)
 
 decl_opr('DeformablePSROIPoolingForward',
          pyname='deformable_psroi_pooling',
@@ -280,7 +304,7 @@ decl_opr('BatchConvBiasForward',
                  ('execution_policy', 'ExecutionPolicy')],
          desc=Doc(None,
 r"""
-    Apply a convolution of input tensor and filter tensor whose weights are not shared in batch dimensions. Outputs with batch index use the same weight. 
+    Apply a convolution of input tensor and filter tensor whose weights are not shared in batch dimensions. Outputs with batch index use the same weight.
     Assume input shape is :math:`(N, IC, IH, IW)` and filter shape is :math:`(batch, OC, IC, FH, FW)`, the output shape will be :math:`(N, OC, OH, OW)` where :math:`(OH, OW)` would be computed from padding, stride, :math:`(FH, FW)` and :math:`(IH, IW)`, as in convolution.
     for each output location, we have;
 
@@ -290,8 +314,15 @@ r"""
                             * filter_{n, oc, ic, kh, kw} \\\\
         \\text{where} & ih=-pad_h+oh \\times stride_h \\\\
                       & iw=-pad_w+ow \\times stride_w
-"""),
+"""), version=1,
          has_out_dtype=True)
 
+decl_opr('FakeQuant',
+         inputs=[Doc('src','input tenosr'),Doc('scale','scale tensor'),Doc('zero_point','zero point tensor')],
+         params='FakeQuant')
+
+decl_opr('TQT',
+         inputs=[Doc('src','input tensor'),Doc('scale','scale tensor')],
+         params='TQT')
 
 # vim: ft=python

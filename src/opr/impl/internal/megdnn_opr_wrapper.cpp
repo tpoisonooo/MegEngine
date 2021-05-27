@@ -2,7 +2,7 @@
  * \file src/opr/impl/internal/megdnn_opr_wrapper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -271,17 +271,26 @@ WorkspaceLimitGetter::get_impl(ComputingGraph *graph) {
 
 size_t WorkspaceLimitGetter::get_workspace_limit(
         ComputingGraph *graph, CompNode cn, size_t old_limit) {
+    if (graph->options().imperative_proxy_graph) {
+        return old_limit;
+    }
     if (!graph->options().seq_opt.enable_mem_reuse_alloc)
         return old_limit;
     return get_impl(graph)->get_workspace_limit(cn, old_limit);
 }
 
 bool WorkspaceLimitGetter::is_prealloc_run(ComputingGraph* graph) {
+    if (graph->options().imperative_proxy_graph) {
+        return false;
+    }
     return graph->options().seq_opt.enable_mem_reuse_alloc &&
            get_impl(graph)->is_prealloc_run();
 }
 
 VarNode* WorkspaceLimitGetter::register_to_graph(ComputingGraph *graph) {
+    if (graph->options().imperative_proxy_graph) {
+        return nullptr;
+    }
     auto maker = [graph](){
         return std::make_shared<Impl>(graph);
     };

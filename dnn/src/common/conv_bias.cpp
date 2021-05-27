@@ -2,16 +2,18 @@
  * \file dnn/src/common/conv_bias.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #include "src/common/conv_bias.h"
 #include "megdnn/oprs/nn.h"
 #include "src/common/utils.h"
+#include "src/common/opr_delegate.h"
 
 namespace megdnn {
 
@@ -31,49 +33,43 @@ void ConvBiasForward::deduce_layout(const TensorLayout& src,
 ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
         const TensorLayout& src, const TensorLayout& filter,
         const TensorLayout& bias, const TensorLayout& z,
-        const TensorLayout& dst, size_t workspace_in_bytes) {
-    if ((param().format == param::ConvBias::Format::NCHW_WINOGRAD ||
-         param().format == param::ConvBias::Format::NCHW88_WINOGRAD) &&
-        src.dtype.category() == DTypeCategory::QUANTIZED) {
-        megdnn_assert(filter.dtype.enumv() == DTypeEnum::QuantizedS16);
-        megdnn_assert(src.dtype.enumv() == DTypeEnum::QuantizedS8 ||
-                      src.dtype.enumv() == DTypeEnum::Quantized8Asymm);
-    } else {
-        megdnn_assert(src.dtype.enumv() == filter.dtype.enumv());
-    }
+        const TensorLayout& dst, size_t workspace_in_bytes,
+        const PreprocessedFilter* preprocessed_filter) {
+    megdnn_assert(src.dtype.enumv() == filter.dtype.enumv());
     if (src.dtype.enumv() == DTypeEnum::QuantizedS8) {
-        float scale_src = src.dtype.param<dtype::QuantizedS8>().scale;
-        float scale_filter = 0.f;
-        if (param().format == param::ConvBias::Format::NCHW_WINOGRAD ||
-            param().format == param::ConvBias::Format::NCHW88_WINOGRAD) {
-            scale_filter = filter.dtype.param<dtype::QuantizedS16>().scale;
+        if (bias.dtype.enumv() == DTypeEnum::QuantizedS32) {
+            float scale_src = src.dtype.param<dtype::QuantizedS8>().scale;
+            float scale_filter = filter.dtype.param<dtype::QuantizedS8>().scale;
+            float scale_bias = bias.dtype.param<dtype::QuantizedS32>().scale;
+            megdnn_assert(
+                    std::abs(scale_src * scale_filter - scale_bias) < 1e-6,
+                    "scale_src: %f scale_filter: %f scale_bias: %f", scale_src,
+                    scale_filter, scale_bias);
         } else {
-            scale_filter = filter.dtype.param<dtype::QuantizedS8>().scale;
+            megdnn_assert(bias.dtype.enumv() == DTypeEnum::Float32);
         }
-        float scale_bias = bias.dtype.param<dtype::QuantizedS32>().scale;
-        megdnn_assert(std::abs(scale_src * scale_filter - scale_bias) < 1e-6,
-                      "scale_src: %f scale_filter: %f scale_bias: %f",
-                      scale_src, scale_filter, scale_bias);
     } else if (src.dtype.enumv() == DTypeEnum::Quantized8Asymm) {
-        float scale_src = src.dtype.param<dtype::Quantized8Asymm>().scale;
-        float scale_filter = 0.f;
-        if (param().format == param::ConvBias::Format::NCHW_WINOGRAD ||
-            param().format == param::ConvBias::Format::NCHW88_WINOGRAD) {
-            scale_filter = filter.dtype.param<dtype::QuantizedS16>().scale;
+        if (bias.dtype.enumv() == DTypeEnum::QuantizedS32) {
+            float scale_src = src.dtype.param<dtype::Quantized8Asymm>().scale;
+            float scale_filter =
+                    filter.dtype.param<dtype::Quantized8Asymm>().scale;
+            float scale_bias = bias.dtype.param<dtype::QuantizedS32>().scale;
+            megdnn_assert(
+                    std::abs(scale_src * scale_filter - scale_bias) < 1e-6,
+                    "scale_src: %f scale_filter: %f scale_bias: %f", scale_src,
+                    scale_filter, scale_bias);
         } else {
-            scale_filter = filter.dtype.param<dtype::Quantized8Asymm>().scale;
+            megdnn_assert(bias.dtype.enumv() == DTypeEnum::Float32);
         }
-        float scale_bias = bias.dtype.param<dtype::QuantizedS32>().scale;
-        megdnn_assert(std::abs(scale_src * scale_filter - scale_bias) < 1e-6,
-                      "scale_src: %f scale_filter: %f scale_bias: %f",
-                      scale_src, scale_filter, scale_bias);
     }
 
     auto ret = check_layout_fwd(src, filter, dst);
     megdnn_assert_contiguous(bias);
-    auto required_workspace_in_bytes =
-            get_workspace_in_bytes(src, filter, bias, z, dst);
-    megdnn_assert(workspace_in_bytes >= required_workspace_in_bytes);
+    auto required_workspace_in_bytes = get_workspace_in_bytes(
+            src, filter, bias, z, dst, preprocessed_filter);
+    megdnn_assert(workspace_in_bytes >= required_workspace_in_bytes,
+                  "worksapce have size of %zu, but need %zu",
+                  workspace_in_bytes, required_workspace_in_bytes);
     if (bias.ndim != 0) {
         //! bias.layout == dst.layout failed, no assert information
         auto check_eq = [](const TensorLayout& bias, const TensorLayout& dst) {
@@ -86,7 +82,7 @@ ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
         if (check_eq(bias, dst))
             return ret;
         if (param().format == param::ConvBias::Format::NCHW ||
-            param().format == param::ConvBias::Format::NCHW_WINOGRAD) {
+            param().format == param::ConvBias::Format::NCHW4_NCHW) {
             megdnn_assert(bias.shape[0] == 1);
             megdnn_assert(bias.shape[1] == dst.shape[1], "bias:%s, dst:%s",
                           bias.to_string().c_str(), dst.to_string().c_str());
@@ -98,7 +94,10 @@ ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
             megdnn_assert(bias.shape[2] == 1);
             megdnn_assert(bias.shape[3] == dst.shape[3], "bias:%s, dst:%s",
                           bias.to_string().c_str(), dst.to_string().c_str());
-        } else if (param().format == param::ConvBias::Format::NCHW4) {
+        } else if (param().format == param::ConvBias::Format::NCHW4 ||
+                   param().format == param::ConvBias::Format::NCHW44 ||
+                   param().format == param::ConvBias::Format::NCHW44_DOT ||
+                   param().format == param::ConvBias::Format::NCHW32_NCHW4) {
             megdnn_assert(bias.shape[0] == 1);
             megdnn_assert(bias.shape[1] == dst.shape[1], "bias:%s, dst:%s",
                           bias.to_string().c_str(), dst.to_string().c_str());
@@ -106,15 +105,15 @@ ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
             megdnn_assert(bias.shape[3] == 1);
             megdnn_assert(bias.shape[4] == 4);
         } else if (param().format == param::ConvBias::Format::NCHW8 ||
-                   param().format == param::ConvBias::Format::NCHW88 ||
-                   param().format == param::ConvBias::Format::NCHW88_WINOGRAD) {
+                   param().format == param::ConvBias::Format::NCHW88 ) {
             megdnn_assert(bias.shape[0] == 1);
             megdnn_assert(bias.shape[1] == dst.shape[1], "bias:%s, dst:%s",
                           bias.to_string().c_str(), dst.to_string().c_str());
             megdnn_assert(bias.shape[2] == 1);
             megdnn_assert(bias.shape[3] == 1);
             megdnn_assert(bias.shape[4] == 8);
-        } else if (param().format == param::ConvBias::Format::NCHW32) {
+        } else if (param().format == param::ConvBias::Format::NCHW32 ||
+                   param().format == param::ConvBias::Format::NCHW4_NCHW32) {
             megdnn_assert(bias.shape[0] == 1);
             megdnn_assert(bias.shape[1] == dst.shape[1], "bias:%s, dst:%s",
                           bias.to_string().c_str(), dst.to_string().c_str());
@@ -140,8 +139,8 @@ ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
     }
 
     if (z.ndim != 0) {
-        megdnn_assert(param().format != param::ConvBias::Format::NCHW_WINOGRAD);
-        megdnn_assert(param().format != param::ConvBias::Format::NCHW88_WINOGRAD);
+        megdnn_assert(param().format != param::ConvBias::Format::NCHW4_NCHW32);
+        megdnn_assert(param().format != param::ConvBias::Format::NCHW32_NCHW4);
         megdnn_assert(z.dtype.enumv() == dst.dtype.enumv());
         megdnn_assert(z.eq_shape(dst));
     }
@@ -149,7 +148,10 @@ ConvBiasForward::CanonizedFilterMeta ConvBiasForward::check_exec(
 }
 
 template <typename T>
-struct ParamTrait;
+struct NCHWParamTrait;
+
+template <typename T>
+struct NCHW44ParamTrait;
 
 std::string ConvBias::WinogradParam::to_string() const {
     return ssprintf("%u:%u:%u", channel_block_size, output_block_size,
@@ -157,35 +159,51 @@ std::string ConvBias::WinogradParam::to_string() const {
 }
 
 template <typename T>
-std::string ConvBias::algo_name(const std::string& base, const T& p) {
-    return ssprintf("%s:%s:%s", ParamTrait<T>::category.c_str(), base.c_str(),
-                    p.to_string().c_str());
+std::string ConvBias::algo_name(const std::string& base, const T& p,
+                                param::ConvBias::Format format) {
+    if (format == param::ConvBias::Format::NCHW) {
+        return ssprintf("%s:%s:%s", NCHWParamTrait<T>::category.c_str(),
+                        base.c_str(), p.to_string().c_str());
+    } else if (format == param::ConvBias::Format::NCHW44) {
+        return ssprintf("%s:%s:%s", NCHW44ParamTrait<T>::category.c_str(),
+                        base.c_str(), p.to_string().c_str());
+    }
+    megdnn_throw("Invalid format");
+    return "";
 }
 
 #define FOREACH_CONV_BIAS_PARAM(cb) \
-    cb(WinogradParam)               \
-    cb(DirectParam)                 \
-    cb(MatmulParam)                 \
-    cb(DefaultParam)
+    cb(WinogradParam) cb(DirectParam) cb(MatmulParam) cb(DefaultParam)
 
-#define cb(pt)                             \
-    template <>                            \
-    struct ParamTrait<ConvBias::pt> {      \
-        static const std::string category; \
+#define cb(pt)                              \
+    template <>                             \
+    struct NCHWParamTrait<ConvBias::pt> {   \
+        static const std::string category;  \
+    };                                      \
+    template <>                             \
+    struct NCHW44ParamTrait<ConvBias::pt> { \
+        static const std::string category;  \
     };
 FOREACH_CONV_BIAS_PARAM(cb)
 #undef cb
 
-#define cb(pt, ct) const std::string ParamTrait<ConvBias::pt>::category = ct
-cb(WinogradParam, "WINOGRAD");
+#define cb(pt, ct)                                                 \
+    const std::string NCHWParamTrait<ConvBias::pt>::category = ct; \
+    const std::string NCHW44ParamTrait<ConvBias::pt>::category = ct
 cb(DirectParam, "DIRECT");
 cb(MatmulParam, "MATMUL");
 cb(DefaultParam, "DEFAULT");
 #undef cb
 
+const std::string NCHWParamTrait<ConvBias::WinogradParam>::category =
+        "WINOGRAD";
+const std::string NCHW44ParamTrait<ConvBias::WinogradParam>::category =
+        "WINOGRAD_NCHW44";
+
 #define cb(t)                                              \
     template std::string ConvBias::algo_name<ConvBias::t>( \
-            const std::string& base, const ConvBias::t& p);
+            const std::string& base, const ConvBias::t& p, \
+            param::ConvBias::Format format);
 FOREACH_CONV_BIAS_PARAM(cb)
 #undef cb
 
@@ -193,17 +211,34 @@ ConvBias::WinogradParam ConvBias::parse_winograd_name(
         const std::string& algo_name) {
     ConvBias::WinogradParam ret = INVALID_WINOGRAD_PARAM;
     char base[128];
-    sscanf(algo_name.c_str(), "WINOGRAD:%[^:]:%u:%u:%u", base,
-           &(ret.channel_block_size), &(ret.output_block_size),
-           &(ret.tile_size));
-    if (ret.tile_size == 0 || ret.output_block_size == 0 ||
-        ret.channel_block_size == 0) {
-        megdnn_log_warn("the algo name %s is not suitable for winograd",
-                        algo_name.c_str());
-        return INVALID_WINOGRAD_PARAM;
+    char name[128];
+
+    auto parse = [&](const std::string& algo_name,
+                     const std::string& pre) -> auto {
+        memset(name, 0, 128);
+        sscanf(algo_name.c_str(), "%[^:]:%[^:]:%u:%u:%u", name, base,
+               &(ret.channel_block_size), &(ret.output_block_size),
+               &(ret.tile_size));
+        if (strcmp(name, pre.c_str())) {
+            ret = INVALID_WINOGRAD_PARAM;
+            return false;
+        }
+        if (ret.tile_size == 0 || ret.output_block_size == 0 ||
+            ret.channel_block_size == 0) {
+            ret = INVALID_WINOGRAD_PARAM;
+            return false;
+        }
+        return true;
+    };
+
+    if (parse(algo_name, "WINOGRAD_NCHW44")) {
+        return ret;
+    } else {
+        parse(algo_name, "WINOGRAD");
+        return ret;
     }
-    return ret;
 }
+
 constexpr ConvBias::WinogradParam ConvBias::INVALID_WINOGRAD_PARAM;
 
 void handle_bias_and_nonlinear(Handle* handle, param::ConvBias args,
@@ -280,91 +315,6 @@ void handle_bias_and_nonlinear(Handle* handle, param::ConvBias args,
                     handle->create_operator<TypeCvt>()->exec({*conv_dst_tensor},
                                                              *dst_tensor);
                 }
-            }
-            break;
-        }
-        default:
-            megdnn_assert(false);
-    }
-}
-
-//! Only used for naive implementation. DO NOT use the following function in
-//! other backends.
-void handle_z_inp_and_activation(Handle* handle,
-                                 param::ConvBias::NonlineMode nonline_mode,
-                                 const TensorND& conv_bias_tensor,
-                                 const TensorND& z_tensor,
-                                 const TensorND& dst_tensor,
-                                 dt_byte* workspace_ptr) {
-    auto res = dst_tensor, z_float = z_tensor;
-    if (z_tensor.layout.ndim > 0 &&
-        z_tensor.layout.dtype.category() != DTypeCategory::FLOAT) {
-        dt_byte *res_float_workspace_ptr = nullptr,
-                *z_float_workspace_ptr = nullptr;
-        megdnn_assert(z_tensor.layout.eq_shape(dst_tensor.layout));
-        res_float_workspace_ptr = workspace_ptr;
-        z_float_workspace_ptr = res_float_workspace_ptr +
-                                TensorLayout{z_tensor.layout, dtype::Float32()}
-                                        .span()
-                                        .dist_byte();
-        res = TensorND{res_float_workspace_ptr,
-                       TensorLayout{dst_tensor.layout, dtype::Float32()}};
-        z_float = TensorND{z_float_workspace_ptr,
-                           TensorLayout{z_tensor.layout, dtype::Float32()}};
-    }
-    // ====================sfb + z_tensor=====================
-    if (z_tensor.layout.ndim > 0) {
-        if (z_tensor.layout.dtype.category() != DTypeCategory::FLOAT) {
-            auto&& type_cvt = handle->create_operator<TypeCvt>();
-            type_cvt->exec(conv_bias_tensor, res);
-            type_cvt->exec(z_tensor, z_float);
-        }
-        auto add_opr = handle->create_operator<ElemwiseForward>();
-        add_opr->param().mode = Elemwise::Param::Mode::ADD;
-        add_opr->exec({res, z_float}, res);
-    } else {
-        res = conv_bias_tensor;
-    }
-
-    using NonlineMode = param::ConvBias::NonlineMode;
-
-    switch (nonline_mode) {
-#define cb(_mode)                                                          \
-    case NonlineMode::_mode: {                                             \
-        if (res.layout.dtype.category() != DTypeCategory::QUANTIZED) {     \
-            auto nonlinear = handle->create_operator<ElemwiseForward>();   \
-            nonlinear->param().mode = Elemwise::Param::Mode::_mode;        \
-            if (res.layout.dtype == dst_tensor.layout.dtype) {             \
-                nonlinear->exec({res}, dst_tensor);                        \
-            } else {                                                       \
-                nonlinear->exec({res}, res);                               \
-                handle->create_operator<TypeCvt>()->exec(res, dst_tensor); \
-            }                                                              \
-        } else {                                                           \
-            auto nonlinear = handle->create_operator<ElemwiseMultiType>(); \
-            nonlinear->param().mode =                                      \
-                    ElemwiseMultiType::Param::Mode::Q##_mode;              \
-            nonlinear->exec({res}, dst_tensor);                            \
-        }                                                                  \
-        break;                                                             \
-    }
-        cb(RELU);
-        cb(H_SWISH);
-#undef cb
-        case NonlineMode::SIGMOID: {
-            megdnn_assert(res.layout.dtype.category() !=
-                          DTypeCategory::QUANTIZED);
-            auto nonlinear = handle->create_operator<ElemwiseForward>();
-            nonlinear->param().mode = Elemwise::Param::Mode::SIGMOID;
-            nonlinear->exec({res}, res);
-            if (res.raw_ptr != dst_tensor.raw_ptr) {
-                handle->create_operator<TypeCvt>()->exec(res, dst_tensor);
-            }
-            break;
-        }
-        case NonlineMode::IDENTITY: {
-            if (res.raw_ptr != dst_tensor.raw_ptr) {
-                handle->create_operator<TypeCvt>()->exec(res, dst_tensor);
             }
             break;
         }

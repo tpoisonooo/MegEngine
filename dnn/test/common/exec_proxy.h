@@ -2,7 +2,7 @@
  * \file dnn/test/common/exec_proxy.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -37,6 +37,22 @@ struct ExecProxy<Opr, 8, true> {
                   tensors[5], tensors[6], tensors[7], W.workspace());
     }
 };
+
+template <typename Opr>
+struct ExecProxy<Opr, 6, true> {
+    WorkspaceWrapper W;
+    void exec(Opr* opr, const TensorNDArray& tensors) {
+        if (!W.valid()) {
+            W = WorkspaceWrapper(opr->handle(), 0);
+        }
+        W.update(opr->get_workspace_in_bytes(
+                tensors[0].layout, tensors[1].layout, tensors[2].layout,
+                tensors[3].layout, tensors[4].layout, tensors[5].layout));
+        opr->exec(tensors[0], tensors[1], tensors[2], tensors[3], tensors[4],
+                  tensors[5], W.workspace());
+    }
+};
+
 template <typename Opr>
 struct ExecProxy<Opr, 5, true> {
     WorkspaceWrapper W;

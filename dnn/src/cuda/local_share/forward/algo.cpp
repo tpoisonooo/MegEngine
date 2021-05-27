@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/local_share/forward/algo.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -19,7 +19,13 @@ LocalShareForwardImpl::AlgoPack::AlgoPack() {
     all_algos.push_back(&batch_size_aware_chwn_small_image);
     all_algos.push_back(&batch_size_aware_chwn);
     all_algos.push_back(&batched_matmul);
+
+    for (auto&& algo : all_algos) {
+        m_all_algos_map.emplace(algo->info().desc, algo);
+    }
 }
+
+MEGDNN_DEF_GET_ALGO_FROM_DESC(LocalShareForwardImpl)
 
 LocalShareForwardImpl::AlgoPack LocalShareForwardImpl::sm_algo_pack;
 
@@ -43,14 +49,14 @@ LocalShareForwardImpl::AlgoBase::ExecArgs::ExecArgs(LocalShareForwardImpl* opr,
 std::string LocalShareForwardImpl::AlgoBase::SizeArgs::to_string() const {
     auto&& param = opr->param();
     MEGDNN_MARK_USED_VAR(param);
-    return megdnn_mangle(ssprintf(
+    return ssprintf(
             "src=%s, filter=%s, dst=%s, "
             "pad=%ux%u, stride=%ux%u, dilate=%ux%u, xcorr=%d, dtype=%s,%s",
             src_layout.to_string().c_str(), filter_layout.to_string().c_str(),
             dst_layout.to_string().c_str(), param.pad_h, param.pad_w,
             param.stride_h, param.stride_w, param.dilate_h, param.dilate_w,
             static_cast<int>(param.mode), src_layout.dtype.name(),
-            dst_layout.dtype.name()));
+            dst_layout.dtype.name());
 }
 
 // vim: syntax=cpp.doxygen

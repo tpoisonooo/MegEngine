@@ -2,7 +2,7 @@
  * \file src/opr/test/basic_arith/elemwise_ternary_trait_def.inl
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,6 +20,7 @@
     ctype y = inp[1][idx]; \
     ctype z = inp[2][idx]
 
+#define _ALLOW_BOOL false
 #define _ALLOW_FLOAT true
 #define _ALLOW_INT true
 DEF_TRAIT(COND_LEQ_MOV, x <= y ? z : 0)
@@ -46,5 +47,6 @@ DEF_TRAIT(FUSE_MUL_ADD4, i0 * i1 + i2 * i3)
 
 #undef _CUR_ARITY
 #undef _EXPAND_PARAMS
+#undef _ALLOW_BOOL
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

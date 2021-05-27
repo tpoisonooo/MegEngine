@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/convolution/backward_filter/group_conv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -38,6 +38,10 @@ ConvolutionBackwardFilterImpl::AlgoGroupConvGeneral::AlgoGroupConvGeneral(
 
 bool ConvolutionBackwardFilterImpl::AlgoGroupConvGeneral::is_available(
         const SizeArgs &args) const {
+    if (args.src_layout->dtype == args.src_layout->dtype &&
+        args.diff_layout->dtype == dtype::BFloat16()) {
+        return false;
+    }
     auto sub_args = args;
     TensorLayout src_pg, diff_pg;
     modify_size_args(sub_args, src_pg, diff_pg);

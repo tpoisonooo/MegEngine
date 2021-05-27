@@ -2,11 +2,12 @@
  * \file dnn/src/common/elemwise/opr_impl_helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #pragma once
@@ -87,6 +88,7 @@ public:
      * Note that Input can also be 3-dimensional, and must be [x, 1, z]
      * broadacsted into [x, y, z]
      */
+    template <size_t slice_size>
     static bool is_broadcastedx_channel_like(const TensorLayout& layout,
                                              BroadcastChannelInfo& info);
 };

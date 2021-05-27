@@ -2,7 +2,7 @@
  * \file src/opr-mm/impl/io_remote.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,51 +18,60 @@
 using namespace mgb;
 using namespace opr;
 
+cudaStream_t get_stream(VarNode* var) {
+    return CompNodeEnv::from_comp_node(var->comp_node()).cuda_env().stream;
+}
+
 /* ===================== RemoteSend ===================== */
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(RemoteSend);
 
-RemoteSend::RemoteSend(const PeerDesc& peer, VarNode* var,
+RemoteSend::RemoteSend(const std::string& key, VarNode* var,
                        std::shared_ptr<GroupClient> group_client,
-                       const OperatorNodeConfig& config) :
-        Super(var->owner_graph(), config, "remote_send", {var}) {
-    m_peer = peer;
+                       bool is_grad, const OperatorNodeConfig& config) :
+        Super(var->owner_graph(), config, "remote_send", {var}),
+        m_is_grad(is_grad) {
+    m_key = key;
     m_group_client = group_client;
 
     add_input({var});
     auto ovar = add_output(None);
-    if (!peer.is_grad) {
+    if (!m_is_grad) {
         ovar->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE)
                 .add_flag(VarNode::Flag::VOLATILE_CONTENT);
     }
-    m_megray_ctx = MegRay::Context::make();
     add_equivalence_component<ScalarHash<void*>>(this);
 }
 
-SymbolVar RemoteSend::make(const PeerDesc& peer, SymbolVar var,
+SymbolVar RemoteSend::make(const std::string& key, SymbolVar var,
                            std::shared_ptr<GroupClient> group_client,
-                           const OperatorNodeConfig& config) {
-    return var.insert_single_output_opr<RemoteSend>(peer, var.node(),
-                                                    group_client, config);
+                           bool is_grad, const OperatorNodeConfig& config) {
+    return var.insert_single_output_opr<RemoteSend>(key, var.node(), group_client,
+                                                    is_grad, config);
 }
 
 void RemoteSend::scn_do_execute() {
     if (!m_init) {
-        auto&& cuda_env = CompNodeEnv::from_comp_node(output(0)->comp_node())
-                .cuda_env();
+        auto&& comp_node = output(0)->comp_node();
+        bool use_cache = output(0)->owner_graph()->options().imperative_proxy_graph;
+        struct GroupManager::RegisterInfo reg_info;
 
-        // rank 0 for RemoteSend
-        auto hash = m_group_client->opr_register(m_peer.key, 2, 0,
-                reinterpret_cast<uintptr_t>(cuda_env.stream));
+        if (use_cache and RegInfoCache::has_info(m_key)) {
+            reg_info = RegInfoCache::get_info(m_key);
+        } else {
+            // rank 0 for RemoteSend
+            reg_info = m_group_client->opr_register(m_key, 2, 0, false,
+                    comp_node.get_uid());
+            if (use_cache) {
+                RegInfoCache::set_info(m_key, reg_info);
+            }
+        }
 
-        auto megray_comm_builder =
-                owner_graph()
-                        ->options()
-                        .user_data
-                        .get_user_data_or_create<MegRayCommunicatorBuilder>();
+        m_megray_comm = MegRayCommBuilder::get_megray_comm(
+                reg_info.hash, m_key, 2, 0, MegRay::MEGRAY_NCCL, m_group_client);
 
-        m_megray_comm = megray_comm_builder->get_megray_comm(
-                hash, m_peer.key, 2, 0, MegRay::MEGRAY_UCX, m_group_client);
+        m_megray_ctx = MegRay::CudaContext::make(get_stream(output(0)));
+
         m_init = true;
     }
 
@@ -73,11 +82,12 @@ void RemoteSend::scn_do_execute() {
     for (size_t i = 0; i < ishp.ndim; i++) {
         data_size *= ishp[i];
     }
-    data_size *= tensor.dtype().size();
-    auto status = m_megray_comm->send(tensor.raw_ptr(), data_size, 1, m_megray_ctx);
+    auto status = m_megray_comm->send(tensor.raw_ptr(), data_size,
+                                      get_megray_dtype(tensor.dtype()),
+                                      1, m_megray_ctx);
     mgb_assert(status == MegRay::MEGRAY_OK, "MegRay send failed");
 
-    if (m_peer.is_grad) {
+    if (m_is_grad) {
         auto&& dest = output(0)->dev_tensor();
         if (m_output_val.empty()) {
             m_output_val.comp_node(dest.comp_node())
@@ -93,7 +103,7 @@ void RemoteSend::init_output_static_infer_desc() {
     using namespace cg::static_infer;
     auto&& mgr = owner_graph()->static_infer_manager();
     auto do_infer = [this](TensorShape& dest, const InpVal&) {
-        if (peer_desc().is_grad) {
+        if (m_is_grad) {
             dest = {1};
         } else {
             dest = {0};
@@ -109,64 +119,96 @@ cg::OperatorNodeBase::NodeProp* RemoteSend::do_make_node_prop() const {
     return prop;
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(RemoteSend) {
-    mgb_assert(opr.peer_desc().is_grad);
-    return RemoteRecv::make({opr.peer_desc().key + ":grad",
-                             RemoteIOBase::Type::RECV, false},
+    mgb_assert(opr.is_grad());
+    return RemoteRecv::make(opr.key() + ":grad",
                             *opr.owner_graph(), opr.group_client(),
                             OperatorNodeConfig{opr.comp_node()}.name(
                                     opr.name() + ":grad_recv"),
                             opr.input(0)->shape(), opr.input(0)->dtype())
             .node();
 }
+#endif
 
 /* ===================== RemoteRecv ===================== */
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(RemoteRecv);
 
-RemoteRecv::RemoteRecv(const PeerDesc& peer, cg::ComputingGraph& graph,
+RemoteRecv::RemoteRecv(const std::string& key, cg::ComputingGraph& graph,
                        std::shared_ptr<GroupClient> group_client,
                        const OperatorNodeConfig& config,
                        const TensorShape& shape, DType dtype) :
         Super(&graph, config, "remote_recv", {}),
         m_shape(shape), m_dtype(dtype) {
-    m_peer = peer;
+    m_key = key;
     m_group_client = group_client;
 
     add_output(None)
             ->dtype(dtype)
             .add_flag(VarNode::Flag::NO_MEM_RECLAIM)
             .add_flag(VarNode::Flag::DISALLOW_RT_FORCE_DYNAMIC_MEM_ALLOC);
-    m_megray_ctx = MegRay::Context::make();
     add_equivalence_component<ScalarHash<void*>>(this);
 }
 
-SymbolVar RemoteRecv::make(const PeerDesc& peer, cg::ComputingGraph& graph,
+RemoteRecv::RemoteRecv(const std::string& key, VarNode* var, cg::ComputingGraph& graph,
+                       std::shared_ptr<GroupClient> group_client,
+                       const OperatorNodeConfig& config,
+                       const TensorShape& shape, DType dtype) :
+        Super(&graph, config, "remote_recv", {}),
+        m_shape(shape), m_dtype(dtype) {
+    m_key = key;
+    m_group_client = group_client;
+
+    add_input({var});
+    add_output(None)
+            ->dtype(dtype)
+            .add_flag(VarNode::Flag::NO_MEM_RECLAIM)
+            .add_flag(VarNode::Flag::DISALLOW_RT_FORCE_DYNAMIC_MEM_ALLOC);
+    add_equivalence_component<ScalarHash<void*>>(this);
+}
+
+SymbolVar RemoteRecv::make(const std::string& key, cg::ComputingGraph& graph,
                            std::shared_ptr<GroupClient> group_client,
                            const OperatorNodeConfig& config,
                            const TensorShape& shape, DType dtype) {
     auto opr = graph.insert_opr(std::make_unique<RemoteRecv>(
-            peer, graph, group_client, config, shape, dtype));
+            key, graph, group_client, config, shape, dtype));
+    return opr->output(0);
+}
+
+SymbolVar RemoteRecv::make(const std::string& key, SymbolVar var, cg::ComputingGraph& graph,
+                           std::shared_ptr<GroupClient> group_client,
+                           const OperatorNodeConfig& config,
+                           const TensorShape& shape, DType dtype) {
+    auto opr = graph.insert_opr(std::make_unique<RemoteRecv>(
+            key, var.node(), graph, group_client, config, shape, dtype));
     return opr->output(0);
 }
 
 void RemoteRecv::scn_do_execute() {
     if (!m_init) {
-        auto&& cuda_env = CompNodeEnv::from_comp_node(output(0)->comp_node())
-                .cuda_env();
+        auto&& comp_node = output(0)->comp_node();
+        bool use_cache = output(0)->owner_graph()->options().imperative_proxy_graph;
+        struct GroupManager::RegisterInfo reg_info;
 
-        // rank 1 for RemoteRecv
-        auto hash = m_group_client->opr_register(m_peer.key, 2, 1,
-                reinterpret_cast<uintptr_t>(cuda_env.stream));
+        if (use_cache and RegInfoCache::has_info(m_key)) {
+            reg_info = RegInfoCache::get_info(m_key);
+        } else {
+            // rank 1 for RemoteRecv
+            reg_info = m_group_client->opr_register(
+                    m_key, 2, false, 1,
+                    comp_node.get_uid());
+            if (use_cache) {
+                RegInfoCache::set_info(m_key, reg_info);
+            }
+        }
 
-        auto megray_comm_builder =
-                owner_graph()
-                        ->options()
-                        .user_data
-                        .get_user_data_or_create<MegRayCommunicatorBuilder>();
+        m_megray_comm = MegRayCommBuilder::get_megray_comm(
+                reg_info.hash, m_key, 2, 1, MegRay::MEGRAY_NCCL, m_group_client);
 
-        m_megray_comm = megray_comm_builder->get_megray_comm(
-                hash, m_peer.key, 2, 1, MegRay::MEGRAY_UCX, m_group_client);
+        m_megray_ctx = MegRay::CudaContext::make(get_stream(output(0)));
+
         m_init = true;
     }
 
@@ -177,8 +219,9 @@ void RemoteRecv::scn_do_execute() {
     for (size_t i = 0; i < ishp.ndim; i++) {
         data_size *= ishp[i];
     }
-    data_size *= tensor.dtype().size();
-    auto status = m_megray_comm->recv(tensor.raw_ptr(), data_size, 0, m_megray_ctx);
+    auto status = m_megray_comm->recv(tensor.raw_ptr(), data_size,
+                                      get_megray_dtype(tensor.dtype()),
+                                      0, m_megray_ctx);
     mgb_assert(status == MegRay::MEGRAY_OK, "MegRay recv failed");
 }
 
@@ -211,8 +254,8 @@ cg::OperatorNodeBase* opr_shallow_copy_remote_send(
         const OperatorNodeConfig& config) {
     mgb_assert(inputs.size() == 1);
     auto&& opr = opr_.cast_final_safe<RemoteSend>();
-    return RemoteSend::make(opr.peer_desc(), inputs[0], opr.group_client(),
-                            config)
+    return RemoteSend::make(opr.key(), inputs[0], opr.group_client(),
+                            opr.is_grad(), config)
             .node()
             ->owner_opr();
 }
@@ -223,11 +266,20 @@ cg::OperatorNodeBase* opr_shallow_copy_remote_recv(
         const cg::OperatorNodeBase& opr_, const VarNodeArray& inputs,
         const OperatorNodeConfig& config) {
     auto&& opr = opr_.cast_final_safe<RemoteRecv>();
-    return RemoteRecv::make(opr.peer_desc(), *opr.owner_graph(),
-                            opr.group_client(), config, inputs[0]->shape(),
-                            inputs[0]->dtype())
-            .node()
-            ->owner_opr();
+    if (inputs.size() == 1) {
+        return RemoteRecv::make(opr.key(), inputs[0], *opr.owner_graph(),
+                                opr.group_client(), config, opr.shape(),
+                                opr.dtype())
+                .node()
+                ->owner_opr();
+    } else {
+        mgb_assert(inputs.size() == 0, "recv should have 1 or 0 input");
+        return RemoteRecv::make(opr.key(), *opr.owner_graph(),
+                                opr.group_client(), config, opr.shape(),
+                                opr.dtype())
+                .node()
+                ->owner_opr();
+    }
 }
 MGB_REG_OPR_SHALLOW_COPY(RemoteRecv, opr_shallow_copy_remote_recv);
 

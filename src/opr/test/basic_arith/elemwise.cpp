@@ -2,7 +2,7 @@
  * \file src/opr/test/basic_arith/elemwise.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -206,6 +206,7 @@ namespace {
         static constexpr Mode MODE = Mode::_mode; \
         static constexpr bool ALLOW_INT = _ALLOW_INT; \
         static constexpr bool ALLOW_FLOAT = _ALLOW_FLOAT; \
+        static constexpr bool ALLOW_BOOL = _ALLOW_BOOL; \
         static constexpr const char* NAME = #_mode; \
         template<typename ctype> \
         static inline ctype apply( \
@@ -588,6 +589,10 @@ namespace {
         struct enable_for_dtype_impl<dtype::Int32, void> {
             static constexpr bool value = false;
         };
+        template<class Trait>
+        struct enable_for_dtype_impl<dtype::Bool, Trait> {
+            static constexpr bool value = Trait::ALLOW_BOOL;
+        };
     }
 
     //! whether to enable test for specific dtype and Trait
@@ -749,8 +754,63 @@ TYPED_TEST(TestOprBasicArithTernaryElemwise, Float32) {
 
 TEST(TestOprBasicArithElemwise, CheckAllModeTested) {
     size_t nr_member = opr::Elemwise::Param::MODE_NR_MEMBER;
-    ASSERT_EQ(nr_member, tested_mode.size());
+    ASSERT_EQ(nr_member, tested_mode.size() + 4);
+    // Not using TestRunner: NOT, AND, OR, XOR
 }
+#define TEST_OPR_BASIC_ARITH_UNARY_BOOL(_mode, _op) \
+    TEST(TestOprBasicArithElemwise, _mode) { \
+        HostTensorGenerator<dtype::Bool> gen; \
+        auto host_x = gen({2, 1}); \
+        auto ptr = host_x->ptr<dt_bool>(); \
+        for (size_t i = 0; i < 2; ++i) { \
+            ptr[i] = (i & 1); \
+        } \
+        auto graph = ComputingGraph::make(); \
+        using Mode = opr::Elemwise::Mode; \
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x), \
+             y = opr::Elemwise::make({x}, Mode::_mode); \
+        HostTensorND host_y; \
+        auto func = graph->compile({make_callback_copy(y, host_y)}); \
+        func->execute(); \
+        ASSERT_EQ(TensorShape({2, 1}), host_y.shape()); \
+        auto ptry = host_y.ptr<dt_bool>(); \
+        for (int i = 0;i < 2;i ++) { \
+            ASSERT_EQ(_op ptr[i], ptry[i]); \
+        } \
+    } \
+
+TEST_OPR_BASIC_ARITH_UNARY_BOOL(NOT, !)
+
+#define TEST_OPR_BASIC_ARITH_BINARY_BOOL(_mode, _op) \
+    TEST(TestOprBasicArithElemwise, _mode) { \
+        HostTensorGenerator<dtype::Bool> gen; \
+        auto host_x1 = gen({2, 2}), host_x2 = gen({2, 2}); \
+        auto ptr1 = host_x1->ptr<dt_bool>(), ptr2 = host_x2->ptr<dt_bool>(); \
+        for (size_t i = 0; i < 4; ++i) { \
+            ptr1[i] = (i < 2); \
+            ptr2[i] = (i & 1); \
+        } \
+        auto graph = ComputingGraph::make(); \
+        using Mode = opr::Elemwise::Mode; \
+        auto x1 = opr::Host2DeviceCopy::make(*graph, host_x1), \
+             x2 = opr::Host2DeviceCopy::make(*graph, host_x2), \
+             y = opr::Elemwise::make({x1, x2}, Mode::_mode); \
+        HostTensorND host_y; \
+        auto func = graph->compile({make_callback_copy(y, host_y)}); \
+        func->execute(); \
+        ASSERT_EQ(TensorShape({2, 2}), host_y.shape()); \
+        auto ptry = host_y.ptr<dt_bool>(); \
+        for (int i = 0;i < 4;i ++) { \
+            ASSERT_EQ(ptr1[i] _op ptr2[i], ptry[i]); \
+        } \
+    } \
+
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(AND, &&)
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(OR, ||)
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(XOR, ^)
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(LT, <)
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(LEQ, <=)
+TEST_OPR_BASIC_ARITH_BINARY_BOOL(EQ, ==)
 
 TEST(TestOprBasicArithElemwise, FuseMulAdd3Shapes) {
     using Checker = AutoOprChecker<3, 1>;
@@ -948,6 +1008,60 @@ TEST(TestLayoutUtil, CollectiveCollapse) {
     auto cc_res5 = Elemwise::collective_collapse(inp5);
     auto std_res5 = inp5;
     check(cc_res5, std_res5);
+}
+
+TEST(TestOprBasicArithElemwise, EmptyInputOutputUnary) {
+    HostTensorGenerator<> gen;
+    auto graph = ComputingGraph::make();
+    auto host_x = gen({3, 0, 1, 3});
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::Elemwise::make(
+                 {x}, opr::Elemwise::Param(opr::Elemwise::Param::Mode::RELU));
+    HostTensorND host_y;
+    auto func = graph->compile({make_callback_copy(y, host_y)});
+
+    ASSERT_NO_THROW(func->execute().wait());
+    ASSERT_TRUE(host_y.empty());
+    ASSERT_TRUE(host_y.shape().is_empty());
+    MGB_ASSERT_SHAPE_EQ(host_y.shape(), TensorShape({3, 0, 1, 3}));
+}
+
+TEST(TestOprBasicArithElemwise, EmptyInputOutputBinary) {
+    HostTensorGenerator<> gen;
+    auto graph = ComputingGraph::make();
+    auto host_x = gen({0, 8, 1, 7}), host_y = gen({0, 8, 1, 7});
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::Host2DeviceCopy::make(*graph, host_y),
+         z = x + y;
+    HostTensorND host_z;
+    auto func = graph->compile({make_callback_copy(z, host_z)});
+
+    // Invalid broadcast
+    host_y->resize({0, 9, 1, 7});
+    ASSERT_ANY_THROW(func->execute().wait());
+
+    // Broadcast to 0
+    host_y->resize({1, 8, 0, 7});
+    ASSERT_NO_THROW(func->execute().wait());
+    ASSERT_TRUE(host_z.empty());
+    ASSERT_TRUE(host_z.shape().is_empty());
+    MGB_ASSERT_SHAPE_EQ(host_z.shape(), TensorShape({0, 8, 0, 7}));
+
+    // Broadcast to 0 (2)
+    host_y->resize({2, 8, 1, 7});
+    ASSERT_NO_THROW(func->execute().wait());
+    ASSERT_TRUE(host_z.empty());
+    ASSERT_TRUE(host_z.shape().is_empty());
+    MGB_ASSERT_SHAPE_EQ(host_z.shape(), TensorShape({0, 8, 1, 7}));
+
+    // Scalar broadcast
+    z = x + x.make_scalar(1.f);
+    func = graph->compile({make_callback_copy(z, host_z)});
+    ASSERT_NO_THROW(func->execute().wait());
+    ASSERT_TRUE(host_z.empty());
+    ASSERT_TRUE(host_z.shape().is_empty());
+    MGB_ASSERT_SHAPE_EQ(host_z.shape(), TensorShape({0, 8, 1, 7}));
 }
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

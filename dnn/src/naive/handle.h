@@ -2,7 +2,7 @@
  * \file dnn/src/naive/handle.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -11,8 +11,11 @@
 #pragma once
 #include "megdnn/basic_types.h"
 
+#include "megdnn/oprs/base.h"
 #include "src/common/handle_impl.h"
 #include "src/naive/convolution/algorithms.h"
+#include "src/naive/matrix_mul/algorithms.h"
+#include "src/naive/local_share/algorithms.h"
 #include "src/naive/convolution3d/algorithms.h"
 
 #include <functional>
@@ -39,6 +42,14 @@ class HandleImpl : public HandleImplHelper {
             m_default_conv3d_bwd_filter_algo;
     static DefaultBatchConvBiasForwardAlgorithm
             m_default_batch_conv_bias_fwd_algo;
+    static DefaultLocalShareForwardAlgorithm m_default_local_share_fwd_algo;
+    static DefaultLocalShareBackwardDataAlgorithm
+            m_default_local_share_bwd_data_algo;
+    static DefaultLocalShareBackwardFilterAlgorithm
+            m_default_local_share_bwd_filter_algo;
+
+    static DefaultMatrixMulAlgorithm m_default_matmul_fwd_algo;
+    static DefaultBatchedMatrixMulAlgorithm m_default_batched_matmul_fwd_algo;
 
     //! move KernFunc to alloc_kern()->func, destruct func, and call dispatch
     template <typename T>
@@ -91,6 +102,26 @@ public:
         return &m_default_batch_conv_bias_fwd_algo;
     }
 
+    LocalShareForward::Algorithm* default_local_share_fwd_algo() {
+        return &m_default_local_share_fwd_algo;
+    }
+
+    LocalShareBackwardData::Algorithm* default_local_share_bwd_data_algo() {
+        return &m_default_local_share_bwd_data_algo;
+    }
+
+    LocalShareBackwardFilter::Algorithm* default_local_share_bwd_filter_algo() {
+        return &m_default_local_share_bwd_filter_algo;
+    }
+
+    MatrixMulForward::Algorithm* default_matmul_fwd_algo() {
+        return &m_default_matmul_fwd_algo;
+    }
+
+    BatchedMatrixMulForward::Algorithm* default_batched_matmul_fwd_algo() {
+        return &m_default_batched_matmul_fwd_algo;
+    }
+
     Relayout* relayout_opr() override {
         return get_helper_opr<Relayout, 2>(this);
     }
@@ -139,6 +170,7 @@ public:
      * \param alignment the new alignment value to set
      */
     static size_t exchange_image2d_pitch_alignment(size_t alignment);
+    HandleVendorType vendor_type() const override;
 };
 
 }  // namespace naive
@@ -168,10 +200,7 @@ public:
  */
 #define MEGDNN_DISPATCH_MULTI_THREAD_CPU_KERN(_handle, _parallelism, _stmt) \
     do {                                                                    \
-        auto _kern = [=](size_t index, size_t thread_id) {                  \
-            _stmt(index, thread_id);                                        \
-        };                                                                  \
-        _handle->dispatch_kern(_kern, _parallelism);                        \
+        _handle->dispatch_kern(_stmt, _parallelism);                        \
     } while (0)
 
 //! disptch kern on current opr

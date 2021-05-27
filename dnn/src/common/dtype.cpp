@@ -2,7 +2,7 @@
  * \file dnn/src/common/dtype.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -42,15 +42,13 @@ MEGDNN_FOREACH_PARAMETERIZED_DTYPE(TEMPLATED_IMPL)
 #undef IMPL
 
 void DType::on_assert_is_failed(const char *rname) const {
-    megdnn_throw(megdnn_mangle(
-                ssprintf("attempt to access dtype %s as %s",
-                name(), rname).c_str()));
+    megdnn_throw(ssprintf("attempt to access dtype %s as %s", name(), rname)
+                         .c_str());
     MEGDNN_MARK_USED_VAR(rname);
 }
 
 void DType::on_request_lowbit_size() const {
-    megdnn_throw(megdnn_mangle(
-                ssprintf("attempt to get size of lowbit dtype %s", name())));
+    megdnn_throw(ssprintf("attempt to get size of lowbit dtype %s", name()));
 }
 
 DType DType::from_enum(DTypeEnum ev) {
@@ -60,11 +58,11 @@ DType DType::from_enum(DTypeEnum ev) {
 #undef cb
 #define cb(_dt) case DTypeEnum::_dt:
         MEGDNN_FOREACH_PARAMETERIZED_DTYPE(cb)
-            megdnn_throw(megdnn_mangle(
-                "cannot construct parameterized DType via DType::from_enum"));
+        megdnn_throw(
+                "cannot construct parameterized DType via DType::from_enum");
 #undef cb
     }
-    megdnn_throw(megdnn_mangle("bad DTypeEnum value"));
+    megdnn_throw("bad DTypeEnum value");
 }
 
 template <DTypeEnum type_enum>

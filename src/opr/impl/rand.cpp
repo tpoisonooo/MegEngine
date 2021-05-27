@@ -2,7 +2,7 @@
  * \file src/opr/impl/rand.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -60,6 +60,8 @@ cg::OperatorNodeBase::NodeProp* RNGOprBase::do_make_node_prop() const {
 
 void RNGOprBase::ensure_megdnn_opr() {
     if (!m_megdnn_opr || m_megdnn_opr.comp_node() != comp_node()) {
+        // activate comp_node for curandCreateGenerator in create_megdnn_opr
+        comp_node().activate();
         m_megdnn_opr = create_megdnn_opr();
     }
 }
@@ -112,19 +114,21 @@ UniqPtrWithCN<megdnn::RNGBase> RNGOpr<MegDNNOpr>::create_megdnn_opr() {
     return opr;
 }
 
-#define IMPL(_cls) \
-template class RNGOpr<::megdnn::_cls>; \
-MGB_IMPL_OPR_GRAD(_cls) { \
-    MGB_MARK_USED_VAR(out_grad); \
-    return InvalidGrad::make(opr, wrt_idx); \
-} \
-
+#define IMPL(_cls)                                      \
+    MGB_IMPL_OPR_GRAD(_cls) {                           \
+        MGB_MARK_USED_VAR(out_grad);                    \
+        return InvalidGrad::make(opr, wrt_idx);         \
+    }
 
 namespace mgb {
 namespace opr {
 namespace intl {
+template class RNGOpr<::megdnn::GaussianRNG>;
+template class RNGOpr<::megdnn::UniformRNG>;
+#if MGB_ENABLE_GRAD
 IMPL(GaussianRNG);
 IMPL(UniformRNG);
+#endif
 }
 }
 }

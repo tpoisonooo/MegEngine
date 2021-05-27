@@ -3,7 +3,7 @@
  *
  * This file is part of MegBrain, a deep learning framework developed by Megvii.
  *
- * \copyright Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * \copyright Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  */
 
@@ -70,8 +70,8 @@ dtype, RandomDistribution::GAUSSIAN>::operator ()(
     auto ptr = ret->ptr<ctype>();
     auto mean = m_mean, std = m_std;
     for (size_t i = 0, it = shape.total_nr_elems(); i < it; i += 2) {
-        ctype u1 = (m_rng() + 1.0) / (m_rng.max() + 1.0),
-              u2 = (m_rng() + 1.0) / (m_rng.max() + 1.0),
+        ctype u1 = ctype((m_rng() + 1.0) / (m_rng.max() + 1.0)),
+              u2 = ctype((m_rng() + 1.0) / (m_rng.max() + 1.0)),
               r = ctype(std * std::sqrt(-2 * std::log(u1))),
               theta = ctype(2 * M_PI * u2),
               z0 = ctype(r * std::cos(theta) + mean),
@@ -98,6 +98,36 @@ dtype, RandomDistribution::UNIFORM>::operator ()(
     return ret;
 }
 
+template<typename dtype>
+std::shared_ptr<HostTensorND> HostTensorGenerator<
+dtype, RandomDistribution::CONSTANT>::operator ()(
+        const TensorShape &shape, CompNode cn) {
+    if (!cn.valid())
+        cn = CompNode::load("xpu0");
+    std::shared_ptr<HostTensorND> ret =
+        std::make_shared<HostTensorND>(cn, shape, dtype());
+    auto ptr = ret->ptr<ctype>();
+    for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++ i) {
+        ptr[i] = m_default_val;
+    }
+    return ret;
+}
+
+template<typename dtype>
+std::shared_ptr<HostTensorND> HostTensorGenerator<
+dtype, RandomDistribution::CONSECUTIVE>::operator ()(
+        const TensorShape &shape, CompNode cn) {
+    if (!cn.valid())
+        cn = CompNode::load("xpu0");
+    std::shared_ptr<HostTensorND> ret =
+        std::make_shared<HostTensorND>(cn, shape, dtype());
+    auto ptr = ret->ptr<ctype>();
+    for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++ i) {
+        ptr[i] = m_val + i * m_delta;
+    }
+    return ret;
+}
+
 // explicit instantialization of HostTensorGenerator
 namespace mgb {
     template class HostTensorGenerator<
@@ -105,13 +135,44 @@ namespace mgb {
     template class HostTensorGenerator<
         dtype::Float32, RandomDistribution::UNIFORM>;
     template class HostTensorGenerator<
+        dtype::Float32, RandomDistribution::CONSTANT>;
+    template class HostTensorGenerator<
+        dtype::Float32, RandomDistribution::CONSECUTIVE>;
+    template class HostTensorGenerator<
+        dtype::Float16, RandomDistribution::GAUSSIAN>;
+    template class HostTensorGenerator<
         dtype::Int8, RandomDistribution::UNIFORM>;
+    template class HostTensorGenerator<
+        dtype::Int8, RandomDistribution::CONSTANT>;
+    template class HostTensorGenerator<
+        dtype::Int8, RandomDistribution::CONSECUTIVE>;
     template class HostTensorGenerator<
         dtype::Uint8, RandomDistribution::UNIFORM>;
     template class HostTensorGenerator<
+        dtype::Uint8, RandomDistribution::CONSTANT>;
+    template class HostTensorGenerator<
         dtype::Int16, RandomDistribution::UNIFORM>;
     template class HostTensorGenerator<
+        dtype::Int16, RandomDistribution::CONSTANT>;
+    template class HostTensorGenerator<
         dtype::Int32, RandomDistribution::UNIFORM>;
+    template class HostTensorGenerator<
+        dtype::Int32, RandomDistribution::CONSTANT>;
+    std::shared_ptr<HostTensorND>
+    HostTensorGenerator<dtype::Bool, RandomDistribution::UNIFORM>::
+    operator()(const TensorShape& shape, CompNode cn) {
+        if (!cn.valid())
+            cn = CompNode::load("xpu0");
+        auto dtype = dtype::Bool();
+        std::shared_ptr<HostTensorND> ret =
+                std::make_shared<HostTensorND>(cn, shape, dtype);
+        auto ptr = ret->ptr<dt_bool>();
+        for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++i) {
+            ptr[i] = (i % 2 == 1);
+        }
+        return ret;
+    }
+
     std::shared_ptr<HostTensorND>
     HostTensorGenerator<dtype::QuantizedS8, RandomDistribution::UNIFORM>::
     operator()(const TensorShape& shape, CompNode cn) {
@@ -126,6 +187,24 @@ namespace mgb {
                        (m_rng.max() + 1.0);
         for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++i) {
             ptr[i] = param.quantize(m_rng() * scale + param.dequantize(m_lo));
+        }
+        return ret;
+    }
+
+    std::shared_ptr<HostTensorND>
+    HostTensorGenerator<dtype::Quantized8Asymm, RandomDistribution::UNIFORM>::
+    operator()(const TensorShape& shape, CompNode cn) {
+        if (!cn.valid())
+            cn = CompNode::load("xpu0");
+        auto dtype = dtype::Quantized8Asymm(m_scale, m_zero_point);
+        auto param = dtype.param();
+        std::shared_ptr<HostTensorND> ret =
+                std::make_shared<HostTensorND>(cn, shape, dtype);
+        auto ptr = ret->ptr<dt_quint8>();
+        double scale = (param.dequantize(m_hi) - param.dequantize(m_lo)) /
+                       (m_rng.max() + 1.0);
+        for (size_t i = 0, it = shape.total_nr_elems(); i < it; ++i) {
+            ptr[i] = param.quantize(m_rng() * scale + param.dequantize(m_lo));           
         }
         return ret;
     }
@@ -154,6 +233,16 @@ namespace mgb {
     if (ret.valid())
         return ::testing::AssertionFailure() << ret.val();
     return ::testing::AssertionSuccess();
+}
+
+::testing::AssertionResult mgb::__assert_shape_equal(const TensorShape& v0,
+                                                const TensorShape& v1) {
+    if (v0.eq_shape(v1))
+        return ::testing::AssertionSuccess()
+                << v0.to_string() << " == " << v1.to_string();
+    else
+        return ::testing::AssertionFailure()
+                << v0.to_string() << " != " << v1.to_string();
 }
 
 #if WIN32
@@ -256,7 +345,36 @@ bool mgb::check_gpu_available(size_t num) {
     return true;
 }
 
+bool mgb::check_amd_gpu_available(size_t num) {
+    if (CompNode::get_device_count(CompNode::DeviceType::ROCM) < num) {
+        mgb_log_warn("skip test case that requires %zu AMD GPU(s)", num);
+        return false;
+    }
+    return true;
+}
 
+bool mgb::check_cambricon_device_available(size_t num) {
+    if (CompNode::get_device_count(CompNode::DeviceType::CAMBRICON) < num) {
+        mgb_log_warn("skip test case that requires %zu cambricon device(s)",
+                     num);
+        return false;
+    }
+    return true;
+}
+
+bool mgb::check_device_type_avaiable(CompNode::DeviceType device_type) {
+    switch (device_type) {
+        case mgb::CompNode::DeviceType::CUDA:
+        case mgb::CompNode::DeviceType::CPU:
+        case mgb::CompNode::DeviceType::CAMBRICON:
+        case mgb::CompNode::DeviceType::ATLAS:
+        case mgb::CompNode::DeviceType::MULTITHREAD:
+            return true;
+        default:
+            return false;
+    }
+    return false;
+}
 
 bool mgb::check_compute_capability(int major, int minor) {
 #if MGB_CUDA

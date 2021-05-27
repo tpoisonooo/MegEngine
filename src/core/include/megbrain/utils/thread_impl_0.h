@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/utils/thread_impl_0.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -46,15 +46,17 @@ namespace mgb {
 
     class SCQueueSynchronizer {
         public:
-            static size_t max_spin() {
-                return 0;
-            }
+            SCQueueSynchronizer(size_t max_spin) {}
+
+            static size_t get_default_max_spin() { return 0; }
     };
 
     // tasks would be dispatched inplace
     template<typename Param, class TaskImpl>
     class AsyncQueueSC: public NonCopyableObj {
         public:
+            AsyncQueueSC(ptrdiff_t max_spin = -1, ptrdiff_t max_items = -1) {}
+
             virtual ~AsyncQueueSC() = default;
 
             void add_task(const Param &param) {
@@ -88,4 +90,3 @@ namespace mgb {
 }
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
-

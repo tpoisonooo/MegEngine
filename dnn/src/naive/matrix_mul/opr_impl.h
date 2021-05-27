@@ -2,11 +2,12 @@
  * \file dnn/src/naive/matrix_mul/opr_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #pragma once
 #include "megdnn/oprs.h"
@@ -26,17 +27,15 @@ public:
 
     std::vector<Algorithm*> get_all_algorithms(
             const TensorLayout& /*A*/, const TensorLayout& /*B*/,
-            const TensorLayout& /*C*/) override {
-        return {};
-    }
+            const TensorLayout& /*C*/) override;
 
-    Algorithm* get_algorithm_heuristic(const TensorLayout& /*A*/,
-                                       const TensorLayout& /*B*/,
-                                       const TensorLayout& /*C*/,
-                                       size_t /*workspace_limit_in_bytes*/,
-                                       bool /* reproducible */) override {
-        return nullptr;
-    }
+    Algorithm* get_algorithm_heuristic(
+            const TensorLayout& /*A*/, const TensorLayout& /*B*/,
+            const TensorLayout& /*C*/, size_t /*workspace_limit_in_bytes*/,
+            const AlgoAttribute& /*positive_attr*/,
+            const AlgoAttribute& /*negative_attr*/) override;
+
+    Algorithm* get_algorithm_from_desc(const AlgorithmDesc&) override;
 
     const char* get_algorithm_set_name() const override { return "DEFAULT"; }
 

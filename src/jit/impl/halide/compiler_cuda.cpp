@@ -2,7 +2,7 @@
  * \file src/jit/impl/halide/compiler_cuda.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -49,7 +49,7 @@ HalideCudaTargetTrait::FeatureSet HalideCudaTargetTrait::features(
         set.set(Target::CUDACapability32);
     } else if (in(35, 40)) {
         set.set(Target::CUDACapability35);
-    } else if (in(50, 60)) {
+    } else if (in(50, 61)) {
         set.set(Target::CUDACapability50);
     } else if (in(61, 70)) {
         set.set(Target::CUDACapability61);

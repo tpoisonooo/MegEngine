@@ -2,7 +2,7 @@
  * \file dnn/include/megdnn/basic_types.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -215,9 +215,9 @@ struct TensorLayout : public TensorShape {
     DType dtype;
     Format format;
 
-#if MEGDNN_CC_HOST
     TensorLayout();
 
+#if MEGDNN_CC_HOST
     TensorLayout(const TensorLayout& layout) = default;
 
     //! create empty layout with given dtype
@@ -330,6 +330,8 @@ struct TensorLayout : public TensorShape {
     /* =================== properties =================== */
 
     std::string to_string() const;
+
+    std::string serialize() const;
 #endif  // MEGDNN_CC_HOST
 
     /*!
@@ -504,9 +506,65 @@ struct DynOutMallocPolicyCall {
     }
 };
 
+
+template <typename T>
+class EnumClassBit {
+    std::underlying_type_t<T> m_val;
+
+    constexpr EnumClassBit(std::underlying_type_t<T> v) : m_val(v) {}
+
+public:
+    constexpr EnumClassBit(T v)
+            : m_val(static_cast<std::underlying_type_t<T>>(v)) {}
+
+    constexpr operator T() const { return static_cast<T>(m_val); }
+
+    constexpr explicit operator bool() const { return m_val; }
+
+#define DEF_OPR(op)                                                     \
+    constexpr EnumClassBit operator op(const EnumClassBit& rhs) const { \
+        return m_val op rhs.m_val;                                      \
+    }
+
+    DEF_OPR(&)
+    DEF_OPR(|)
+    DEF_OPR (^)
+
+    constexpr EnumClassBit operator~() const { return ~m_val; }
+
+#undef DEF_OPR
+};
+
 #endif  // MEGDNN_CC_HOST
 
 }  // namespace megdnn
+
+#define _MEGDNN_DECBO_SINGLE_OPR(cls, op)                                    \
+    inline constexpr ::megdnn::EnumClassBit<cls> operator op(cls x, cls y) { \
+        return ::megdnn::EnumClassBit<cls>(x)                                \
+                op ::megdnn::EnumClassBit<cls>(y);                           \
+    }                                                                        \
+    inline constexpr ::megdnn::EnumClassBit<cls> operator op(                \
+            ::megdnn::EnumClassBit<cls> x, cls y) {                          \
+        return x op ::megdnn::EnumClassBit<cls>(y);                          \
+    }
+
+#define _MEGDNN_DECBO_SINGLE_OPR_ASSIGN(cls, op)          \
+    inline constexpr cls& operator op##=(cls& x, cls y) { \
+        x = x op ::megdnn::EnumClassBit<cls>(y);          \
+        return x;                                         \
+    }
+
+#define MEGDNN_DEF_ENUM_CLASS_BIT_OPR(cls)                          \
+    _MEGDNN_DECBO_SINGLE_OPR(cls, &)                                \
+    _MEGDNN_DECBO_SINGLE_OPR(cls, |)                                \
+    _MEGDNN_DECBO_SINGLE_OPR(cls, ^)                                \
+    _MEGDNN_DECBO_SINGLE_OPR_ASSIGN(cls, &)                         \
+    _MEGDNN_DECBO_SINGLE_OPR_ASSIGN(cls, |)                         \
+    _MEGDNN_DECBO_SINGLE_OPR_ASSIGN(cls, ^)                         \
+    inline constexpr ::megdnn::EnumClassBit<cls> operator~(cls x) { \
+        return ~::megdnn::EnumClassBit<cls>(x);                     \
+    }
 
 #include "megdnn/internal/visibility_epilogue.h"
 

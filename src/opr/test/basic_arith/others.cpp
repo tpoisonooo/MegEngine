@@ -2,7 +2,7 @@
  * \file src/opr/test/basic_arith/others.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -269,13 +269,13 @@ TEST(TestOprBasicArith, AddUpdateOtherStream) {
     };
 
     std::shared_ptr<HostTensorND> host_val = gen({SIZE});
-    auto cn_nccl = CompNode::load("gpu0").change_stream(CompNode::Stream::NCCL);
+    auto cn1 = CompNode::load("gpu0:0").change_stream(1);
     auto param = opr::SharedDeviceTensor::make(*graph, *host_val);
     param.node()->owner_opr()->node_prop().attribute().priority =
             std::numeric_limits<int>::max();
-    auto copy = opr::Copy::make(param, cn_nccl);
+    auto copy = opr::Copy::make(param, cn1);
     auto add = (copy + 3) * 5;
-    auto add_update = opr::AddUpdate::make(param, add, {}, {cn_nccl});
+    auto add_update = opr::AddUpdate::make(param, add, {}, {cn1});
 
     auto callback = opr::CallbackInjector::make(add_update, set_flag);
 
@@ -372,7 +372,7 @@ TEST(TestOprBasicArith, AddUpdateVolatile) {
             for (size_t i = 0; i < SIZE * 2; i ++) {
                 MGB_ASSERT_FLOAT_EQ(expect(i), z[i]);
             }
-            mgb_assert(host_sub.shape().total_nr_elems() == 4 && 
+            mgb_assert(host_sub.shape().total_nr_elems() == 4 &&
                 host_sub.layout().is_contiguous());
             for (size_t i = 0; i < 4; ++ i) {
                 size_t idx = i * (SIZE >> 1);
@@ -387,6 +387,27 @@ TEST(TestOprBasicArith, AddUpdateVolatile) {
         host_y->copy_from(*gen({2, 1})).sync();
         dev_x->copy_from(*host_x).sync(); // shape change
         run();
+    }
+}
+
+// AddUpdate in gradient path but no gradient flows through it
+TEST(TestOprBasicArith, AddUpdateInGradPath) {
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<> gen;
+    auto dest = opr::SharedDeviceTensor::make(*graph, *gen({42}));
+    auto host_x = gen({42});
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x);
+    // delta depends on x, but not differentiable wrt x
+    // a invalid grad is registered for AddUpdate to fix this case
+    auto delta = opr::VirtualDep::make({opr::SetGrad::make(x, nullptr), x});
+    auto updated = opr::AddUpdate::make(dest, delta);
+    auto y = opr::reduce_ax_sum(updated + x, 0);
+    auto dx = cg::grad(y, x);
+    HostTensorND host_dx;
+    auto func = graph->compile({make_callback_copy(dx, host_dx)});
+    func->execute();
+    for (size_t i = 0; i < host_dx.shape(0); ++i) {
+        MGB_ASSERT_FLOAT_EQ(host_dx.ptr<float>()[i], 1.f);
     }
 }
 
@@ -523,6 +544,49 @@ TEST(TestOprBasicArith, TypeCvt) {
     host_x->resize({3, 0});
     func->execute();
     ASSERT_EQ(TensorShape({3, 0}), host_y.shape());
+}
+
+TEST(TestOprBasicArith, TypeCvtBool) {
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<dtype::Int32> gen;
+    auto host_x = gen({3});
+    auto px = host_x->ptr<int>();
+    px[0] = -1;
+    px[1] = 0;
+    px[2] = 1;
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::TypeCvt::make(x, dtype::Bool{});
+    HostTensorND host_y;
+    auto func = graph->compile({make_callback_copy(y, host_y)});
+    func->execute();
+
+    auto py = host_y.ptr<bool>();
+    for (size_t i = 0;i < 3;i ++) {
+        ASSERT_EQ(static_cast<bool>(px[i]), py[i]);
+    }
+    ASSERT_EQ(TensorShape({3}), host_y.shape());
+}
+
+TEST(TestOprBasicArith, TypeCvtFromBool) {
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<dtype::Bool> gen;
+    auto host_x = gen({2});
+    auto px = host_x->ptr<bool>();
+    px[0] = true;
+    px[1] = false;
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::TypeCvt::make(x, dtype::Int32{});
+    HostTensorND host_y;
+    auto func = graph->compile({make_callback_copy(y, host_y)});
+    func->execute();
+
+    auto py = host_y.ptr<int>();
+    for (size_t i = 0;i < 2;i ++) {
+        ASSERT_EQ(static_cast<int>(px[i]), py[i]);
+    }
+    ASSERT_EQ(TensorShape({2}), host_y.shape());
 }
 
 TEST(TestOprBasicArith, ElemwiseMemFwd) {

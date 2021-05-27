@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/var_node_mem_mgr/static_mem_alloc.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -88,6 +88,15 @@ class StaticMemAlloc {
          * \param alignment address alignment, must be power of 2
          */
         virtual StaticMemAlloc& alignment(size_t alignment) = 0;
+
+        /*!
+         * \brief set interval padding at the end(except for overwritters)
+         *
+         * Must be called before calling add()
+         *
+         * \param padding interval padding
+         */
+        virtual StaticMemAlloc& padding(size_t padding) = 0;
 
 #if MGB_ENABLE_DEBUG_UTIL
         //! set by the caller to convert key to VarNode* for debug logging

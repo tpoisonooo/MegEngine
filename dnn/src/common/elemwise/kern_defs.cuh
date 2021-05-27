@@ -2,7 +2,7 @@
  * \file dnn/src/common/elemwise/kern_defs.cuh
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -87,7 +87,8 @@ namespace megdnn {
 //! define kernel for all float types
 #define DEF_KERN_FLOAT(_mode, _imp) \
     DEF_KERN(dt_float32, _mode, _imp); \
-    MEGDNN_INC_FLOAT16(DEF_KERN(dt_float16, _mode, _imp);)
+    DNN_INC_FLOAT16(DEF_KERN(dt_float16, _mode, _imp);) \
+    DNN_INC_FLOAT16(DEF_KERN(dt_bfloat16, _mode, _imp);)
 
 //! define kernel for all int types
 #define DEF_KERN_INT(_mode, _imp) \
@@ -138,6 +139,7 @@ namespace megdnn {
     DEF_KERN_FLOAT(H_SWISH, x * min(max(x + 3, 0.f), 6.f) * (1.f / 6.f));
 
     // int only
+    DEF_KERN(dt_bool, NOT, x ^ 1);
 
 #undef KERN_SIG
 
@@ -155,6 +157,9 @@ namespace megdnn {
     DEF_KERN_ALL(MAX, x > y ? x : y);
     DEF_KERN_ALL(MIN, x < y ? x : y);
     DEF_KERN_ALL(MUL, x* y);
+    DEF_KERN(dt_bool, AND, x && y);
+    DEF_KERN(dt_bool, OR, x || y);
+    DEF_KERN(dt_bool, XOR, x ^ y);
     DEF_KERN_INT(RMULH, round_mulh_saturate(x, y));
     DEF_KERN_ALL(SIGMOID_GRAD, x*(ctype(1) - x) * y);
     DEF_KERN_ALL(SUB, x - y);
@@ -168,6 +173,9 @@ namespace megdnn {
     DEF_KERN_ALL(LT, x < y);
     DEF_KERN_ALL(LEQ, x <= y);
     DEF_KERN_ALL(EQ, x == y);
+    DEF_KERN(dt_bool, LT, x < y);
+    DEF_KERN(dt_bool, LEQ, x <= y);
+    DEF_KERN(dt_bool, EQ, x == y);
 
     DEF_KERN_INT(FLOOR_DIV, x / y);
     DEF_KERN_FLOAT(FLOOR_DIV, floorf(x / y));

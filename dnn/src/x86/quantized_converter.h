@@ -2,7 +2,7 @@
  * \file dnn/src/x86/quantized_converter.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -11,7 +11,7 @@
 #pragma once
 
 #include <immintrin.h>
-#ifdef WIN32CMAKE
+#ifdef WIN32
 #include <avx2intrin.h>
 #include <avxintrin.h>
 #include <fmaintrin.h>
@@ -66,8 +66,10 @@ inline dt_quint8 QConverter::convert(const float& src, const uint8_t& zp) {
 
 template <>
 inline dt_qint32 QConverter::convert(const float& src) {
-    return dt_qint32(
-            saturate<int32_t, float>(std::round(src), -2147483648, 2147483647));
+    return dt_qint32(saturate<int32_t, float>(
+            std::round(src),
+            static_cast<float>(std::numeric_limits<int32_t>::min()),
+            static_cast<float>(std::numeric_limits<int32_t>::max())));
 }
 
 template <>

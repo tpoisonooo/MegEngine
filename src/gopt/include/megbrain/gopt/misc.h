@@ -2,7 +2,7 @@
  * \file src/gopt/include/megbrain/gopt/misc.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -10,6 +10,8 @@
  */
 
 #pragma once
+
+#include <vector>
 
 #include "megbrain/gopt/framework.h"
 
@@ -83,8 +85,63 @@ namespace gopt {
         void apply(OptState &opt) const override;
     };
 
+    class RemoveRedundantCopyPass final : public Pass {
+    private:
+        //! Remove the copy chain of form cpu -> cpu -> cpu,
+        //! cpu -> gpu -> cpu
+        static bool should_remove(const CompNode& A, const CompNode& B);
+    public:
+        const char * name() const override;
+        void apply(OptState &opt) const override;
+    };
+
     //! remove execution mask for const PPVs in conditional execution
     class CondExecConstPredicateFolding final : public Pass {
+    public:
+        const char* name() const override;
+        void apply(OptState& opt) const override;
+    };
+
+    //! scan allreduces of param grads
+    class PackAllReduceScanPass final : public Pass {
+    public:
+        const char* name() const override;
+        void apply(OptState& opt) const override;
+
+    private:
+        // check pattern param -> grad -> allreduce
+        static bool check_pattern(OperatorNodeBase* opr);
+    };
+
+    //! pack allreduces of param grads
+    class PackAllReduceReplacePass final : public Pass {
+    public:
+        class GroupInfo;
+
+        const char* name() const override;
+        void apply(OptState& opt) const override;
+
+        // collect allreduces and divide into groups
+        static uint64_t collect_groups(
+                OperatorNodeBase* opr,
+                ThinHashMap<uint64_t, std::shared_ptr<GroupInfo>>& group_info,
+                ThinHashMap<uint64_t, cg::OprNodeArray>& groups);
+
+        // divide groups into packs, max_size in MB
+        static void divide_packs(
+                const ThinHashMap<uint64_t, cg::OprNodeArray>& groups,
+                ThinHashMap<uint64_t, std::vector<cg::OprNodeArray>>& packs,
+                size_t max_size);
+
+        // insert packed operators and update replace_map
+        static void insert_packed_oprs(
+                size_t pack_id,
+                const cg::OprNodeArray& pack,
+                std::shared_ptr<GroupInfo> info,
+                ThinHashMap<VarNode*, VarNode*>& replace_map, int priority);
+    };
+
+    class RemoveShapeHintPass final : public Pass {
     public:
         const char* name() const override;
         void apply(OptState& opt) const override;

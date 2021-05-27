@@ -2,7 +2,7 @@
  * \file src/gopt/impl/basic_arith/inplace.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -18,6 +18,16 @@
 #include "megbrain/opr/utility.h"
 
 #include <cmath>
+
+#include "megbrain/utils/hash_ct.h"
+#include "midout.h"
+
+MIDOUT_DECL(megbrain_inplace)
+#define MIDOUT_B(tag) \
+    MIDOUT_BEGIN(megbrain_inplace, midout_iv(MGB_HASH_STR(tag))) {
+#define MIDOUT_E \
+    }            \
+    MIDOUT_END();
 
 using namespace mgb;
 using namespace opr;
@@ -150,8 +160,10 @@ bool gopt::has_inplace_basic_arith_opt(const cg::OperatorNodeBase& opr) {
 
 const inplace_optimize::OptimizerRegistry&
 inplace_optimize::optimizer_registry() {
+    MIDOUT_B("inplace_optimize::optimizer_registry")
     static OptimizerRegistry ret = make_optimizer_registry();
     return ret;
+    MIDOUT_E
 }
 
 inplace_optimize::OptimizerRegistry

@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/static_infer_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -98,6 +98,17 @@ class StaticInferManagerImpl final: public StaticInferManager {
                 eager eval
          */
         void update_mutable_src_shape(Tag tag);
+
+
+        /*!
+         * \brief get original deps given in the InferDesc which is registered
+         * by register_shape_infer or register_value_infer
+         *
+         * Note: the \p elem with DepType::SHAPE and InferType::CONST shows no
+         * deps since the StaticInferManagerImpl folds the infererence chain of
+         * the const var shape
+         */
+        DepVal get_deps(const DepElement &elem);
 
     private:
         friend class CompSeqManager;

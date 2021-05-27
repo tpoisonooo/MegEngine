@@ -18,17 +18,37 @@ pdef('PersistentOutputStorage').add_fields(
  add_const('int32', 'INVALID_AXIS', 'MAX_NDIM').
  add_fields('int32', 'axis', 'INVALID_AXIS'))
 
-(pdef('ExecutionPolicy', 'specify how to select an algorithm for an operator').
+(pdef('ExecutionPolicy', version=0, is_legacy=True).
  add_enum('Strategy',
           Doc('HEURISTIC', 'use heuristic to choose the fastest algorithm'),
-          Doc('HEURISTIC_REPRODUCIBLE', 'use heuristic to choose the fastest algorithm, ' 
-              'and the chosen algorithm is reproducible'), 
+          Doc('HEURISTIC_REPRODUCIBLE', 'use heuristic to choose the fastest algorithm, '
+              'and the chosen algorithm is reproducible'),
           Doc('PROFILE',
               'run possible algorithms on real device to find the best'),
           Doc('PROFILE_REPRODUCIBLE',
               'the fastest of profile result that is also reproducible'),
           Doc('PROFILE_HEURISTIC',
               'use profile result and heuristic to choose the fastest algorithm')).
+ add_fields('uint64',
+            Doc('workspace_limit', 'workspace limit in bytes'),
+            str(2**64-1)+'ull'))
+
+(pdef('ExecutionPolicy', 'specify how to select an algorithm for an operator', version=1).
+ add_bit_combination_enum('Strategy',
+          Doc('HEURISTIC', 'use heuristic to choose the fastest algorithm'),
+          Doc('PROFILE',
+              'run possible algorithms on real device to find the best'),
+          Doc('REPRODUCIBLE',
+              'when profile or heuristic algo selection it require the algos'
+              'must be reproducible'),
+          Doc('OPTIMIZED',
+              'profile require algos are optmized to achieve fast-profile'),
+          default=('HEURISTIC',),
+          member_alias=[(('HEURISTIC', 'REPRODUCIBLE'), 'HEURISTIC_REPRODUCIBLE'),
+                        (('PROFILE', 'REPRODUCIBLE'), 'PROFILE_REPRODUCIBLE'),
+                        (('PROFILE', 'HEURISTIC'), 'PROFILE_HEURISTIC'),
+                        (('OPTIMIZED',), 'OPTMIZED'),
+                        ]).
  add_fields('uint64',
             Doc('workspace_limit', 'workspace limit in bytes'),
             str(2**64-1)+'ull'))
@@ -46,7 +66,7 @@ pdef('PersistentOutputStorage').add_fields(
 
 (pdef('CollectiveComm', 'collective communication between multiple computing '
       'nodes on localhost')
- .add_enum('Mode',
+ .add_enum(Doc('Mode', 'mode of collective communication'),
            Doc('REDUCE_SUM', 'reduce by sum to output computing node'),
            Doc('BROADCAST', 'copy input value to each output computing node'),
            Doc('ALL_GATHER', 'each output comp node gets the concatenated '
@@ -56,7 +76,11 @@ pdef('PersistentOutputStorage').add_fields(
            Doc('ALL_REDUCE_SUM', 'every output gets the sum of all inputs'),
            Doc('ALL_REDUCE_MAX', 'every output gets the max of all inputs'),
            Doc('ALL_REDUCE_MIN', 'every output gets the min of all inputs'),
-           Doc('ALL_REDUCE_PROD', 'every output gets the prod of all inputs')))
+           Doc('ALL_REDUCE_PROD', 'every output gets the prod of all inputs'),
+           Doc('GATHER', 'concat inputs to one node'),
+           Doc('SCATTER', 'scatter input to each output computing node'),
+           Doc('ALL_TO_ALL', 'scatter inputs and gather them on each computing node'),
+           name_field='mode'))
 
 (pdef('FakeSerializedDType',
       'HACK: The tag of this param def is actually used for another '
@@ -139,3 +163,5 @@ pdef('PersistentOutputStorage').add_fields(
                ' no branch is taken')
            )
  )
+
+(pdef('NvOf', 'opr Implements NVIDIA Optical Flow SDK.').add_fields('uint32', 'precision', 1))

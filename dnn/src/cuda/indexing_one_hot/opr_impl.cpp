@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/indexing_one_hot/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -53,7 +53,7 @@ void IndexingOneHotForwardImpl::exec(
     switch (src.layout.dtype.enumv()) {
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
         default:
-            megdnn_throw(megdnn_mangle("bad dtype"));
+            megdnn_throw("bad dtype");
     }
 #undef cb
 }
@@ -80,7 +80,7 @@ void IndexingSetOneHotForwardImpl::exec(
     switch (data.layout.dtype.enumv()) {
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
         default:
-            megdnn_throw(megdnn_mangle("bad dtype"));
+            megdnn_throw("bad dtype");
     }
 #undef cb
 }

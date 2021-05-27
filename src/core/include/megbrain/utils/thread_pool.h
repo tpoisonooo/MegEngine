@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/utils/thread_pool.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -80,7 +80,7 @@ public:
     ~ThreadPool();
 
 private:
-    size_t m_nr_threads = 0;
+    const size_t m_nr_threads = 0;
     //! Indicate whether the main thread have binding
     bool m_main_affinity_flag;
     //! The callback binding the threads to cores

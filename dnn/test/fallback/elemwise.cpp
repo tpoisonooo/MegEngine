@@ -2,7 +2,7 @@
  * \file dnn/test/fallback/elemwise.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -27,7 +27,7 @@ TYPED_TEST_CASE(FALLBACK_ELEMWISE, elemwise::test_types);
 TYPED_TEST(FALLBACK_ELEMWISE, run) {
     elemwise::run_test<TypeParam>(this->handle());
 }
-
+#if MEGDNN_WITH_BENCHMARK
 TEST_F(FALLBACK, BENCHMARK_ELEMWISE) {
     auto naive_handle = create_cpu_handle(2);
     auto run = [&](const TensorShape &shp0, const TensorShape &shp1) {
@@ -72,6 +72,7 @@ TEST_F(FALLBACK, BENCHMARK_ELEMWISE) {
     // non-contig, fallback to naive
     run({1024, 1024, 32}, {1024, 1, 32});
 }
+#endif
 
 // vim: syntax=cpp.doxygen
 

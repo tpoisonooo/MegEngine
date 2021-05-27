@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/cudnn_wrapper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -54,9 +54,9 @@ cudnnDataType_t to_cudnn_dtype(DType type,
 #endif
         default:
 #if CUDNN_MAJOR >= 6
-    megdnn_throw(megdnn_mangle("dtype must be float16/float32/int8/int32"));
+    megdnn_throw("dtype must be float16/float32/int8/int32");
 #else
-    megdnn_throw(megdnn_mangle("dtype must be float16/float32"));
+    megdnn_throw("dtype must be float16/float32");
 #endif
     }
 
@@ -165,6 +165,23 @@ void TensorDesc::set(const TensorLayout& layout,
     }
 }
 
+std::string TensorDesc::to_string() {
+    cudnnDataType_t data_type;
+    int n;
+    int c;
+    int h;
+    int w;
+    int n_stride;
+    int c_stride;
+    int h_stride;
+    int w_stride;
+    cudnn_check(cudnnGetTensor4dDescriptor(desc, &data_type, &n, &c, &h, &w,
+                                           &n_stride, &c_stride, &h_stride,
+                                           &w_stride));
+    return ssprintf("<dtype_%d, %d,%d,%d,%d(%d,%d,%d,%d)>", data_type, n, c, h,
+                    w, n_stride, c_stride, h_stride, w_stride);
+}
+
 template <typename Param>
 FilterDesc<Param>::FilterDesc() {
     cudnn_check(cudnnCreateFilterDescriptor(&desc));
@@ -173,6 +190,20 @@ FilterDesc<Param>::FilterDesc() {
 template <typename Param>
 FilterDesc<Param>::~FilterDesc() {
     cudnn_check(cudnnDestroyFilterDescriptor(desc));
+}
+
+template <typename Param>
+std::string FilterDesc<Param>::to_string() {
+    cudnnDataType_t data_type;
+    cudnnTensorFormat_t format;
+    int k;
+    int c;
+    int h;
+    int w;
+    cudnn_check(cudnnGetFilter4dDescriptor(desc, &data_type, &format, &k, &c,
+                                           &h, &w));
+    return ssprintf("<dtype_%d, format_%d, %d,%d,%d,%d>", data_type,format, k, c, h,
+                    w);
 }
 
 template <typename Param>
@@ -187,11 +218,15 @@ void FilterDesc<Param>::set(
     megdnn_assert(filter_meta.group == 1);
 #endif
 
+    auto filter_format = filter_meta.format;
+    if (filter_format == param::ConvBias::Format::NCHW4_NCHW) {
+        filter_format = param::ConvBias::Format::NCHW4;
+    }
     // cuDNN version 6 or below filter_meta.group always is 1.
     // So it is compatible for all cuDNN versions.
     cudnn_check(cudnnSetFilter4dDescriptor(
-            desc, to_cudnn_dtype(filter_meta.dtype, filter_meta.format),
-            to_cudnn_format(filter_meta.format),
+            desc, to_cudnn_dtype(filter_meta.dtype, filter_format),
+            to_cudnn_format(filter_format),
             filter_meta.ocpg * filter_meta.group,  // cudnn 6 group always be 1
             filter_meta.icpg, filter_meta.spatial[0], filter_meta.spatial[1]));
 }
@@ -224,7 +259,7 @@ void ConvDesc::set(DType data_type, const param::Convolution& param,
             mode = CUDNN_CONVOLUTION;
             break;
         default:
-            megdnn_throw(megdnn_mangle("conv mode must be conv or xcorr."));
+            megdnn_throw("conv mode must be conv or xcorr.");
     }
     cudnnDataType_t compute_type;
     MEGDNN_MARK_USED_VAR(compute_type);
@@ -240,7 +275,7 @@ void ConvDesc::set(DType data_type, const param::Convolution& param,
         compute_type = CUDNN_DATA_INT32;
 #endif
     } else {
-        megdnn_throw(megdnn_mangle("unspport data type for conv bias"));
+        megdnn_throw("unspport data type for conv bias");
     }
 #if CUDNN_MAJOR >= 7
     cudnn_check(cudnnSetConvolutionGroupCount(desc, nr_group));
@@ -410,7 +445,7 @@ void Conv3DDesc::set(const param::Convolution3D& param, const size_t nr_group) {
             mode = CUDNN_CONVOLUTION;
             break;
         default:
-            megdnn_throw(megdnn_mangle("conv mode must be conv or xcorr."));
+            megdnn_throw("conv mode must be conv or xcorr.");
     }
 #if CUDNN_MAJOR >= 7
     cudnn_check(cudnnSetConvolutionGroupCount(desc, nr_group));
@@ -428,6 +463,137 @@ void Conv3DDesc::set(const param::Convolution3D& param, const size_t nr_group) {
     cudnn_check(cudnnSetConvolutionNdDescriptor(
             desc, 3, padA, filterStrideA, dilationA, mode, CUDNN_DATA_FLOAT));
 }
+
+////////////////////////// CudnnAlgoPack //////////////////////////
+
+#define V1(v) #v
+#define V(v) V1(v)
+#define DEF_NAME(NAME) \
+    #NAME "v" V(CUDNN_MAJOR) "." V(CUDNN_MINOR) "." V(CUDNN_PATCHLEVEL)
+#define DEF_ALGO(NAME, PROD)           \
+    {                                  \
+        NAME, { DEF_NAME(NAME), PROD } \
+    }
+
+#if !(CUDNN_MAJOR >= 6 || CUDNN_MINOR >= 1)
+#pragma message "not latest cudnn"
+#endif
+
+const std::unordered_map<cudnnConvolutionBwdDataAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv_bwd_data_algos() {
+    static const std::unordered_map<cudnnConvolutionBwdDataAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_0, false),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_1, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT_TILING, true),
+#if CUDNN_MAJOR >= 5
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD, true),
+#if CUDNN_MAJOR >= 6 || CUDNN_MINOR >= 1
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED,
+                         true),
+#endif
+#endif
+            };
+
+    return algos;
+}
+
+const std::unordered_map<cudnnConvolutionBwdFilterAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv_bwd_flt_algos() {
+    static const std::unordered_map<cudnnConvolutionBwdFilterAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0, false),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_3, false),
+#if CUDNN_MAJOR >= 6 || (CUDNN_MAJOR >= 5 && CUDNN_MINOR >= 1)
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD_NONFUSED,
+                         true),
+#if CUDNN_MAJOR >= 6
+                DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT_TILING, true),
+#endif
+#endif
+
+            };
+
+    return algos;
+}
+
+
+const std::unordered_map<cudnnConvolutionFwdAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv_fwd_algos() {
+    static const std::unordered_map<cudnnConvolutionFwdAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,
+                         true),
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_GEMM, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_DIRECT, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_FFT, true),
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING, true),
+
+#if CUDNN_MAJOR >= 5
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD, true),
+#if CUDNN_MAJOR >= 6 || CUDNN_MINOR >= 1
+                DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED, true),
+#endif
+#endif
+
+            };
+
+    return algos;
+}
+
+const std::unordered_map<cudnnConvolutionBwdDataAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv3d_bwd_data_algos() {
+    static const std::unordered_map<cudnnConvolutionBwdDataAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_0, false),
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_1, true),
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT_TILING, true),
+            };
+
+    return algos;
+}  // namespace cuda
+
+const std::unordered_map<cudnnConvolutionBwdFilterAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv3d_bwd_flt_algos() {
+#pragma message \
+        "fp16 dilated conv with odd size filter, only algo_1 works, need focus on doc"
+    static const std::unordered_map<cudnnConvolutionBwdFilterAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0, false),
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1, true),
+                    DEF_ALGO(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_3, false),
+            };
+
+    return algos;
+}
+
+const std::unordered_map<cudnnConvolutionFwdAlgo_t, CudnnAlgoPack::Attr>
+CudnnAlgoPack::conv3d_fwd_algos() {
+    static const std::unordered_map<cudnnConvolutionFwdAlgo_t,
+                                    CudnnAlgoPack::Attr>
+            algos = {
+                    DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM, true),
+                    DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,
+                             true),
+                    DEF_ALGO(CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING, true),
+            };
+
+    return algos;
+}
+
+#undef DEF_ALGO
+#undef DEF_NAME
+#undef V
+#undef V1
 
 }  // namespace cuda
 }  // namespace megdnn

@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/cg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,6 +16,11 @@
 #include "megbrain/graph/static_infer.h"
 #include "megbrain/graph/seq_comp_node_opt.h"
 #include "megbrain/utils/event.h"
+#include "megbrain/system.h"
+
+#if MGB_ENABLE_JSON
+#include "megbrain/utils/json.h"
+#endif
 
 namespace mgb {
 namespace cg {
@@ -76,6 +81,82 @@ public:
     virtual size_t static_alloc_version(ComputingGraph* graph) const;
 };
 
+/**
+ * \brief common optimize options, it both can be used for optimize for
+ * inference in graph dump but also used in graph optimization in runtime.
+ */
+struct GraphCommonOptimizeOptions {
+    //! whether to enable IO in float16 compute in float32
+    bool f16_io_f32_comp = false;
+    //! whether to enable tranform to pure float16 model
+    bool f16_io_comp = false;
+    //! whether to enable conv bias nonlinearity fusion
+    bool fuse_conv_bias_nonlinearity = false;
+    //! fuse pattern like ReLU(conv_bias(x, w, b) + z) or conv_bias(x, w, b)
+    //! + z -> conv_bias(x, w, b, z)
+    bool fuse_conv_bias_with_z = false;
+    //! whether to enable weight preprocess, if enabled it may use more
+    //! memory, default disable now, when weight preprocess is enabled, the
+    //! input shape should no change
+    bool weight_preprocess = false;
+    //! fuse preprocess patten, like astype + pad_channel + dimshuffle
+    bool fuse_preprocess = false;
+    enum LayoutTransform : uint32_t {
+        DEFAULT,
+        NCHW4,       ///< compute using NCHW4 tensor format
+        NHWCD4,      ///< compute using NHWCD4 tensor format
+        NCHW88,      ///< compute using NCHW88 tensor format
+        NCHW44,      ///< compute using NCHW44 tensor format
+        NCHW44_DOT,  ///< compute using NCHW44_DOT tensor format
+        NCHW32,      ///< compute using NCHW32 tensor format, used for
+                     ///< tensorcore
+        CHWN4,       ///< compute using CHWN4 tensor format, transformed mainly
+                     ///< used for cuda
+    };
+    LayoutTransform layout_transform = LayoutTransform::DEFAULT;
+
+#define SET(n)                                  \
+    GraphCommonOptimizeOptions& enable_##n() {  \
+        n = true;                               \
+        return *this;                           \
+    }                                           \
+    GraphCommonOptimizeOptions& disable_##n() { \
+        n = false;                              \
+        return *this;                           \
+    }                                           \
+    bool has_set_##n() { return n == true; }
+
+    SET(f16_io_f32_comp);
+    SET(f16_io_comp);
+    SET(fuse_conv_bias_nonlinearity);
+    SET(fuse_conv_bias_with_z);
+    SET(fuse_preprocess);
+    SET(weight_preprocess);
+#undef SET
+#define SET(_trans, _trans_capital)                                 \
+    GraphCommonOptimizeOptions& enable_##_trans() {                 \
+        mgb_assert(layout_transform == LayoutTransform::DEFAULT);   \
+        layout_transform = LayoutTransform::_trans_capital;         \
+        return *this;                                               \
+    }                                                               \
+    GraphCommonOptimizeOptions& disable_##_trans() {                \
+        layout_transform = LayoutTransform::DEFAULT;                \
+        return *this;                                               \
+    }                                                               \
+    bool has_set_##_trans() const {                                 \
+        return layout_transform == LayoutTransform::_trans_capital; \
+    }
+
+    SET(nchw4, NCHW4);
+    SET(nhwcd4, NHWCD4);
+    SET(nchw88, NCHW88);
+    SET(nchw44, NCHW44);
+    SET(nchw44_dot, NCHW44_DOT);
+    SET(nchw32, NCHW32);
+    SET(chwn4, CHWN4);
+#undef SET
+};
+
 /*!
  * \brief Computing graph.
  *
@@ -97,6 +178,8 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
         size_t id() const {
             return m_id;
         }
+
+        virtual size_t next_node_id() = 0;
 
         static std::shared_ptr<ComputingGraph> make();
 
@@ -160,6 +243,26 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
                 std::unique_ptr<OperatorNodeBase> opr) = 0;
 
         /*!
+         * \brief used by OperatorNodeBase to allocate its outputs
+         */
+        template<typename... Args>
+        VarNode* alloc_varnode(Args&&... args) {
+            return new(alloc_varnode_storage()) VarNode(std::forward<Args>(args)...);
+        }
+
+        inline void free_varnode(VarNode* var) {
+            var->~VarNode();
+            free_varnode_storage(var);
+        }
+    protected:
+        /*!
+         * \brief provided by impl to support alloc_varnode
+         */
+        virtual void* alloc_varnode_storage() = 0;
+
+        virtual void free_varnode_storage(void *ptr) = 0;
+    public:
+        /*!
          * \brief get current computing sequence
          */
         virtual AsyncExecutable* current_comp_seq() = 0;
@@ -170,6 +273,8 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
          */
         virtual const VarReceiverInfo& var_receiver_in_current_comp_seq(
                 const VarNode *var) const = 0;
+
+        virtual std::string get_mem_allocation_info() const = 0;
 
         /*!
          * \brief find var node by its ID
@@ -225,17 +330,13 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
             } seq_opt;
 
             //! graph optimization options
-            struct GraphOpt {
+            struct GraphOpt : GraphCommonOptimizeOptions {
                 //! whether to enable JIT; JIT would also be enabled at O3
                 //! this value indicates JIT level: 1 for basic elemwise opr; 2
                 //! for including reduce oprs
                 uint8_t jit = 0;
                 //! whether to enable fine-grained TensorRT opr replace
                 bool tensorrt = false;
-                //! whether to enable fast-run profiled winograd opr replace
-                bool winograd_transform = false;
-                //! whether to enable nchw4->chwn4 opr replace
-                bool enable_chwn4 = false;
             } graph_opt;
 
             //! get attribute for an operator
@@ -253,6 +354,26 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
              * <0: corresponding level, with result check for debug
              */
             int16_t graph_opt_level = 2;
+
+            /*!
+             * disable inplace arith transformations during graph
+             *    construction
+             * it effectively disable level-1 graph optimization
+             * only for internal use during de-serialization
+             */
+            bool disable_inplace_arith_opt = false;
+
+            /*!
+             * max size of allreduce packs in MB
+             * set this option to zero to disable PackAllReducePass
+             */
+            int16_t allreduce_pack_max_size = 0;
+
+            /*!
+             * do not pack the first n allreduces
+             * PackAllReducePass disabled if allreduce_pack_max_size is zero
+             */
+            int16_t allreduce_pack_ignore_first = 2;
 
             /*!
              * set logging level, larger number means more verbose
@@ -278,6 +399,12 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
             //! force dynamic memory alloc for all vars
             bool force_dynamic_alloc = false;
 
+            /*!
+             * force dynamic memory alloc for output vars which are used as
+             * CallbackCaller input when call compile() function
+             */
+            bool force_output_dynamic_alloc = false;
+
             //! whether to perform var sanity check on first run
             bool var_sanity_check_first_run = true;
 
@@ -293,6 +420,15 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
 
             //! whether to enable sublinear memory optimization
             bool enable_sublinear_memory_opt = false;
+
+            //! Control parameter for sublinear memory optimization
+            struct SublinearMemConfig {
+                int thresh_nr_try = 10;
+                int genetic_nr_iter = 0;
+                int genetic_pool_size = 20;
+                int lb_memory = 0;
+                int num_worker = sys::get_cpu_count() / 2;
+            } sublinear_mem_config;
 
             //! do not re-profile to select best impl algo when input shape
             //! changes (use previous algo)
@@ -344,6 +480,19 @@ class ComputingGraph : public std::enable_shared_from_this<ComputingGraph>,
             //! whether to evaulate var node values as they are inserted
             bool eager_evaluation = false;
 #endif
+
+            bool imperative_proxy_graph = false;
+
+            /*!
+             * Request that operators should not force update their inputs.
+             *
+             * THIS FLAG IS RESERVED FOR INTERNAL USE
+             *
+             * When this flag is set, operators like AddUpdate and BatchNorm
+             * will still attempt to inplace update their inputs, but failing
+             * to do so will not be considered as an error.
+             */
+            bool no_force_inplace = false;
 
             //! add extra deps for the comp seq if a specific var is dependent
             ThinHashMap<VarNode*, VarNodeArray> extra_vardeps;
@@ -513,6 +662,7 @@ SymbolVar SymbolVar::insert_single_output_opr(Args &&...args) const {
     return m_node->owner_graph()->insert_opr(
             std::make_unique<Node>(std::forward<Args>(args)...))->output(0);
 }
+
 
 } // namespace cg
 } // namespace mgb

@@ -7,9 +7,13 @@ if(NOT "$ENV{LIBRARY_PATH}" STREQUAL "")
     string(REPLACE ":" ";" SYSTEM_LIBRARY_PATHS $ENV{LIBRARY_PATH})
 endif()
 
-if(MGE_CUDA_USE_STATIC)
+if("${CUDNN_ROOT_DIR}" STREQUAL "" AND NOT "$ENV{CUDNN_ROOT_DIR}"  STREQUAL "")
+    set(CUDNN_ROOT_DIR $ENV{CUDNN_ROOT_DIR})
+endif()
+
+if(MGE_CUDA_USE_STATIC AND NOT MGE_WITH_CUDNN_SHARED)
     find_library(CUDNN_LIBRARY 
-        NAMES libcudnn_static.a libcudnn_static.lib
+        NAMES libcudnn_static.a cudnn.lib
         PATHS $ENV{LD_LIBRARY_PATH} ${CUDNN_ROOT_DIR} ${PC_CUDNN_LIBRARY_DIRS} ${CMAKE_INSTALL_PREFIX}
         HINTS ${SYSTEM_LIBRARY_PATHS}
         PATH_SUFFIXES lib lib64
@@ -30,7 +34,7 @@ endif()
 get_filename_component(__found_cudnn_root ${CUDNN_LIBRARY}/../.. REALPATH)
 find_path(CUDNN_INCLUDE_DIR 
     NAMES cudnn.h
-    HINTS ${PC_CUDNN_INCLUDE_DIRS} ${CUDNN_ROOT_DIR} ${CUDA_TOOLKIT_INCLUDE} ${__found_cudnn_root}
+    HINTS $ENV{PC_CUDNN_INCLUDE_DIRS} ${CUDNN_ROOT_DIR} ${CUDA_TOOLKIT_INCLUDE} ${__found_cudnn_root}
     PATH_SUFFIXES include 
     DOC "Path to CUDNN include directory." )
 
@@ -38,7 +42,12 @@ if(CUDNN_INCLUDE_DIR STREQUAL "CUDNN_INCLUDE_DIR-NOTFOUND")
     message(FATAL_ERROR "Can not find CuDNN Library")
 endif()
 
-file(READ ${CUDNN_INCLUDE_DIR}/cudnn.h CUDNN_VERSION_FILE_CONTENTS)
+if(EXISTS ${CUDNN_INCLUDE_DIR}/cudnn_version.h)
+    file(READ ${CUDNN_INCLUDE_DIR}/cudnn_version.h CUDNN_VERSION_FILE_CONTENTS)
+else()
+    file(READ ${CUDNN_INCLUDE_DIR}/cudnn.h CUDNN_VERSION_FILE_CONTENTS)
+endif()
+
 string(REGEX MATCH "define CUDNN_MAJOR * +([0-9]+)"
     CUDNN_MAJOR_VERSION "${CUDNN_VERSION_FILE_CONTENTS}")
 string(REGEX REPLACE "define CUDNN_MAJOR * +([0-9]+)" "\\1"
@@ -51,7 +60,9 @@ string(REGEX MATCH "define CUDNN_PATCHLEVEL * +([0-9]+)"
     CUDNN_PATCH_VERSION "${CUDNN_VERSION_FILE_CONTENTS}")
 string(REGEX REPLACE "define CUDNN_PATCHLEVEL * +([0-9]+)" "\\1"
     CUDNN_PATCH_VERSION "${CUDNN_PATCH_VERSION}")  
-set(CUDNN_VERSION ${CUDNN_MAJOR_VERSION}.${CUDNN_MINOR_VERSION})
+set(CUDNN_VERSION ${CUDNN_MAJOR_VERSION}.${CUDNN_MINOR_VERSION}.${CUDNN_PATCH_VERSION})
+
+
 
 if(MGE_CUDA_USE_STATIC)
     add_library(libcudnn STATIC IMPORTED)
@@ -63,4 +74,4 @@ set_target_properties(libcudnn PROPERTIES
     IMPORTED_LOCATION ${CUDNN_LIBRARY}
     INTERFACE_INCLUDE_DIRECTORIES ${CUDNN_INCLUDE_DIR})
 
-message("-- Found CuDNN: ${__found_cudnn_root} (found version: ${CUDNN_VERSION})")
+message(STATUS "Found CuDNN: ${__found_cudnn_root} (found version: ${CUDNN_VERSION})")

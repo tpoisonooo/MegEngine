@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/mask_conv/opr_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -30,7 +30,7 @@ public:
                                   const TensorLayout& dst) override {
         MEGDNN_MARK_USED_VAR(mask);
         m_conv_opr->param() = param();
-        return m_conv_opr->get_workspace_in_bytes(src, filter, dst);
+        return m_conv_opr->get_workspace_in_bytes(src, filter, dst, nullptr);
     }
 
 private:

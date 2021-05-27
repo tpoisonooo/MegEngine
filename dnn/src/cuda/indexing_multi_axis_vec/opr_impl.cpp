@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/indexing_multi_axis_vec/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -120,6 +120,7 @@ void ExecImpl<Opr>::dispatch_exec() {
         case DTypeTrait<_dtype>::enumv: \
             return dispatch_exec_ctype<DTypeTrait<_dtype>::ctype>();
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
+        cb(::megdnn::dtype::Bool)
 #undef cb
         default:
             megdnn_throw("bad dtype");
@@ -198,7 +199,7 @@ size_t IndexingIncrMultiAxisVecImpl::get_workspace_in_bytes(
 void IndexingIncrMultiAxisVecImpl::exec(
         _megdnn_tensor_inout data, _megdnn_tensor_in value,
         const IndexDesc &index, _megdnn_workspace workspace) {
-    MEGDNN_INC_FLOAT16(
+    DNN_INC_FLOAT16(
             megdnn_assert(data.layout.dtype != dtype::Float16(),
             "float16 incr on cuda currently not supported"));
     auto info = check_exec(data.layout, value.layout, index, workspace.size);

@@ -2,7 +2,7 @@
  * \file dnn/test/cpu/convolution.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,19 +26,76 @@ Convolution::Param gconv_param(Convolution::Param p) {
 
 } // anonymous namespace
 
-TEST_F(CPU, CONVOLUTION)
-{
+#define CONVOLUTION_ARG_DIV_SIZE 100
+TEST_F(CPU, CONVOLUTION_0) {
     using namespace convolution;
     std::vector<TestArg> args = get_args();
+    auto loop_size = args.size();
+    ASSERT_GT(loop_size, CONVOLUTION_ARG_DIV_SIZE);
     Checker<Convolution> checker(handle());
-    for (auto &&arg: args) {
-        checker.set_param(arg.param).execs({arg.src, arg.filter, {}});
+    for (unsigned int i = 0; i < CONVOLUTION_ARG_DIV_SIZE; i++) {
+        checker.set_param(args[i].param)
+                .execs({args[i].src, args[i].filter, {}});
     }
 }
 
-TEST_F(CPU, CONV_CONFIG_COMBINATIONS) {
-    convolution::test_conv_config_combinations(handle(), true, false, false);
+#define CONVOLUTION1_ARG_LOOP_END_TIME (CONVOLUTION_ARG_DIV_SIZE + 205)
+
+TEST_F(CPU, CONVOLUTION_1) {
+    using namespace convolution;
+    std::vector<TestArg> args = get_args();
+    auto loop_size = args.size();
+    ASSERT_GT(loop_size, CONVOLUTION_ARG_DIV_SIZE);
+    ASSERT_GT(loop_size, CONVOLUTION1_ARG_LOOP_END_TIME);
+    Checker<Convolution> checker(handle());
+    for (unsigned int i = CONVOLUTION_ARG_DIV_SIZE;
+         i < CONVOLUTION1_ARG_LOOP_END_TIME; i++) {
+        checker.set_param(args[i].param)
+                .execs({args[i].src, args[i].filter, {}});
+    }
 }
+
+#define CONVOLUTION2_ARG_LOOP_END_TIME (CONVOLUTION1_ARG_LOOP_END_TIME + 200)
+TEST_F(CPU, CONVOLUTION_2) {
+    using namespace convolution;
+    std::vector<TestArg> args = get_args();
+    auto loop_size = args.size();
+    ASSERT_GT(loop_size, CONVOLUTION2_ARG_LOOP_END_TIME);
+    Checker<Convolution> checker(handle());
+    for (unsigned int i = CONVOLUTION1_ARG_LOOP_END_TIME;
+         i < CONVOLUTION2_ARG_LOOP_END_TIME; i++) {
+        checker.set_param(args[i].param)
+                .execs({args[i].src, args[i].filter, {}});
+    }
+}
+
+TEST_F(CPU, CONVOLUTION_3) {
+    using namespace convolution;
+    std::vector<TestArg> args = get_args();
+    auto loop_size = args.size();
+    ASSERT_GT(loop_size, CONVOLUTION2_ARG_LOOP_END_TIME);
+    Checker<Convolution> checker(handle());
+    for (unsigned int i = CONVOLUTION2_ARG_LOOP_END_TIME; i < loop_size; i++) {
+        checker.set_param(args[i].param)
+                .execs({args[i].src, args[i].filter, {}});
+    }
+}
+
+#undef CONVOLUTION_ARG_DIV_SIZE
+#undef CONVOLUTION1_ARG_LOOP_END_TIME
+#undef CONVOLUTION2_ARG_LOOP_END_TIME
+
+#define CB_CONV_CONFIG_COMBINATIONS(KSIZE)                                \
+    TEST_F(CPU, CONV_CONFIG_COMBINATIONS_KSIZE_1_KSIZE_##KSIZE) {         \
+        convolution::test_conv_config_combinations(KSIZE, handle(), true, \
+                                                   false, false);         \
+    }
+
+// FIXME: only test ksize=1, will crash on IOS, so we tmp test ksize_1##other_ksize
+CB_CONV_CONFIG_COMBINATIONS(2);
+CB_CONV_CONFIG_COMBINATIONS(3);
+CB_CONV_CONFIG_COMBINATIONS(5);
+#undef CB_CONV_CONFIG_COMBINATIONS
 
 #if MEGDNN_WITH_BENCHMARK
 TEST_F(CPU, BENCHMARK_CONVOLUTION)

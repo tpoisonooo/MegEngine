@@ -2,7 +2,7 @@
  * \file dnn/src/x86/utils.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -13,6 +13,17 @@
 #include <cstddef>
 #include <vector>
 #include "src/common/utils.h"
+
+#if MEGDNN_X86_WITH_MKL
+#include <mkl.h>
+//! As INTEL_MKL_VERSION >= 20190001 support SUPPORT_MKL_PACKED_GEMM
+#if INTEL_MKL_VERSION >= 20190001
+#define SUPPORT_MKL_PACKED_GEMM 1
+#else
+#define SUPPORT_MKL_PACKED_GEMM 0
+#endif
+
+#endif
 
 namespace megdnn {
 namespace x86 {

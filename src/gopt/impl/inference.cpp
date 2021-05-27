@@ -2,7 +2,7 @@
  * \file src/gopt/impl/inference.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -14,6 +14,9 @@
 #include "megbrain/gopt/basic_arith.h"
 #include "megbrain/graph/event.h"
 #include "megbrain/opr/dnn/batch_norm.h"
+#include "megbrain/opr/dnn/local.h"
+#include "megbrain/opr/search_policy/algo_chooser_helper.h"
+#include "megbrain/opr/search_policy/profiler.h"
 #include "megbrain/utils/shared_set.h"
 #include "megbrain/serialization/opr_shallow_copy.h"
 #include "megbrain/opr/basic_arith.h"
@@ -25,6 +28,8 @@
 #include "megbrain/opr/tensor_manip.h"
 #include "megbrain/opr/imgproc.h"
 #include "megbrain/opr/nn_int.h"
+#include "megbrain/opr/tensor_gen.h"
+#include "megbrain/utils/hash_ct.h"
 
 #include "megdnn/tensor_format.h"
 
@@ -34,11 +39,20 @@
 
 #include "megbrain/gopt/misc.h"
 
+#include "megbrain/utils/hash_ct.h"
+#include "midout.h"
+
+MIDOUT_DECL(megbrain_inference)
+#define MIDOUT_B(tag) \
+    MIDOUT_BEGIN(megbrain_inference, midout_iv(MGB_HASH_STR(tag))) {
+#define MIDOUT_E \
+    }            \
+    MIDOUT_END();
+
 using namespace mgb;
 using namespace gopt;
 
 namespace {
-
 
 template <typename SharedDeviceTensor, typename MultipleDeviceTensorHolder>
 void param_merge(OptState& opt_state) {
@@ -87,7 +101,7 @@ void param_merge(OptState& opt_state) {
     rewriter.apply_inplace();
 }
 
-}
+}  // namespace
 
 /* ================ global functions ================ */
 
@@ -102,28 +116,24 @@ SymbolVarArray gopt::optimize_for_inference(
 }
 
 namespace {
-void modify_conv_policy(opr::mixin::Convolution& conv,
-                        megdnn::param::ExecutionPolicy::Strategy strategy) {
+void modify_conv_strategy(
+        opr::mixin::AlgoChooserHelper& conv,
+        opr::mixin::AlgoChooserHelper::ExecutionPolicy::Strategy strategy) {
     auto policy = conv.execution_policy_transient();
     policy.strategy = strategy;
     conv.set_execution_policy(policy);
 }
 
 template <typename Opr>
-void inplace_conv_opr_profile_modifier(OperatorNodeBase& opr) {
-    modify_conv_policy(
+void inplace_conv_opr_modifier(
+        OperatorNodeBase& opr,
+        opr::mixin::AlgoChooserHelper::ExecutionPolicy::Strategy strategy) {
+    modify_conv_strategy(
             opr.cast_final_safe<Opr>(),
-            opr::mixin::Convolution::ExecutionPolicy::Strategy::PROFILE);
+            strategy);
 }
 
-template <typename Opr>
-void inplace_conv_opr_profile_cache_modifier(OperatorNodeBase& opr) {
-    modify_conv_policy(opr.cast_final_safe<Opr>(),
-                       opr::mixin::Convolution::ExecutionPolicy::Strategy::
-                               PROFILE_HEURISTIC);
-}
-
-void modify_conv_policy_workspace_limit(opr::mixin::Convolution& conv,
+void modify_conv_policy_workspace_limit(opr::mixin::AlgoChooserHelper& conv,
                                         size_t workspace_limit) {
     auto policy = conv.execution_policy_transient();
     policy.workspace_limit = workspace_limit;
@@ -139,21 +149,20 @@ void inplace_conv_opr_workspace_limit_modifier(OperatorNodeBase& opr,
 
 }  // anonymous namespace
 
-#define MGB_FOREACH_FASTRUN_OPR(cb)                                           \
-    cb(ConvolutionForward), cb(ConvBiasForward), cb(ConvolutionBackwardData), \
-            cb(ConvolutionBackwardFilter), cb(Convolution3DForward),          \
-            cb(Convolution3DBackwardData), cb(Convolution3DBackwardFilter),   \
-            cb(LocalShareForward), cb(LocalShareBackwardData),                \
-            cb(LocalShareBackwardFilter), cb(DeformableConvForward),          \
-            cb(DeformableConvBackwardFilter), cb(DeformableConvBackwardData), \
-            cb(BatchConvBiasForward),
-
-void gopt::enable_opr_algo_profiling_inplace(
-        const VarNodeArrayView& dest_vars) {
-#if MGB_ENABLE_FASTRUN
-    static const ThinHashMap<Typeinfo*, void (*)(OperatorNodeBase&)> modifiers =
-            {
-#define CONV(t) {opr::t::typeinfo(), &inplace_conv_opr_profile_modifier<opr::t>}
+void gopt::modify_opr_algo_strategy_inplace(
+        const VarNodeArrayView& dest_vars,
+        opr::mixin::AlgoChooserHelper::ExecutionPolicy::Strategy strategy) {
+#if !MGB_ENABLE_FASTRUN
+    using S = opr::mixin::AlgoChooserHelper::ExecutionPolicy::Strategy;
+    if ((strategy & S::PROFILE) && !(strategy & S::HEURISTIC)) {
+        mgb_throw(MegBrainError, "fastrun is disabled at compile time");
+    }
+#endif
+    const ThinHashMap<Typeinfo*, std::function<void(OperatorNodeBase&)>>
+            modifiers = {
+#define CONV(t)                                                       \
+    {opr::t::typeinfo(), std::bind(inplace_conv_opr_modifier<opr::t>, \
+                                   std::placeholders::_1, strategy)},
                     MGB_FOREACH_FASTRUN_OPR(CONV)
 #undef CONV
             };
@@ -169,32 +178,19 @@ void gopt::enable_opr_algo_profiling_inplace(
     for (auto i : dest_vars) {
         dep_iter.add(i);
     }
-#else
-    mgb_throw(MegBrainError, "fastrun is disabled at compile time");
-#endif
+}
+
+void gopt::enable_opr_algo_profiling_inplace(
+        const VarNodeArrayView& dest_vars) {
+    modify_opr_algo_strategy_inplace(
+            dest_vars,
+            opr::mixin::AlgoChooserHelper::ExecutionPolicy::Strategy::PROFILE);
 }
 
 void gopt::enable_opr_use_profiling_cache_inplace(
         const VarNodeArrayView& dest_vars) {
-    static const ThinHashMap<Typeinfo*, void (*)(OperatorNodeBase&)> modifiers =
-            {
-#define CONV(t) \
-    {opr::t::typeinfo(), &inplace_conv_opr_profile_cache_modifier<opr::t>}
-                    MGB_FOREACH_FASTRUN_OPR(CONV)
-#undef CONV
-            };
-
-    auto on_opr = [&](OperatorNodeBase* opr) {
-        auto iter = modifiers.find(opr->dyn_typeinfo());
-        if (iter != modifiers.end()) {
-            iter->second(*opr);
-        }
-    };
-
-    cg::DepOprIter dep_iter{on_opr};
-    for (auto i : dest_vars) {
-        dep_iter.add(i);
-    }
+    using S = megdnn::param::ExecutionPolicy::Strategy;
+    modify_opr_algo_strategy_inplace(dest_vars, S::PROFILE | S::HEURISTIC);
 }
 
 void gopt::set_opr_algo_workspace_limit_inplace(
@@ -202,7 +198,7 @@ void gopt::set_opr_algo_workspace_limit_inplace(
     static const ThinHashMap<Typeinfo*, void (*)(OperatorNodeBase&, size_t)>
             modifiers = {
 #define CONV(t) \
-    {opr::t::typeinfo(), &inplace_conv_opr_workspace_limit_modifier<opr::t>}
+    {opr::t::typeinfo(), &inplace_conv_opr_workspace_limit_modifier<opr::t>},
                     MGB_FOREACH_FASTRUN_OPR(CONV)
 #undef CONV
             };
@@ -219,7 +215,6 @@ void gopt::set_opr_algo_workspace_limit_inplace(
         dep_iter.add(i);
     }
 }
-#undef MGB_FOREACH_FASTRUN_OPR
 
 /* ================ ParamRedistributePass ================ */
 const char* ParamRedistributePass::name() const {
@@ -435,54 +430,12 @@ ParamRedistributePass::Impl::Impl(OptState &state):
 }
 
 void ParamRedistributePass::apply(OptState &state) const {
+    MIDOUT_B("ParamRedistributePass::apply")
     Impl{state};
+    MIDOUT_E
 }
 
 /* ================ ParamFusePass ================ */
-
-class ParamFusePass::ConstVarPropogateWithSizeCheck final:
-    public ConstVarPropogateBase
-{
-    public:
-        //! rewrite a var; reader == nullptr means needed by endpoint
-        using VarRewriter = std::function<
-            void(VarNode *var, OperatorNodeBase *reader)>;
-
-        ConstVarPropogateWithSizeCheck(
-                const ParamFusePass &pf, OptState &opt_state,
-                const VarRewriter &rewriter):
-            ConstVarPropogateBase{ConstVarType::IMMUTABLE_AND_PARAM},
-            m_owner{pf}, m_opt_state{opt_state}, m_rewriter{rewriter}
-        {
-        }
-
-    private:
-
-        const ParamFusePass &m_owner;
-        OptState &m_opt_state;
-        VarRewriter m_rewriter;
-
-        void on_midconst_opr(
-                OperatorNodeBase *opr, size_t max_src_size) override {
-            for (auto var: opr->output()) {
-                if (var->contain_flag(VarNode::Flag::VOLATILE_CONTENT))
-                    continue;
-
-                auto osize = var_mem_size(var);
-                if (osize >= max_src_size &&
-                        osize - max_src_size > m_owner.m_param_grow_limit) {
-                    return;
-                }
-
-                // const oprs should be evaluated when output is used by another
-                // non-const opr or output is needed by the user
-                if (m_opt_state.graph().endpoint_contain(var)) {
-                    m_rewriter(var, nullptr);
-                }
-
-            }
-        }
-};
 
 /*!
  * \brief get name for new param
@@ -561,11 +514,18 @@ const char* ParamFusePass::name() const {
 }
 
 void ParamFusePass::apply(OptState &state) const {
+    MIDOUT_B("ParamFusePass::apply")
     auto rewriter = state.graph().make_rewriter();
     auto cg = state.graph().comp_graph();
+
+    ConstVarPropogate cvprop{ConstVarType::IMMUTABLE_AND_PARAM};
+    state.graph().iter([&cvprop](OperatorNodeBase *opr) {
+        cvprop.add_opr(opr);
+    });
+
+
     ThinHashSet<VarNode*> processed_var;
     VarNamer var_namer;
-
     // reader: null if used as endvar
     auto replace_single_var = [&](VarNode *var, OperatorNodeBase *reader) {
         if (!processed_var.insert(var).second)
@@ -590,7 +550,7 @@ void ParamFusePass::apply(OptState &state) const {
         }
 
         SymbolVar new_var;
-        bool is_default_format = var->layout().format.is_default();
+        bool is_default_format = var->format().is_default();
         if (cg::is_static_var_value(var) && is_default_format) {
             // use ImmutableTensor for inferable vars
             HostTensorND hv;
@@ -599,10 +559,10 @@ void ParamFusePass::apply(OptState &state) const {
                     *var->owner_graph(), hv, var_namer.name(var));
         } else {
             if (is_default_format) {
-                new_var = opr::SharedDeviceTensor::make(
+                new_var = opr::SharedDeviceTensor::make_const(
                         *var->owner_graph(), inferred_val, var_namer.name(var));
             } else {
-                new_var = opr::SharedDeviceTensorWithFormat::make(
+                new_var = opr::SharedDeviceTensorWithFormat::make_const(
                         *var->owner_graph(), inferred_val, var_namer.name(var));
             }
         }
@@ -617,9 +577,8 @@ void ParamFusePass::apply(OptState &state) const {
         rewriter.replace_var(var, new_var.node(), log.c_str());
     };
 
-    ConstVarPropogateWithSizeCheck cvprop{*this, state, replace_single_var};
-    auto on_opr = [&](OperatorNodeBase *opr) {
-        auto add_ret = cvprop.add_opr(opr);
+    auto replace_opr = [&](OperatorNodeBase* opr) {
+        auto add_ret = cvprop.opr_rst(opr);
         if (!add_ret.all_const_inp && add_ret.has_midconst_inp) {
             for (auto i: opr->input()) {
                 if (cvprop.is_midconst(i)) {
@@ -629,10 +588,35 @@ void ParamFusePass::apply(OptState &state) const {
             }
         }
         rewriter.auto_replace_outputs(opr);
+
+        //! we should deal with midconst var after auto_replace_outputs, as
+        //! on_midconst_opr will replace the endpoint output which may cause
+        //! double replace.
+        if (add_ret.all_const_inp) {
+            for (auto var : opr->output()) {
+                if (var->contain_flag(VarNode::Flag::VOLATILE_CONTENT))
+                    continue;
+
+                auto osize = ConstVarPropogate::var_mem_size(var);
+                if (osize >= cvprop.max_size(opr) &&
+                    osize - cvprop.max_size(opr) > m_param_grow_limit) {
+                    return;
+                }
+
+                // const oprs should be evaluated when output is used by another
+                // non-const opr or output is needed by the user
+                if (state.graph().endpoint_contain(var)) {
+                    replace_single_var(var, nullptr);
+                }
+
+            }
+
+        }
     };
 
-    state.graph().iter(on_opr);
+    state.graph().iter(replace_opr);
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 /* ================ One2OneOprReplacePass ================ */
@@ -641,12 +625,19 @@ const char* ConvertF32ToF16Pass::name() const {
 }
 
 void ConvertF32ToF16Pass::apply(OptState& state) const {
+    MIDOUT_B("ConvertF32ToF16Pass::apply")
     state.set_var_replace_check_flag(m_var_replace_check_flag);
     auto rewriter = state.graph().make_rewriter();
     VarNodeArray new_inp_cache;
 
-    auto on_opr = [this, &rewriter, &new_inp_cache,
-                   &state](OperatorNodeBase* opr) {
+    // record original output dtype
+    const SymbolVarArray& vars = state.graph().endpoint_vars();
+    std::vector<DType> dtypes;
+    for (size_t i = 0; i < vars.size(); i++) {
+        dtypes.push_back(vars[i].node()->dtype());
+    }
+
+    auto on_opr = [this, &rewriter, &new_inp_cache](OperatorNodeBase* opr) {
         auto it = m_opr_replace_func.find(opr->dyn_typeinfo());
         if (it != m_opr_replace_func.end()) {
             auto&& new_inp = new_inp_cache;
@@ -662,40 +653,33 @@ void ConvertF32ToF16Pass::apply(OptState& state) const {
                        "bad opr replace: src=%s{%s} dst=%s{%s}", opr->cname(),
                        opr->dyn_typeinfo()->name, new_opr->cname(),
                        new_opr->dyn_typeinfo()->name);
-            //! change the output type if it's the endpoint
             for (size_t i = 0; i < origin_out.size(); i++) {
-                if (state.graph().endpoint_contain(origin_out[i]) &&
-                    origin_out[i]->dtype().enumv() !=
-                            cur_out[i]->dtype().enumv()) {
-                    rewriter.replace_var(
-                            origin_out[i],
-                            opr::TypeCvt::make(cur_out[i],
-                                               origin_out[i]->dtype())
-                                    .node(),
-                            nullptr);
-                } else {
-                    rewriter.replace_var(origin_out[i], cur_out[i], nullptr);
-                }
+                rewriter.replace_var(origin_out[i], cur_out[i], nullptr);
             }
         } else {
-            auto new_opr = rewriter.auto_replace_outputs(opr);
-            auto&& out = opr->output();
-            auto&& new_out = new_opr->output();
-            for (size_t i = 0; i < out.size(); i++) {
-                if (state.graph().endpoint_contain(out[i]) &&
-                    new_out[i]->dtype().enumv() != out[i]->dtype().enumv()) {
-                    rewriter.replace_var(
-                            new_out[i],
-                            opr::TypeCvt::make(new_out[i],
-                                               out[i]->dtype())
-                                    .node(),
-                            nullptr);
-                }
-            }
+            rewriter.auto_replace_outputs(opr);
         }
     };
     state.graph().iter(on_opr);
     rewriter.apply_inplace();
+
+    // recover output dtype
+    rewriter = state.graph().make_rewriter();
+    const SymbolVarArray& endpoints = state.graph().endpoint_vars();
+    auto replace_output = [&]() {
+        for (size_t i = 0; i < endpoints.size(); i++) {
+            VarNode* var = endpoints[i].node();
+            if (var->dtype().enumv() != dtypes[i].enumv()) {
+                auto new_var = opr::TypeCvt::make(var, dtypes[i]).node();
+                rewriter.replace_var(var, new_var, nullptr);
+            }
+        }
+    };
+    mgb_assert(endpoints.size() > 0);
+    auto opr = endpoints[0].node()->owner_opr();
+    state.call_with_opr(opr, replace_output, OprPropertyFlag::NONE);
+    rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
@@ -740,6 +724,19 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
         return opr;
     };
 
+    auto replace_lsp_opr = [](OperatorNodeBase* opr,
+                              const VarNodeArray& new_inp) {
+        mgb_assert(opr->same_type<opr::Linspace>());
+        mgb_assert(opr->input().size() == new_inp.size());
+        auto& lsp_opr = opr->cast_final_safe<opr::Linspace>();
+        if (lsp_opr.output(0)->dtype() != dtype::Float16()) {
+            auto cvt_var =
+                    opr::TypeCvt::make(lsp_opr.output(0), dtype::Float16(), {});
+            return cvt_var.node()->owner_opr();
+        }
+        return opr;
+    };
+
     auto replace_conv_opr = [use_f32_comp](OperatorNodeBase* opr,
                                            const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
@@ -763,6 +760,65 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
         return new_conv_opr.node()->owner_opr();
     };
 
+    auto replace_deconv_opr = [use_f32_comp](OperatorNodeBase* opr,
+                                           const VarNodeArray& new_inp) {
+        mgb_assert(opr->input().size() == new_inp.size());
+        auto& deconv_opr = opr->cast_final_safe<opr::ConvolutionBackwardData>();
+        auto new_param = deconv_opr.param();
+        if (use_f32_comp) {
+            new_param.compute_mode =
+                    megdnn::param::Convolution::ComputeMode::FLOAT32;
+        }
+        mgb_assert(new_inp[0]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[0]->dtype().name(),
+                   new_inp[0]->name().c_str(),
+                   new_inp[0]->owner_opr()->name().c_str());
+        mgb_assert(new_inp[1]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[1]->dtype().name(),
+                   new_inp[1]->name().c_str(),
+                   new_inp[1]->owner_opr()->name().c_str());
+        auto new_deconv_opr = opr::ConvolutionBackwardData::make(
+                new_inp[0], new_inp[1], new_param,
+                deconv_opr.execution_policy(), deconv_opr.config());
+        return new_deconv_opr.node()->owner_opr();
+    };
+
+    auto replace_convbias_opr = [use_f32_comp](OperatorNodeBase* opr,
+                                               const VarNodeArray& new_inp) {
+        auto& convbias_opr = opr->cast_final_safe<opr::ConvBiasForward>();
+        auto new_param = convbias_opr.param();
+        if (use_f32_comp) {
+            new_param.compute_mode =
+                    megdnn::param::ConvBias::ComputeMode::FLOAT32;
+        }
+        mgb_assert(new_inp[0]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[0]->dtype().name(),
+                   new_inp[0]->name().c_str(),
+                   new_inp[0]->owner_opr()->name().c_str());
+        mgb_assert(new_inp[1]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[1]->dtype().name(),
+                   new_inp[1]->name().c_str(),
+                   new_inp[1]->owner_opr()->name().c_str());
+        if(opr->input().size() == 2) {
+            auto new_conv_opr = opr::ConvBias::make(
+                    new_inp[0], new_inp[1], new_param,
+                    convbias_opr.execution_policy(), convbias_opr.config());
+            return new_conv_opr.node()->owner_opr();
+        } else if(opr->input().size() == 3) {
+            auto new_conv_opr = opr::ConvBias::make(
+                    new_inp[0], new_inp[1], new_inp[2], new_param,
+                    convbias_opr.execution_policy(), convbias_opr.config());
+            return new_conv_opr.node()->owner_opr();
+        } else {
+            mgb_assert(opr->input().size() == 4, "invalid input size %zu",
+                       opr->input().size());
+            auto new_conv_opr = opr::ConvBias::make(
+                    new_inp[0], new_inp[1], new_inp[2], new_inp[3], new_param,
+                    convbias_opr.execution_policy(), convbias_opr.config());
+            return new_conv_opr.node()->owner_opr();
+        }
+    };
+
     auto replace_matmul_opr = [use_f32_comp](OperatorNodeBase* opr,
                                              const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
@@ -773,7 +829,32 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
                     megdnn::param::MatrixMul::ComputeMode::FLOAT32;
         }
         auto new_matmul_opr = opr::MatrixMul::make(
-                new_inp[0], new_inp[1], new_param, matmul_opr.config());
+                new_inp[0], new_inp[1], new_param,
+                matmul_opr.execution_policy(), matmul_opr.config());
+        return new_matmul_opr.node()->owner_opr();
+    };
+
+    auto replace_batched_matmul_opr = [use_f32_comp](
+                                              OperatorNodeBase* opr,
+                                              const VarNodeArray& new_inp) {
+        mgb_assert(opr->input().size() == new_inp.size());
+        auto& matmul_opr = opr->cast_final_safe<opr::BatchedMatrixMul>();
+        auto new_param = matmul_opr.param();
+        if (use_f32_comp) {
+            new_param.compute_mode =
+                    megdnn::param::MatrixMul::ComputeMode::FLOAT32;
+        }
+        mgb_assert(new_inp[0]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[0]->dtype().name(),
+                   new_inp[0]->name().c_str(),
+                   new_inp[0]->owner_opr()->name().c_str());
+        mgb_assert(new_inp[1]->dtype() == dtype::Float16(),
+                   "inp %s:%s, owner_opr:%s", new_inp[1]->dtype().name(),
+                   new_inp[1]->name().c_str(),
+                   new_inp[1]->owner_opr()->name().c_str());
+        auto new_matmul_opr = opr::BatchedMatrixMul::make(
+                new_inp[0], new_inp[1], new_param,
+                matmul_opr.execution_policy(), matmul_opr.config());
         return new_matmul_opr.node()->owner_opr();
     };
 
@@ -824,8 +905,8 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
                 new_mat->owner_opr()->input(0)->dtype() == dtype::Float32())
                 new_mat = new_mat->owner_opr()->input(0);
             else
-                new_mat =
-                        opr::TypeCvt::make(new_inp[1], dtype::Float32(), {}).node();
+                new_mat = opr::TypeCvt::make(new_inp[1], dtype::Float32(), {})
+                                  .node();
         }
         SymbolVar new_warp;
         if (new_inp.size() == 3) {
@@ -841,19 +922,49 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
         return new_warp.node()->owner_opr();
     };
 
+    auto replace_remap_opr = [](OperatorNodeBase* opr,
+                                const VarNodeArray& new_inp) {
+        mgb_assert(opr->input().size() == new_inp.size() &&
+                   (new_inp.size() == 2));
+        auto& remap_opr = opr->cast_final<opr::Remap>();
+        // map tensor must be float32
+        auto new_map = new_inp[1];
+        if (new_inp[1]->dtype() != dtype::Float32()) {
+            if (try_cast_as_op<opr::TypeCvt>(new_map->owner_opr()) &&
+                new_map->owner_opr()->input(0)->dtype() == dtype::Float32())
+                new_map = new_map->owner_opr()->input(0);
+            else
+                new_map = opr::TypeCvt::make(new_inp[1], dtype::Float32(), {})
+                                  .node();
+        }
+        SymbolVar new_remap;
+
+        new_remap = opr::Remap::make(new_inp[0], new_map,
+                                               remap_opr.param(),
+                                               remap_opr.config());
+        return new_remap.node()->owner_opr();
+    };
+
+
     auto ret = std::make_unique<ConvertF32ToF16Pass>();
     // don't check dtype
     ret->set_var_replace_check_flag(VarReplaceCheckFlag::CHECK_ALL ^
                                     VarReplaceCheckFlag::CHECK_DTYPE);
     auto&& replace_func = ret->m_opr_replace_func;
+    replace_func[opr::Linspace::typeinfo()] = replace_lsp_opr;
     replace_func[opr::Host2DeviceCopy::typeinfo()] = replace_h2d_opr;
     replace_func[opr::SharedDeviceTensor::typeinfo()] = replace_sdt_opr;
     replace_func[opr::Convolution::typeinfo()] = replace_conv_opr;
+    replace_func[opr::ConvolutionBackwardData::typeinfo()] = replace_deconv_opr;
+    replace_func[opr::ConvBias::typeinfo()] = replace_convbias_opr;
     replace_func[opr::MatrixMul::typeinfo()] = replace_matmul_opr;
     replace_func[opr::Reduce::typeinfo()] = replace_reduce_opr;
     replace_func[opr::ImmutableTensor::typeinfo()] = replace_imt_opr;
     replace_func[opr::TypeCvt::typeinfo()] = replace_cvt_opr;
     replace_func[opr::WarpPerspective::typeinfo()] = replace_warp_opr;
+    replace_func[opr::Remap::typeinfo()] = replace_remap_opr;
+    replace_func[opr::BatchedMatrixMul::typeinfo()] =
+            replace_batched_matmul_opr;
     return ret;
 #endif
 }
@@ -861,6 +972,7 @@ std::unique_ptr<ConvertF32ToF16Pass> ConvertF32ToF16Pass::make(
 /* ================ ConvertFormatPass ================ */
 
 void ConvertFormatPass::apply(OptState& state) const {
+    MIDOUT_B("ConvertFormatPass::apply")
     state.set_var_replace_check_flag(m_var_replace_check_flag);
     auto rewriter = state.graph().make_rewriter();
     VarNodeArray new_inp_cache;
@@ -915,9 +1027,11 @@ void ConvertFormatPass::apply(OptState& state) const {
     };
     state.graph().iter(on_opr);
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
+    MIDOUT_B("ConvertFormatPass::make")
     auto filter_mode =
             [](const megdnn::param::Convolution::Sparse conv_mode,
                const VarNode* filter) -> megdnn::param::RelayoutFormat::Mode {
@@ -943,7 +1057,27 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         }
     };
 
-    auto replace_conv_opr = [&filter_mode](OperatorNodeBase* opr,
+    auto size_one_conv_to_dense_conv =
+            [](VarNode* origin_filter_input,
+               megdnn::param::Convolution::Sparse sparse) {
+                VarNode* reshaped_filter = origin_filter_input;
+                bool is_size_one_group_conv = false;
+                if (sparse == megdnn::param::Convolution::Sparse::GROUP &&
+                    origin_filter_input->shape()[0] == 1) {
+                    is_size_one_group_conv = true;
+                    auto new_shape = origin_filter_input->shape();
+                    new_shape.ndim = 4;
+                    for (int i = 0; i < 4; i++) {
+                        new_shape[i] = origin_filter_input->shape()[i + 1];
+                    }
+                    SymbolVar new_var(origin_filter_input);
+                    reshaped_filter = new_var.reshape(new_shape).node();
+                }
+                return std::make_tuple(reshaped_filter, is_size_one_group_conv);
+            };
+
+    auto replace_conv_opr =
+        [&filter_mode, &size_one_conv_to_dense_conv](OperatorNodeBase* opr,
                                const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
         auto& conv_opr = opr->cast_final_safe<opr::ConvolutionForward>();
@@ -1008,19 +1142,27 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
             mgb_assert(new_inp[0]->shape().ndim == 5 && fmt.align_axis() == 2);
             conv_src = new_inp[0];
         }
+        VarNode* reshaped_filter;
+        bool is_size_one_group_conv;
+        std::tie(reshaped_filter, is_size_one_group_conv) =
+                size_one_conv_to_dense_conv(new_inp[1],
+                                            conv_opr.param().sparse);
+        auto new_conv_param = conv_opr.param();
+        if (is_size_one_group_conv) {
+            new_conv_param.sparse = megdnn::param::Convolution::Sparse::DENSE;
+        }
         mgb_assert(new_inp[1]->format().type() !=
                    TensorFormat::Type::IMAGE2D_PACK4);
         auto param = megdnn::param::RelayoutFormat();
-        param.mode = filter_mode(conv_opr.param().sparse, new_inp[1]);
-        auto relayout_weight = opr::RelayoutFormat::make(new_inp[1], param);
+        param.mode = filter_mode(new_conv_param.sparse, reshaped_filter);
+        auto relayout_weight = opr::RelayoutFormat::make(reshaped_filter, param);
         conv_weights = relayout_weight.node();
-        auto new_param = conv_opr.param();
-        new_param.format = megdnn::param::Convolution::Format::NHWCD4;
+        new_conv_param.format = megdnn::param::Convolution::Format::NHWCD4;
         mgb_assert(conv_src->shape().ndim == 5 &&
                    conv_src->format().type() ==
                            TensorFormat::Type::IMAGE2D_PACK4);
         auto new_conv_opr = opr::Convolution::make(
-                conv_src, conv_weights, new_param, conv_opr.execution_policy(),
+                conv_src, conv_weights, new_conv_param, conv_opr.execution_policy(),
                 conv_opr.config());
         OperatorNodeBase* ret = new_conv_opr.node()->owner_opr();
         mgb_assert(new_conv_opr.shape().ndim == 5 &&
@@ -1029,7 +1171,8 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         return ret;
     };
 
-    auto replace_conv_bias_opr = [&filter_mode](OperatorNodeBase* opr,
+    auto replace_conv_bias_opr =
+        [&filter_mode, &size_one_conv_to_dense_conv](OperatorNodeBase* opr,
                                const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
         auto& conv_bias_opr = opr->cast_final_safe<opr::ConvBiasForward>();
@@ -1098,23 +1241,46 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         mgb_assert(new_inp[1]->format().type() !=
                    TensorFormat::Type::IMAGE2D_PACK4);
 
+        VarNode* reshaped_filter;
+        bool is_size_one_group_conv;
+        std::tie(reshaped_filter, is_size_one_group_conv) =
+                size_one_conv_to_dense_conv(new_inp[1],
+                                            conv_bias_opr.param().sparse);
+        auto new_conv_param = conv_bias_opr.param();
+        if (is_size_one_group_conv) {
+            new_conv_param.sparse = megdnn::param::Convolution::Sparse::DENSE;
+        }
         auto param = megdnn::param::RelayoutFormat();
-        param.mode = filter_mode(conv_bias_opr.param().sparse, new_inp[1]);
-        auto relayout_weight = opr::RelayoutFormat::make(new_inp[1], param);
+        param.mode = filter_mode(new_conv_param.sparse, reshaped_filter);
+        auto relayout_weight = opr::RelayoutFormat::make(reshaped_filter, param);
         conv_bias_weights = relayout_weight.node();
 
-        param.mode = megdnn::param::RelayoutFormat::Mode::NCHW_NHWCD4I;
-        auto relayout_bias = opr::RelayoutFormat::make(new_inp[2], param);
-        conv_bias_bias = relayout_bias.node();
+        mgb_assert(new_inp.size() < 4,
+                   "ConvertFormat pass does not support fuse Z");
+        bool has_bias = new_inp.size() > 2;
+        if (has_bias &&
+            new_inp[2]->format().type() == TensorFormat::Type::DEFAULT) {
+            param.mode = megdnn::param::RelayoutFormat::Mode::NCHW_NHWCD4I;
+            auto relayout_bias = opr::RelayoutFormat::make(new_inp[2], param);
+            conv_bias_bias = relayout_bias.node();
+        } else if (has_bias) {
+            conv_bias_bias = new_inp[2];
+        }
 
-        auto new_param = conv_bias_opr.param();
-        new_param.format = megdnn::param::ConvBias::Format::NHWCD4;
+        new_conv_param.format = megdnn::param::ConvBias::Format::NHWCD4;
         mgb_assert(conv_bias_src->shape().ndim == 5 &&
                    conv_bias_src->format().type() ==
                            TensorFormat::Type::IMAGE2D_PACK4);
-        auto new_conv_bias_opr = opr::ConvBias::make(
-                conv_bias_src, conv_bias_weights, conv_bias_bias, new_param,
-                conv_bias_opr.execution_policy(), conv_bias_opr.config());
+        SymbolVar new_conv_bias_opr;
+        if (has_bias) {
+            new_conv_bias_opr = opr::ConvBias::make(
+                    conv_bias_src, conv_bias_weights, conv_bias_bias, new_conv_param,
+                    conv_bias_opr.execution_policy(), conv_bias_opr.config());
+        } else {
+            new_conv_bias_opr = opr::ConvBias::make(
+                    conv_bias_src, conv_bias_weights, new_conv_param,
+                    conv_bias_opr.execution_policy(), conv_bias_opr.config());
+        }
         OperatorNodeBase* ret = new_conv_bias_opr.node()->owner_opr();
         mgb_assert(new_conv_bias_opr.shape().ndim == 5 &&
                    new_conv_bias_opr.format().type() ==
@@ -1205,17 +1371,33 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
                            TensorFormat::Type::IMAGE2D_PACK4);
         return ret;
     };
-
-    auto replace_resize_opr = [](OperatorNodeBase* opr,
+    /* This helper function guarantees the format convert pass won't change
+     * output var's channel. Changing output's channel will cause channel
+     * mismatch problem for replacing conv/conv_bias operator.
+     */
+    auto replace_helper = [](OperatorNodeBase* opr,
+                             const VarNodeArray& new_inp) -> OperatorNodeBase* {
+        auto&& new_shp = new_inp[0]->shape();
+        size_t inp_channel = new_shp[1];
+        if (new_shp.eq_shape(opr->input(0)->shape())&& inp_channel % 4 != 0) {
+            auto new_opr = serialization::copy_opr_shallow(*opr, new_inp,
+                                                           opr->config());
+            return new_opr;
+        }
+        return nullptr;
+    };
+    auto replace_resize_opr = [replace_helper](OperatorNodeBase* opr,
                                  const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
+        if (auto opr_shallow_copy = replace_helper(opr, new_inp)) {
+            return opr_shallow_copy;
+        }
         auto& resize_opr = opr->cast_final_safe<opr::ResizeForward>();
         mgb_assert(resize_opr.param().format ==
                            megdnn::param::Resize::Format::NCHW,
                    "ConvertFormat Pass only support converting NCHW to NHWCD4");
         VarNode* inp = nullptr;
         if (new_inp[0]->shape().ndim == 4) {
-            // new input src is NCHW
             auto param = megdnn::param::RelayoutFormat();
             param.mode = megdnn::param::RelayoutFormat::Mode::NCHW_NHWCD4I;
             auto rf = opr::RelayoutFormat::make(new_inp[0], param);
@@ -1235,9 +1417,13 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         return new_resize_opr.node()->owner_opr();
     };
 
-    auto replace_warp_perspective_opr = [](OperatorNodeBase* opr,
-                                           const VarNodeArray& new_inp) {
+    auto replace_warp_perspective_opr = [replace_helper](
+                                                OperatorNodeBase* opr,
+                                                const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
+        if (auto opr_shallow_copy = replace_helper(opr, new_inp)) {
+            return opr_shallow_copy;
+        }
         auto& warp_opr = opr->cast_final_safe<opr::WarpPerspectiveForward>();
         mgb_assert(warp_opr.param().format ==
                            megdnn::param::WarpPerspective::Format::NCHW,
@@ -1273,9 +1459,12 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         return new_warp_opr.node()->owner_opr();
     };
 
-    auto replace_warp_affine_opr = [](OperatorNodeBase* opr,
+    auto replace_warp_affine_opr = [replace_helper](OperatorNodeBase* opr,
                                       const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
+        if (auto opr_shallow_copy = replace_helper(opr, new_inp)) {
+            return opr_shallow_copy;
+        }
         auto& warp_opr = opr->cast_final_safe<opr::WarpAffineForward>();
         mgb_assert(warp_opr.param().format ==
                            megdnn::param::WarpAffine::Format::NCHW,
@@ -1303,9 +1492,12 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         return new_warp_opr.node()->owner_opr();
     };
 
-    auto replace_pooling_opr = [](OperatorNodeBase* opr,
+    auto replace_pooling_opr = [replace_helper](OperatorNodeBase* opr,
                                   const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
+        if (auto opr_shallow_copy = replace_helper(opr, new_inp)) {
+            return opr_shallow_copy;
+        }
         auto& pooling_opr = opr->cast_final_safe<opr::PoolingForward>();
         mgb_assert(pooling_opr.param().format ==
                            megdnn::param::Pooling::Format::NCHW,
@@ -1332,56 +1524,54 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         return new_pooling_opr.node()->owner_opr();
     };
 
-    auto relayout_inp_to_chw = [](OperatorNodeBase* opr,
+    auto var_to_chw = [](VarNode* inp, VarNode* new_inp) {
+        if (!inp->shape().eq_shape(new_inp->shape())) {
+            mgb_assert(inp->shape().ndim == 4 &&
+                       inp->format().type() !=
+                               TensorFormat::Type::IMAGE2D_PACK4);
+            mgb_assert(new_inp->shape().ndim == 5 &&
+                       new_inp->format().type() ==
+                               TensorFormat::Type::IMAGE2D_PACK4);
+            auto param = megdnn::param::RelayoutFormat();
+            param.mode = megdnn::param::RelayoutFormat::Mode::NHWCD4I_NCHW;
+            auto rf = opr::RelayoutFormat::make(new_inp, param);
+            return rf.node();
+        }
+        return new_inp;
+    };
+
+    auto relayout_inp_to_chw = [var_to_chw](OperatorNodeBase* opr,
                                   const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
         VarNodeArray t_inp = new_inp;
         for (size_t i = 0; i < opr->input().size(); i++) {
-            if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                mgb_assert(opr->input(i)->shape().ndim == 4 &&
-                           opr->input(i)->format().type() !=
-                                   TensorFormat::Type::IMAGE2D_PACK4);
-                mgb_assert(new_inp[i]->shape().ndim == 5 &&
-                           new_inp[i]->format().type() ==
-                                   TensorFormat::Type::IMAGE2D_PACK4);
-                // Oprs which will change the shape of input like concat,
-                // reshape etc. should not be used after cd4 convertion padding,
-                // due to the padding info will be lost and we cannot recover
-                // the origin unpadded data. For example, concat two tensors of
-                // shape {1, 6, 128, 128}, if both tensors convert to cd4 then
-                // the channel will be 8, and the result of concat channel will
-                // be 16, but there will be 2 padding zeros in the middle of
-                // channel axis, which will cause problems in succeding opr.
-                if (opr->dyn_typeinfo() == opr::Concat::typeinfo()) {
-                    auto concat = try_cast_as_op<opr::Concat>(opr);
-                    mgb_assert(
-                            !(concat->param().axis == 1 &&
-                              concat->input(i)->shape()[1] % 4 != 0),
-                            "We cannot concat tensor in channel axis which has "
-                            "been padded, as it may lost padding pos if we "
-                            "pass "
-                            "the output to conv etc.");
-                }
-                auto param = megdnn::param::RelayoutFormat();
-                param.mode = megdnn::param::RelayoutFormat::Mode::NHWCD4I_NCHW;
-                auto rf = opr::RelayoutFormat::make(new_inp[i], param);
-                t_inp[i] = rf.node();
-            }
+            t_inp[i] = var_to_chw(opr->input(i), new_inp[i]);
         }
         auto new_opr =
                 serialization::copy_opr_shallow(*opr, t_inp, opr->config());
         return new_opr;
     };
 
-    auto replace_elemwise_opr = [](OperatorNodeBase* opr,
-                                   const VarNodeArray& new_inp) {
+    auto replace_elemwise_opr = [&relayout_inp_to_chw](
+                                        OperatorNodeBase* opr,
+                                        const VarNodeArray& new_inp) {
         mgb_assert(opr->input().size() == new_inp.size());
         bool has_inp_changed = false;
+        bool can_exec_cd4 = true;
         for (size_t i = 0; i < opr->input().size(); i++) {
             if (!new_inp[i]->format().is_default()) {
                 has_inp_changed = true;
-                break;
+            } else if (new_inp[i]->shape().ndim == 4) {
+                if (new_inp[i]->shape()[1] % 4 != 0) {
+                    can_exec_cd4 = false;
+                }
+                //! cd4 elemwise with scaler is unsupported
+            } else if (!new_inp[i]->shape().is_scalar()) {
+                can_exec_cd4 = false;
             }
+        }
+        if (!can_exec_cd4) {
+            return relayout_inp_to_chw(opr, new_inp);
         }
         if (has_inp_changed) {
             // assumption: all inputs are changed from nchw to nhwcd4
@@ -1407,6 +1597,18 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
         }
     };
 
+    /* This helper function converts the first input to the NCHW format to
+     * handle operations that do not support NHWCD4 format
+     */
+    auto relayout_first_inp_to_chw =
+            [var_to_chw](OperatorNodeBase* opr,
+               const VarNodeArray& new_inp) -> OperatorNodeBase* {
+        mgb_assert(opr->input().size() == new_inp.size());
+        VarNodeArray t_inp = new_inp;
+        t_inp[0] = var_to_chw(opr->input(0), new_inp[0]);
+        return serialization::copy_opr_shallow(*opr, t_inp, opr->config());
+    };
+
     auto ret = std::make_unique<ConvertFormatPass>();
     ret->set_var_replace_check_flag(VarReplaceCheckFlag::NOCHECK);
     auto&& replace_func = ret->m_opr_replace_func;
@@ -1424,11 +1626,17 @@ std::unique_ptr<ConvertFormatPass> ConvertFormatPass::make_nhwcd4_converter() {
     replace_func[opr::Subtensor::typeinfo()] = relayout_inp_to_chw;
     replace_func[opr::Broadcast::typeinfo()] = relayout_inp_to_chw;
     replace_func[opr::IncrSubtensor::typeinfo()] = relayout_inp_to_chw;
+    replace_func[opr::AxisAddRemove::typeinfo()] = relayout_inp_to_chw;
+    replace_func[opr::TypeCvt::typeinfo()] = replace_elemwise_opr;
     replace_func[opr::ResizeForward::typeinfo()] = replace_resize_opr;
     replace_func[opr::WarpPerspectiveForward::typeinfo()] =
             replace_warp_perspective_opr;
     replace_func[opr::WarpAffineForward::typeinfo()] = replace_warp_affine_opr;
+    replace_func[opr::LocalForward::typeinfo()] = relayout_first_inp_to_chw;
+    replace_func[opr::GroupLocalForward::typeinfo()] =
+            relayout_first_inp_to_chw;
     return ret;
+    MIDOUT_E
 }
 
 /* ================ ConvertBatchNormPass ================ */
@@ -1437,6 +1645,7 @@ const char* ConvertBatchNormToElemwisePass::name() const {
 }
 
 void ConvertBatchNormToElemwisePass::apply(OptState& state) const {
+    MIDOUT_B("ConvertBatchNormToElemwisePass::apply")
     auto rewriter = state.graph().make_rewriter();
     auto on_opr = [&](OperatorNodeBase* opr) {
         if (auto bn = try_cast_as_op<opr::BatchNorm>(opr)) {
@@ -1448,7 +1657,8 @@ void ConvertBatchNormToElemwisePass::apply(OptState& state) const {
                 SymbolVar bias = {rewriter.get_var(bn->input(2))};
                 SymbolVar mean = {rewriter.get_var(bn->input(3))};
                 SymbolVar variance = {rewriter.get_var(bn->input(4))};
-                SymbolVar invsqrt_variance = opr::PowC::make(variance, {-0.5});
+                SymbolVar invsqrt_variance = opr::PowC::make(variance
+                        + variance.make_scalar_dt(float(bn->param().epsilon)), {-0.5});
                 auto res = scale * (x - mean) * invsqrt_variance + bias;
                 rewriter.replace_var(
                         opr->output(4), res.node(),
@@ -1464,6 +1674,7 @@ void ConvertBatchNormToElemwisePass::apply(OptState& state) const {
     state.graph().iter(on_opr);
 
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 /* ================ FuseConvBiasNonlinPass ================ */
@@ -1472,6 +1683,7 @@ const char* FuseConvBiasNonlinPass::name() const {
 }
 
 void FuseConvBiasNonlinPass::apply(OptState& state) const {
+    MIDOUT_B("FuseConvBiasNonlinPass::apply")
     std::unordered_map<VarNode*, std::vector<OperatorNodeBase*>> m_deps;
     state.graph().iter([&m_deps](OperatorNodeBase* opr) {
         for (auto& inp : opr->input()) {
@@ -1537,7 +1749,8 @@ void FuseConvBiasNonlinPass::apply(OptState& state) const {
                                            param.stride_h,
                                            param.stride_w,
                                            param.dilate_h,
-                                           param.dilate_w};
+                                           param.dilate_w,
+                                           param.compute_mode};
     };
 
     auto check_bias_shape = [&](opr::Convolution* conv, VarNode* bias) -> bool {
@@ -1547,9 +1760,15 @@ void FuseConvBiasNonlinPass::apply(OptState& state) const {
         auto dst_shape = conv->output(0)->shape();
         auto filter_shape = conv->input(1)->shape();
         auto bias_shape = bias->shape();
-        if (dst_shape.eq_shape(bias_shape)) {
+
+        //! pay attention: make sure bias node is not const provider when
+        //! batch > 1 cause shape assert problem in convbias
+        //! if you resize the input shape, can not update the bias shape too.
+        //! so do not fuse conv bias in this situation
+        if (dst_shape.eq_shape(bias_shape) && !cg::is_const_var_shape(bias)) {
             return valid_bias_shape;
         }
+
         size_t OC = filter_shape[0];
         if (conv->param().sparse == Sparse::GROUP) {
             OC *= filter_shape[1];
@@ -1584,7 +1803,9 @@ void FuseConvBiasNonlinPass::apply(OptState& state) const {
                 rewriter.get_var(typecvt->input(0))->owner_opr());
         if (!conv_bias || m_deps.count(typecvt->input(0)) != 1 ||
             typecvt->output(0)->dtype().enumv() !=
-                    DTypeTrait<dtype::QuantizedS8>::enumv)
+                    DTypeTrait<dtype::QuantizedS8>::enumv ||
+            typecvt->input(0)->dtype().enumv() !=
+                    DTypeTrait<dtype::QuantizedS32>::enumv)
             return nullptr;
 
         auto config = conv_bias->config();
@@ -1717,6 +1938,7 @@ void FuseConvBiasNonlinPass::apply(OptState& state) const {
     state.graph().iter(on_opr);
 
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 /* ================ FuseConvBiasZPass ================ */
@@ -1725,6 +1947,7 @@ const char* FuseConvBiasZPass::name() const {
 }
 
 void FuseConvBiasZPass::apply(OptState& state) const {
+    MIDOUT_B("FuseConvBiasZPass::apply")
     UniqReaderCheck uniq_reader_check{state.graph()};
 
     auto rewriter = state.graph().make_rewriter();
@@ -1766,6 +1989,8 @@ void FuseConvBiasZPass::apply(OptState& state) const {
             auto elem = try_cast_as_op<opr::ElemwiseMultiType>(opr);
             if (elem->param().mode == MultiMode::QFUSE_ADD_RELU)
                 return NonlineMode::RELU;
+            else if (elem->param().mode == MultiMode::QFUSE_ADD_H_SWISH)
+                return NonlineMode::H_SWISH;
         }
         return NonlineMode::IDENTITY;
     };
@@ -1832,7 +2057,8 @@ void FuseConvBiasZPass::apply(OptState& state) const {
         if (elem->input().size() != 2)
             return false;
         if (elem->param().mode != MultiMode::QADD &&
-            elem->param().mode != MultiMode::QFUSE_ADD_RELU)
+            elem->param().mode != MultiMode::QFUSE_ADD_RELU &&
+            elem->param().mode != MultiMode::QFUSE_ADD_H_SWISH)
             return false;
         return try_replace_var_node(opr);
     };
@@ -1848,6 +2074,7 @@ void FuseConvBiasZPass::apply(OptState& state) const {
     state.graph().iter(on_opr);
 
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 /* ================ FuseDeconvCvtPass ================ */
@@ -1857,6 +2084,7 @@ const char* FuseDeconvCvtPass::name() const {
 
 
 void FuseDeconvCvtPass::apply(OptState& state) const {
+    MIDOUT_B("FuseDeconvCvtPass::apply")
     std::unordered_map<VarNode*, std::vector<OperatorNodeBase*>> m_deps;
     state.graph().iter([&m_deps](OperatorNodeBase* opr) {
         for (auto& inp : opr->input()) {
@@ -1907,6 +2135,7 @@ void FuseDeconvCvtPass::apply(OptState& state) const {
     state.graph().iter(on_opr);
 
     rewriter.apply_inplace();
+    MIDOUT_E
 }
 
 /* ================ ParamMergePass ================ */
@@ -1915,1966 +2144,12 @@ const char* ParamMergePass::name() const {
 }
 
 void ParamMergePass::apply(OptState& opt_state) const {
+    MIDOUT_B("ParamMergePass::apply")
     param_merge<opr::SharedDeviceTensor, opr::MultipleDeviceTensorHolder>(
             opt_state);
     param_merge<opr::SharedDeviceTensorWithFormat,
                 opr::MultipleDeviceTensorWithFormatHolder>(opt_state);
-}
-
-/* ================ TensorReformatPass =============== */
-/*!
- * \brief relayout placeholder opr
- *
- * RelayoutPlaceholder oprs act as the placeholders of the ComputingGraph
- * during graph opt pass `TensorReformatPass`. These oprs are introduced
- * into a ComputingGraph for conveniently discovering further optimize
- * opportunities (such as fuse consecutive relayouts, translate into
- * optimized implementations). They are canonized to have a shape infer, so
- * the ouput's shape can be correctly deduced during the opt pass.
- *
- * Note that the oprs in the ComputingGraph are only used as intermediate
- * representations before being translated to MegBrain oprs, so the
- * oprs should not get involved in any actual computing.
- */
-MGB_DEFINE_OPR_CLASS(TensorReformatPass::RelayoutPlaceholder,
-                           cg::SingleCNOperatorNodeBase) // {
-public:
-    //! relayout type of this opr
-    enum class LayoutType {
-        NCHW4_TO_NCHW32,              //!< from nchw4 layout to nchw32 layout
-        NCHW32_TO_NCHW4,              //!< from nchw32 layout to nchw4 layout
-        NCHW4_TO_CHWN4,               //!< from nchw4 layout to chwn4 layout
-        CHWN4_TO_NCHW4,               //!< from chwn4 layout to nchw4 layout
-        NCHW_TO_NCHW88,               //!< from nchw layout to nchw88 layout
-        NCHW88_TO_NCHW,               //!< from nchw88 layout to nchw layout
-        WEIGHT_NCHW_TO_NCHW88_DENSE,  //!< weight from nchw layout to nchw88
-                                      //!< layout
-        WEIGHT_NCHW_TO_NCHW88_GROUP,  //!< group weight from nchw layout to
-                                      //!< nchw88 layout
-        WEIGHT_NCHW_TO_NCHW88_CHAN,   //!< channel wise weight from nchw layout
-                                      //!< to nchw88 layout
-        //!< the weight layout of input is nchw output is nchw88, special for
-        //!< shape weight in nchw like {64, 2, 3, 3} to {8, 3, 3, 2, 8}
-        WEIGHT_HYBIRD_NCHW_NCHW88,
-    };
-
-    RelayoutPlaceholder(VarNode* src_var, LayoutType layout_type);
-
-    /*!
-     * \param src_var the input var
-     * \param layout_type tensor layout transform type of this relayout
-     * placeholder as described in LayoutType
-     */
-    static SymbolVar make(VarNode* src_var, LayoutType layout_type);
-
-    LayoutType layout_type() const { return m_layout_type; }
-
-private:
-    void init_output_static_infer_desc() override;
-    void scn_do_execute() override;
-    void init_output_comp_node() override;
-    const LayoutType m_layout_type;
-};
-
-MGB_DYN_TYPE_OBJ_FINAL_IMPL(TensorReformatPass::RelayoutPlaceholder);
-
-TensorReformatPass::RelayoutPlaceholder::RelayoutPlaceholder(
-        VarNode* src_var, LayoutType layout_type)
-        : Super(src_var->owner_graph(), {}, "RelayoutPlaceholder", {src_var}),
-          m_layout_type{layout_type} {
-    add_input({src_var});
-    add_equivalence_component<ScalarHash<LayoutType>>(m_layout_type);
-    add_output(None)->dtype(src_var->dtype());
-}
-
-void TensorReformatPass::RelayoutPlaceholder::scn_do_execute() {
-    mgb_throw(InternalError, "RelayoutPlaceholder opr can not be executed");
-}
-
-void TensorReformatPass::RelayoutPlaceholder::init_output_comp_node() {
-    output(0)->comp_node(input(0)->comp_node());
-}
-
-void TensorReformatPass::RelayoutPlaceholder::init_output_static_infer_desc() {
-    using namespace cg::static_infer;
-    auto&& mgr = owner_graph()->static_infer_manager();
-    DepVal deps;
-    for (auto i : input())
-        deps.push_back({i, DepType::SHAPE});
-    auto infer_shape = [this](TensorShape& dst, const InpVal& inp) {
-        TensorShape inp_shape = inp.val[0].shape();
-        dst = inp_shape;
-        if (layout_type() == RelayoutPlaceholder::LayoutType::NCHW4_TO_NCHW32) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 4);
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] / 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4] * 8;
-        } else if (layout_type() ==
-                   RelayoutPlaceholder::LayoutType::NCHW32_TO_NCHW4) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 32);
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] * 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4] / 8;
-        } else if (layout_type() ==
-                   RelayoutPlaceholder::LayoutType::NCHW4_TO_CHWN4) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 4);
-            dst[0] = inp_shape[1];
-            dst[1] = inp_shape[2];
-            dst[2] = inp_shape[3];
-            dst[3] = inp_shape[0];
-            dst[4] = inp_shape[4];
-        } else if (layout_type() ==
-                   RelayoutPlaceholder::LayoutType::CHWN4_TO_NCHW4) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 4);
-            dst[0] = inp_shape[3];
-            dst[1] = inp_shape[0];
-            dst[2] = inp_shape[1];
-            dst[3] = inp_shape[2];
-            dst[4] = inp_shape[4];
-        } else if (layout_type() ==
-                   RelayoutPlaceholder::LayoutType::NCHW_TO_NCHW88) {
-            mgb_assert(inp_shape.ndim == 4 && inp_shape[1] % 8 == 0);
-            dst.ndim = 5;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] / 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = 8;
-        } else if (layout_type() ==
-                   RelayoutPlaceholder::LayoutType::NCHW88_TO_NCHW) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 8);
-            dst.ndim = 4;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] * 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-        } else if (layout_type() == RelayoutPlaceholder::LayoutType::
-                                            WEIGHT_NCHW_TO_NCHW88_DENSE) {
-            mgb_assert(inp_shape.ndim == 4 && inp_shape[0] % 8 == 0 &&
-                       inp_shape[1] % 8 == 0);
-            dst.ndim = 6;
-            dst[0] = inp_shape[0] / 8;
-            dst[1] = inp_shape[1] / 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = 8;
-            dst[5] = 8;
-        } else if (layout_type() == RelayoutPlaceholder::LayoutType::
-                                            WEIGHT_NCHW_TO_NCHW88_GROUP) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[1] % 8 == 0 &&
-                       inp_shape[2] % 8 == 0);
-            dst.ndim = 7;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] / 8;
-            dst[2] = inp_shape[2] / 8;
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4];
-            dst[5] = 8;
-            dst[6] = 8;
-        } else if (layout_type() == RelayoutPlaceholder::LayoutType::
-                                            WEIGHT_NCHW_TO_NCHW88_CHAN) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[1] == 1 &&
-                       inp_shape[2] == 1 && inp_shape[0] % 8 == 0);
-            dst.ndim = 6;
-            dst[0] = inp_shape[0] / 8;
-            dst[1] = inp_shape[1];
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4];
-            dst[5] = 8;
-        } else {
-            mgb_assert(
-                    layout_type() ==
-                    RelayoutPlaceholder::LayoutType::WEIGHT_HYBIRD_NCHW_NCHW88);
-            mgb_assert(inp_shape.ndim == 4 && inp_shape[0] % 8 == 0);
-            dst.ndim = 5;
-            dst[0] = inp_shape[0] / 8;
-            dst[1] = inp_shape[2];
-            dst[2] = inp_shape[3];
-            dst[3] = inp_shape[1];
-            dst[4] = 8;
-        }
-        return true;
-    };
-    mgr.register_shape_infer(output(0), {SourceType::DEP, deps, infer_shape});
-}
-
-SymbolVar TensorReformatPass::RelayoutPlaceholder::make(
-        VarNode* src_var, LayoutType layout_type) {
-    return src_var->owner_graph()
-            ->insert_opr(
-                    std::make_unique<RelayoutPlaceholder>(src_var, layout_type))
-            ->output(0);
-}
-
-void TensorReformatPass::insert_pass(OptState& opt) const {
-    opt.set_var_replace_check_flag(m_var_replace_check_flag);
-    auto rewriter = opt.graph().make_rewriter();
-    VarNodeArray new_inp_cache;
-    auto on_opr = [this, &opt, &rewriter,
-                   &new_inp_cache](OperatorNodeBase* opr) {
-        auto it = m_opr_replace_func.find(opr->dyn_typeinfo());
-        if (it != m_opr_replace_func.end()) {
-            auto& new_inp = new_inp_cache;
-            new_inp.clear();
-            new_inp.reserve(opr->input().size());
-            for (auto&& inp : opr->input()) {
-                new_inp.push_back(rewriter.get_var(inp));
-            }
-            auto new_opr = (it->second)(opr, new_inp);
-            auto &&out0 = opr->output(), &&out1 = new_opr->output();
-            mgb_assert(out0.size() == out1.size(),
-                       "bad opr replace: src=%s{%s} dst=%s{%s}, src.size=%zu "
-                       "dst.size=%zu",
-                       opr->cname(), opr->dyn_typeinfo()->name,
-                       new_opr->cname(), new_opr->dyn_typeinfo()->name,
-                       out0.size(), out1.size());
-            for (size_t i = 0; i < out0.size(); ++i) {
-                if (!out0[i]->contain_flag(VarNode::Flag::VOLATILE_CONTENT)) {
-                    mgb_assert(!out1[i]->contain_flag(
-                            VarNode::Flag::VOLATILE_CONTENT));
-                    auto src = out0[i];
-                    auto dst = out1[i];
-                    if (opt.graph().endpoint_contain(src)) {
-                        // additional process on endpoint var node
-                        dst = on_graph_endpoint_var(dst, src);
-                    }
-                    rewriter.replace_var(src, dst, nullptr);
-                }
-            }
-        } else {
-            rewriter.auto_replace_outputs(opr);
-        }
-    };
-    opt.graph().iter(on_opr);
-    rewriter.apply_inplace();
-}
-
-void TensorReformatPass::translate_pass(OptState& opt) const {
-    ThinHashMap<RelayoutPlaceholder::LayoutType,
-                thin_function<VarNode*(VarNode*)>>
-            reformat;
-    using LayoutType = RelayoutPlaceholder::LayoutType;
-    reformat[LayoutType::NCHW4_TO_CHWN4] = [](VarNode* inp) -> VarNode* {
-        megdnn::param::RelayoutFormat param;
-        param.mode = megdnn::param::RelayoutFormat::Mode::NCHW4_CHWN4;
-        auto reformat = opr::RelayoutFormat::make(inp, param);
-        return reformat.node();
-    };
-    reformat[LayoutType::CHWN4_TO_NCHW4] = [](VarNode* inp) -> VarNode* {
-        megdnn::param::RelayoutFormat param;
-        param.mode = megdnn::param::RelayoutFormat::Mode::CHWN4_NCHW4;
-        auto reformat = opr::RelayoutFormat::make(inp, param);
-        return reformat.node();
-    };
-    reformat[LayoutType::NCHW4_TO_NCHW32] = [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0), sub(1) / 8, cv(8), sub(2), sub(3), sub(4)}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0), sub(1) / 8, sub(2), sub(3), sub(4) * 8}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 4, 2, 5});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::NCHW32_TO_NCHW4] = [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0), sub(1), sub(2), sub(3), cv(8), sub(4) / 8}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0), sub(1) * 8, sub(2), sub(3), sub(4) / 8}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 1, 4, 2, 3, 5});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::NCHW_TO_NCHW88] = [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0), sub(1) / 8, cv(8), sub(2), sub(3)}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0), sub(1) / 8, sub(2), sub(3), cv(8)}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 4, 2});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::NCHW88_TO_NCHW] = [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make({sub(0), sub(1) * 8, sub(2), sub(3)}, 0);
-        auto y0 = opr::Dimshuffle::make(x, {0, 1, 4, 2, 3});
-        auto y1 = opr::Reshape::make(y0, tshp0);
-        return y1.node();
-    };
-    reformat[LayoutType::WEIGHT_NCHW_TO_NCHW88_DENSE] =
-            [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0) / 8, cv(8), sub(1) / 8, cv(8), sub(2), sub(3)}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0) / 8, sub(1) / 8, sub(2), sub(3), cv(8), cv(8)}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 2, 4, 5, 3, 1});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::WEIGHT_NCHW_TO_NCHW88_GROUP] =
-            [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make({sub(0), sub(1) / 8, cv(8), sub(2) / 8,
-                                        cv(8), sub(3), sub(4)},
-                                       0),
-             tshp1 = opr::Concat::make({sub(0), sub(1) / 8, sub(2) / 8, sub(3),
-                                        sub(4), cv(8), cv(8)},
-                                       0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 5, 6, 4, 2});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::WEIGHT_NCHW_TO_NCHW88_CHAN] =
-            [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0) / 8, cv(8), sub(1), sub(2), sub(3), sub(4)}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0) / 8, sub(1), sub(2), sub(3), sub(4), cv(8)}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 2, 3, 4, 5, 1});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-    reformat[LayoutType::WEIGHT_HYBIRD_NCHW_NCHW88] =
-            [](VarNode* inp) -> VarNode* {
-        auto x = SymbolVar(inp);
-        auto xshp = opr::GetVarShape::make(x);
-        auto cv = [&x](int v) { return x.make_scalar(v); };
-        auto sub = [&xshp, &cv](int idx) {
-            return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-        };
-        auto tshp0 = opr::Concat::make(
-                     {sub(0) / 8, cv(8), sub(1), sub(2), sub(3)}, 0),
-             tshp1 = opr::Concat::make(
-                     {sub(0) / 8, sub(2), sub(3), sub(1), cv(8)}, 0);
-        auto y0 = opr::Reshape::make(x, tshp0);
-        auto y1 = opr::Dimshuffle::make(y0, {0, 3, 4, 2, 1});
-        auto y2 = opr::Reshape::make(y1, tshp1);
-        return y2.node();
-    };
-
-    auto rewriter = opt.graph().make_rewriter();
-    auto on_opr = [&reformat, &rewriter](OperatorNodeBase* opr) {
-        if (opr->same_type<RelayoutPlaceholder>()) {
-            auto ph = try_cast_as_op<RelayoutPlaceholder>(opr);
-            auto new_inp = rewriter.get_var(opr->input(0));
-            mgb_assert(reformat.count(ph->layout_type()),
-                       "no replace rule can be found for layout_type(%u)",
-                       static_cast<uint32_t>(ph->layout_type()));
-            auto new_var = reformat[ph->layout_type()](new_inp);
-            rewriter.replace_var(opr->output(0), new_var,
-                                 mgb_cstr_log("replace relayout placeholder"));
-            return;
-        }
-        rewriter.auto_replace_outputs(opr);
-    };
-    opt.graph().iter(on_opr);
-    rewriter.apply_inplace();
-}
-
-void TensorReformatPass::apply(OptState& opt) const {
-    insert_pass(opt);
-    translate_pass(opt);
-}
-
-/* ================ EnableTensorCorePass =============== */
-VarNode* EnableTensorCorePass::on_graph_endpoint_var(VarNode* new_var,
-                                                     VarNode* orig_var) const {
-    if (!orig_var->shape().eq_shape(new_var->shape())) {
-        return RelayoutPlaceholder::make(
-                       new_var,
-                       RelayoutPlaceholder::LayoutType::NCHW32_TO_NCHW4)
-                .node();
-    }
-    return new_var;
-}
-
-std::unique_ptr<EnableTensorCorePass>
-EnableTensorCorePass::make_tensorcore_converter() {
-    // replace rule for conv bias opr
-    auto replace_conv_bias_opr = [](OperatorNodeBase* opr,
-                                    const VarNodeArray& new_inp) {
-        using Param = megdnn::param::ConvBias;
-        using Format = Param::Format;
-        using Sparse = Param::Sparse;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& conv_bias = opr->cast_final_safe<opr::ConvBiasForward>();
-        if (conv_bias.param().format != Format::NCHW4 ||
-            conv_bias.output(0)->dtype().enumv() != DTypeEnum::QuantizedS8) {
-            size_t nr_inps = opr->input().size();
-            bool shape_has_changed = false;
-            for (size_t i = 0; i < nr_inps; ++i) {
-                if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                    shape_has_changed = true;
-                }
-            }
-            MGB_MARK_USED_VAR(shape_has_changed);
-            mgb_assert(
-                    !shape_has_changed,
-                    "EnableTensorCorePass assumes that the shape of inputs of"
-                    "ConvBias operators whose output dtype is not QuantizedS8 "
-                    "can not be changed in this opt pass");
-            return serialization::copy_opr_shallow(*opr, new_inp,
-                                                   opr->config());
-        }
-        mgb_assert(opr->input(1)->shape().eq_shape(new_inp[1]->shape()),
-                   "EnableTensorCorePass assumes that filter tensor of "
-                   "conv_bias operator can not be changed by other operators");
-        VarNode* orig_filter = opr->input(1);
-        auto is_nchw4 = [](TensorShape shape) -> bool {
-            return shape.ndim == 5 && shape[4] == 4;
-        };
-        auto is_nchw32 = [](TensorShape shape) -> bool {
-            return shape.ndim == 5 && shape[4] == 32;
-        };
-        bool can_replace_nchw32 = false;
-        VarNode *src = nullptr, *weight = nullptr, *bias = nullptr,
-                *z_inp = nullptr;
-        // process src tensor
-        if (is_nchw4(new_inp[0]->shape())) {  // new input is NCHW4 layout
-            size_t group = 1, icpg, ocpg;
-            if (conv_bias.param().sparse == Sparse::DENSE) {
-                icpg = orig_filter->shape()[1] * 4;
-                ocpg = orig_filter->shape()[0];
-            } else {
-                mgb_assert(conv_bias.param().sparse == Sparse::GROUP);
-                group = orig_filter->shape()[0];
-                icpg = orig_filter->shape()[2];
-                ocpg = orig_filter->shape()[1];
-                if (icpg == 1 && ocpg == 1) {  // channel wise conv
-                    group *= 4;
-                } else {
-                    icpg *= 4;
-                }
-            }
-            // nchw32 layout need that input width and height are larger than 3
-            size_t ih = new_inp[0]->shape()[2], iw = new_inp[0]->shape()[3];
-            if (group == 1 && ocpg % 32 == 0 && icpg % 32 == 0 && ih >= 3 &&
-                iw >= 3) {
-                auto symvar = RelayoutPlaceholder::make(
-                        new_inp[0],
-                        RelayoutPlaceholder::LayoutType::NCHW4_TO_NCHW32);
-                src = symvar.node();
-                can_replace_nchw32 = true;
-            } else {
-                src = new_inp[0];
-            }
-        } else {  // new input is NCHW32 layout
-            mgb_assert(is_nchw32(new_inp[0]->shape()));
-            size_t group = 1, ocpg;
-            if (conv_bias.param().sparse == Sparse::DENSE) {
-                ocpg = orig_filter->shape()[0];
-            } else {
-                mgb_assert(conv_bias.param().sparse == Sparse::GROUP);
-                size_t icpg = orig_filter->shape()[2];
-                ocpg = orig_filter->shape()[1];
-                if (icpg == 1 && ocpg == 1) {
-                    group *= 4;
-                } else {
-                    icpg *= 4;
-                }
-            }
-            size_t ih = new_inp[0]->shape()[2], iw = new_inp[0]->shape()[3];
-            if (group == 1 && ocpg % 32 == 0 && ih >= 3 && iw >= 3) {
-                can_replace_nchw32 = true;
-                src = new_inp[0];
-            } else {
-                auto symvar = RelayoutPlaceholder::make(
-                        new_inp[0],
-                        RelayoutPlaceholder::LayoutType::NCHW32_TO_NCHW4);
-                src = symvar.node();
-            }
-        }
-        // process filter tensor
-        if (can_replace_nchw32) {
-            auto symvar = RelayoutPlaceholder::make(
-                    new_inp[1],
-                    RelayoutPlaceholder::LayoutType::NCHW4_TO_NCHW32);
-            weight = symvar.node();
-        } else {
-            weight = new_inp[1];
-        }
-        if (new_inp.size() == 2) {
-            if (can_replace_nchw32) {
-                auto param = conv_bias.param();
-                param.format = Format::NCHW32;
-                auto new_opr = opr::ConvBiasForward::make(
-                        src, weight, param, conv_bias.execution_policy(),
-                        conv_bias.config());
-                return new_opr.node()->owner_opr();
-            } else {
-                VarNodeArray inps{src, weight};
-                auto new_opr = serialization::copy_opr_shallow(*opr, inps,
-                                                               opr->config());
-                return new_opr;
-            }
-        }
-        auto process_inp = [&](VarNode* inp) -> VarNode* {
-            if (can_replace_nchw32) {
-                if (is_nchw4(inp->shape())) {
-                    auto symvar = RelayoutPlaceholder::make(
-                            inp,
-                            RelayoutPlaceholder::LayoutType::NCHW4_TO_NCHW32);
-                    return symvar.node();
-                } else {
-                    mgb_assert(is_nchw32(inp->shape()));
-                    return inp;
-                }
-            } else {
-                if (is_nchw4(inp->shape())) {
-                    return inp;
-                } else {
-                    mgb_assert(is_nchw32(inp->shape()));
-                    auto symvar = RelayoutPlaceholder::make(
-                            inp,
-                            RelayoutPlaceholder::LayoutType::NCHW32_TO_NCHW4);
-                    return symvar.node();
-                }
-            }
-        };
-        // process bias tensor
-        bias = process_inp(new_inp[2]);
-        if (new_inp.size() == 3) {
-            if (can_replace_nchw32) {
-                auto param = conv_bias.param();
-                param.format = Format::NCHW32;
-                auto new_opr = opr::ConvBiasForward::make(
-                        src, weight, bias, param, conv_bias.execution_policy(),
-                        conv_bias.config());
-                return new_opr.node()->owner_opr();
-            } else {
-                VarNodeArray inps{src, weight, bias};
-                auto new_opr = serialization::copy_opr_shallow(*opr, inps,
-                                                               opr->config());
-                return new_opr;
-            }
-        }
-        // process z_inp tensor
-        z_inp = process_inp(new_inp[3]);
-        if (can_replace_nchw32) {
-            auto param = conv_bias.param();
-            param.format = Format::NCHW32;
-            auto new_opr = opr::ConvBiasForward::make(
-                    src, weight, bias, z_inp, param,
-                    conv_bias.execution_policy(), conv_bias.config());
-            return new_opr.node()->owner_opr();
-        }
-        VarNodeArray inps{src, weight, bias, z_inp};
-        auto new_opr =
-                serialization::copy_opr_shallow(*opr, inps, opr->config());
-        return new_opr;
-    };
-    // replace rule for elemwise like opr
-    // for oprs support NCHW4 and NCHW32 layout
-    auto replace_elemwise_like_opr = [](OperatorNodeBase* opr,
-                                        const VarNodeArray new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        size_t nr_inps = new_inp.size();
-        size_t nr_shape_changed = 0;
-        for (size_t i = 0; i < nr_inps; ++i) {
-            if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                nr_shape_changed++;
-            }
-        }
-        if (nr_shape_changed) {
-            auto inps = new_inp;
-            if (nr_shape_changed >=
-                nr_inps / 2) {  // NCHW32 > NCHW4 -> use NCHW32
-                for (size_t i = 0; i < nr_inps; ++i) {
-                    if (opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                        auto symvar = RelayoutPlaceholder::make(
-                                new_inp[i], RelayoutPlaceholder::LayoutType::
-                                                    NCHW4_TO_NCHW32);
-                        inps[i] = symvar.node();
-                    }
-                }
-            } else {  // NCHW32 < NCHW4 -> use NCHW4
-                for (size_t i = 0; i < nr_inps; ++i) {
-                    if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                        auto symvar = RelayoutPlaceholder::make(
-                                new_inp[i], RelayoutPlaceholder::LayoutType::
-                                                    NCHW32_TO_NCHW4);
-                        inps[i] = symvar.node();
-                    }
-                }
-            }
-            return serialization::copy_opr_shallow(*opr, inps, opr->config());
-        }
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-    };
-    // for oprs only supports NCHW4 layout
-    auto replace_inps_to_nchw4 = [](OperatorNodeBase* opr,
-                                    const VarNodeArray new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        VarNodeArray inps = new_inp;
-        for (size_t i = 0; i < opr->input().size(); ++i) {
-            if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                mgb_assert(opr->input(i)->shape().ndim == 5 &&
-                           opr->input(i)->shape()[4] == 4);
-                mgb_assert(new_inp[i]->shape().ndim == 5 &&
-                           new_inp[i]->shape()[4] == 32);
-                auto symvar = RelayoutPlaceholder::make(
-                        new_inp[i],
-                        RelayoutPlaceholder::LayoutType::NCHW32_TO_NCHW4);
-                inps[i] = symvar.node();
-            }
-        }
-        auto new_opr =
-                serialization::copy_opr_shallow(*opr, inps, opr->config());
-        return new_opr;
-    };
-    auto replace_non_nchw4_opr = [](OperatorNodeBase* opr,
-                                    const VarNodeArray new_inp) {
-        size_t nr_inps = opr->input().size();
-        bool shape_has_changed = false;
-        for (size_t i = 0; i < nr_inps; ++i) {
-            if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                shape_has_changed = true;
-            }
-        }
-        mgb_assert(!shape_has_changed,
-                   "EnableTensorCorePass assumes that inputs' shape of "
-                   "non-nchw4 operators "
-                   "can not be changed in this opt "
-                   "pass");
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-
-    };
-    auto replace_warp_affine_opr =
-            [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                    OperatorNodeBase* opr, const VarNodeArray new_inp) {
-                using Param = opr::WarpAffineForward::Param;
-                using Format = Param::Format;
-                mgb_assert(opr->input().size() == new_inp.size());
-                auto& warp = opr->cast_final_safe<opr::WarpAffineForward>();
-                if (warp.param().format != Format::NCHW4) {
-                    return replace_non_nchw4_opr(opr, new_inp);
-                }
-                return replace_inps_to_nchw4(opr, new_inp);
-            };
-    auto replace_warp_perspective_opr =
-            [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                    OperatorNodeBase* opr, const VarNodeArray new_inp) {
-                using Param = opr::WarpPerspectiveForward::Param;
-                using Format = Param::Format;
-                mgb_assert(opr->input().size() == new_inp.size());
-                auto& warp =
-                        opr->cast_final_safe<opr::WarpPerspectiveForward>();
-                if (warp.param().format != Format::NCHW4) {
-                    return replace_non_nchw4_opr(opr, new_inp);
-                }
-                return replace_inps_to_nchw4(opr, new_inp);
-            };
-    auto replace_resize_opr = [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                                      OperatorNodeBase* opr,
-                                      const VarNodeArray new_inp) {
-        using Param = opr::ResizeForward::Param;
-        using Format = Param::Format;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& resize = opr->cast_final_safe<opr::ResizeForward>();
-        if (resize.param().format != Format::NCHW4) {
-            return replace_non_nchw4_opr(opr, new_inp);
-        }
-        return replace_inps_to_nchw4(opr, new_inp);
-    };
-    auto replace_pooling_opr = [replace_non_nchw4_opr](
-                                       OperatorNodeBase* opr,
-                                       const VarNodeArray new_inp) {
-        using Param = opr::PoolingForward::Param;
-        using Format = Param::Format;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& pooling = opr->cast_final_safe<opr::PoolingForward>();
-        if (pooling.param().format != Format::NCHW4) {
-            return replace_non_nchw4_opr(opr, new_inp);
-        }
-        size_t nr_inps = opr->input().size();
-        MGB_MARK_USED_VAR(nr_inps);
-        mgb_assert(nr_inps == 1);
-        if (!opr->input(0)->shape().eq_shape(new_inp[0]->shape())) {
-            mgb_assert(opr->input(0)->shape().ndim == 5 &&
-                       opr->input(0)->shape()[4] == 4);
-            mgb_assert(new_inp[0]->shape().ndim == 5 &&
-                       new_inp[0]->shape()[4] == 32);
-            auto new_param = pooling.param();
-            new_param.format = Format::NCHW32;
-            auto new_pooling = opr::PoolingForward::make(new_inp[0], new_param,
-                                                         opr->config());
-            return new_pooling.node()->owner_opr();
-        }
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-    };
-    auto ret = std::make_unique<EnableTensorCorePass>();
-    ret->set_var_replace_check_flag(VarReplaceCheckFlag::NOCHECK);
-    auto&& replace_func = ret->m_opr_replace_func;
-    replace_func[opr::ConvBiasForward::typeinfo()] = replace_conv_bias_opr;
-
-    // elemwise like
-    replace_func[opr::Elemwise::typeinfo()] = replace_elemwise_like_opr;
-    replace_func[opr::TypeCvt::typeinfo()] = replace_elemwise_like_opr;
-    replace_func[opr::ElemwiseMultiType::typeinfo()] =
-            replace_elemwise_like_opr;
-    replace_func[opr::PowC::typeinfo()] = replace_elemwise_like_opr;
-
-    // format aware
-    replace_func[opr::PoolingForward::typeinfo()] = replace_pooling_opr;
-    replace_func[opr::WarpAffineForward::typeinfo()] = replace_warp_affine_opr;
-    replace_func[opr::WarpPerspectiveForward::typeinfo()] =
-            replace_warp_perspective_opr;
-    replace_func[opr::ResizeForward::typeinfo()] = replace_resize_opr;
-
-    // to nchw4
-    replace_func[opr::Reduce::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Concat::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Reshape::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::GetVarShape::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Dimshuffle::typeinfo()] = replace_inps_to_nchw4;
-    return ret;
-}
-
-/* ================ EnableCHWN4Pass =============== */
-VarNode* EnableCHWN4Pass::on_graph_endpoint_var(VarNode* new_var,
-                                                VarNode* /* orig_var */) const {
-    if (m_varshape_changed.count(new_var)) {
-        return RelayoutPlaceholder::make(
-                       new_var, RelayoutPlaceholder::LayoutType::CHWN4_TO_NCHW4)
-                .node();
-    }
-    return new_var;
-}
-
-std::unique_ptr<EnableCHWN4Pass> EnableCHWN4Pass::make_chwn4_converter() {
-    auto ret = std::make_unique<EnableCHWN4Pass>();
-    ret->set_var_replace_check_flag(VarReplaceCheckFlag::NOCHECK);
-    auto&& replace_func = ret->m_opr_replace_func;
-    auto&& varshape_changed = ret->m_varshape_changed;
-    // replace rule for conv bias opr
-    auto replace_conv_bias_opr = [&varshape_changed](
-                                         OperatorNodeBase* opr,
-                                         const VarNodeArray& new_inp) {
-        using Param = megdnn::param::ConvBias;
-        using Format = Param::Format;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& conv_bias = opr->cast_final_safe<opr::ConvBiasForward>();
-        if (conv_bias.param().format != Format::NCHW4 ||
-            conv_bias.output(0)->dtype().enumv() != DTypeEnum::QuantizedS8) {
-            size_t nr_inps = new_inp.size();
-            bool shape_has_changed = false;
-            for (size_t i = 0; i < nr_inps; ++i) {
-                if (varshape_changed.count(new_inp[i])) {
-                    shape_has_changed = true;
-                    break;
-                }
-            }
-            mgb_assert(
-                    !shape_has_changed,
-                    "EnableCHWN4Pass assumes that the shape of inputs of"
-                    "ConvBias operators whose output dtype is not QuantizedS8 "
-                    "can not be changed in this opt pass");
-            return serialization::copy_opr_shallow(*opr, new_inp,
-                                                   opr->config());
-        }
-        mgb_assert(varshape_changed.count(new_inp[1]) == 0,
-                   "EnableCHWN4Pass assumes that filter tensor of "
-                   "conv_bias operator can not be changed by other operators");
-        VarNode *src = nullptr, *weight = nullptr, *bias = nullptr,
-                *z_inp = nullptr;
-        // process src tensor
-        if (varshape_changed.count(new_inp[0]) ==
-            0) {  // new input is NCHW4 layout
-            // currently not support group conv
-            auto symvar = RelayoutPlaceholder::make(
-                    new_inp[0],
-                    RelayoutPlaceholder::LayoutType::NCHW4_TO_CHWN4);
-            src = symvar.node();
-        } else {  // new input is NCHW32 layout
-            src = new_inp[0];
-        }
-        // process weight tensor
-        {
-            auto symvar = RelayoutPlaceholder::make(
-                    new_inp[1],
-                    RelayoutPlaceholder::LayoutType::NCHW4_TO_CHWN4);
-            weight = symvar.node();
-        }
-        if (new_inp.size() == 2) {
-            auto param = conv_bias.param();
-            param.format = Format::CHWN4;
-            auto new_opr = opr::ConvBiasForward::make(
-                    src, weight, param, conv_bias.execution_policy(),
-                    conv_bias.config());
-            varshape_changed.insert(new_opr.node());
-            return new_opr.node()->owner_opr();
-        }
-        auto process_inp = [&](VarNode* inp) -> VarNode* {
-            if (varshape_changed.count(inp) == 0) {
-                auto symvar = RelayoutPlaceholder::make(
-                        inp, RelayoutPlaceholder::LayoutType::NCHW4_TO_CHWN4);
-                return symvar.node();
-            } else {
-                return inp;
-            }
-        };
-        // process bias tensor
-        bias = process_inp(new_inp[2]);
-        if (new_inp.size() == 3) {
-            auto param = conv_bias.param();
-            param.format = Format::CHWN4;
-            auto new_opr = opr::ConvBiasForward::make(
-                    src, weight, bias, param, conv_bias.execution_policy(),
-                    conv_bias.config());
-            varshape_changed.insert(new_opr.node());
-            return new_opr.node()->owner_opr();
-        }
-        // process z_inp tensor
-        z_inp = process_inp(new_inp[3]);
-        auto param = conv_bias.param();
-        param.format = Format::CHWN4;
-        auto new_opr = opr::ConvBiasForward::make(
-                src, weight, bias, z_inp, param, conv_bias.execution_policy(),
-                conv_bias.config());
-        varshape_changed.insert(new_opr.node());
-        return new_opr.node()->owner_opr();
-    };
-    // replace rule for elemwise like opr
-    // for oprs support NCHW4 and CHWN4 layout
-    auto replace_elemwise_like_opr = [&varshape_changed](
-                                             OperatorNodeBase* opr,
-                                             const VarNodeArray new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        size_t nr_inps = new_inp.size();
-        size_t nr_shape_changed = 0;
-        for (size_t i = 0; i < nr_inps; ++i) {
-            if (varshape_changed.count(new_inp[i])) {
-                nr_shape_changed++;
-            }
-        }
-        if (nr_shape_changed) {
-            auto inps = new_inp;
-            if (nr_shape_changed >= nr_inps / 2) {  // CHWN4 > NCHW4 -> use CHWN4
-                for (size_t i = 0; i < nr_inps; ++i) {
-                    if (varshape_changed.count(new_inp[i]) == 0) {
-                        auto symvar = RelayoutPlaceholder::make(
-                                new_inp[i], RelayoutPlaceholder::LayoutType::
-                                                    NCHW4_TO_CHWN4);
-                        inps[i] = symvar.node();
-                    }
-                }
-                auto new_opr = serialization::copy_opr_shallow(*opr, inps,
-                                                               opr->config());
-                varshape_changed.insert(new_opr->output(0));
-                return new_opr;
-            } else {  // CHWN4 < NCHW4 -> use NCHW4
-                for (size_t i = 0; i < nr_inps; ++i) {
-                    if (varshape_changed.count(new_inp[i])) {
-                        auto symvar = RelayoutPlaceholder::make(
-                                new_inp[i], RelayoutPlaceholder::LayoutType::
-                                                    CHWN4_TO_NCHW4);
-                        inps[i] = symvar.node();
-                    }
-                }
-                return serialization::copy_opr_shallow(*opr, inps,
-                                                       opr->config());
-            }
-        }
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-    };
-    // for oprs only supports NCHW4 layout
-    auto replace_inps_to_nchw4 = [&varshape_changed](
-                                         OperatorNodeBase* opr,
-                                         const VarNodeArray new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        VarNodeArray inps = new_inp;
-        for (size_t i = 0; i < opr->input().size(); ++i) {
-            if (varshape_changed.count(new_inp[i])) {
-                auto symvar = RelayoutPlaceholder::make(
-                        new_inp[i],
-                        RelayoutPlaceholder::LayoutType::CHWN4_TO_NCHW4);
-                inps[i] = symvar.node();
-            }
-        }
-        auto new_opr =
-                serialization::copy_opr_shallow(*opr, inps, opr->config());
-        return new_opr;
-    };
-    auto replace_non_nchw4_opr = [&varshape_changed](
-                                         OperatorNodeBase* opr,
-                                         const VarNodeArray new_inp) {
-        size_t nr_inps = opr->input().size();
-        bool shape_has_changed = false;
-        for (size_t i = 0; i < nr_inps; ++i) {
-            if (varshape_changed.count(new_inp[i])) {
-                shape_has_changed = true;
-            }
-        }
-        mgb_assert(!shape_has_changed,
-                   "EnableCHWN4Pass assumes that inputs' shape of "
-                   "non-nchw4 operators "
-                   "can not be changed in this opt "
-                   "pass");
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-
-    };
-    // capture by copy to avoid use after return
-    auto replace_warp_affine_opr =
-            [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                    OperatorNodeBase* opr, const VarNodeArray new_inp) {
-                using Param = opr::WarpAffineForward::Param;
-                using Format = Param::Format;
-                mgb_assert(opr->input().size() == new_inp.size());
-                auto& warp = opr->cast_final_safe<opr::WarpAffineForward>();
-                if (warp.param().format != Format::NCHW4) {
-                    return replace_non_nchw4_opr(opr, new_inp);
-                }
-                return replace_inps_to_nchw4(opr, new_inp);
-            };
-    auto replace_warp_perspective_opr =
-            [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                    OperatorNodeBase* opr, const VarNodeArray new_inp) {
-                using Param = opr::WarpPerspectiveForward::Param;
-                using Format = Param::Format;
-                mgb_assert(opr->input().size() == new_inp.size());
-                auto& warp =
-                        opr->cast_final_safe<opr::WarpPerspectiveForward>();
-                if (warp.param().format != Format::NCHW4) {
-                    return replace_non_nchw4_opr(opr, new_inp);
-                }
-                return replace_inps_to_nchw4(opr, new_inp);
-            };
-    auto replace_resize_opr = [replace_inps_to_nchw4, replace_non_nchw4_opr](
-                                      OperatorNodeBase* opr,
-                                      const VarNodeArray new_inp) {
-        using Param = opr::ResizeForward::Param;
-        using Format = Param::Format;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& resize = opr->cast_final_safe<opr::ResizeForward>();
-        if (resize.param().format != Format::NCHW4) {
-            return replace_non_nchw4_opr(opr, new_inp);
-        }
-        return replace_inps_to_nchw4(opr, new_inp);
-    };
-    auto replace_pooling_opr = [&varshape_changed, replace_non_nchw4_opr](
-                                       OperatorNodeBase* opr,
-                                       const VarNodeArray new_inp) {
-        using Param = opr::PoolingForward::Param;
-        using Format = Param::Format;
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& pooling = opr->cast_final_safe<opr::PoolingForward>();
-        if (pooling.param().format != Format::NCHW4) {
-            return replace_non_nchw4_opr(opr, new_inp);
-        }
-        size_t nr_inps = opr->input().size();
-        MGB_MARK_USED_VAR(nr_inps);
-        mgb_assert(nr_inps == 1);
-        if (varshape_changed.count(new_inp[0])) {
-            auto new_param = pooling.param();
-            new_param.format = Format::CHWN4;
-            auto new_pooling = opr::PoolingForward::make(new_inp[0], new_param,
-                                                         opr->config());
-            varshape_changed.insert(new_pooling.node());
-            return new_pooling.node()->owner_opr();
-        }
-        return serialization::copy_opr_shallow(*opr, new_inp, opr->config());
-    };
-    replace_func[opr::ConvBiasForward::typeinfo()] = replace_conv_bias_opr;
-
-    // elemwise like
-    replace_func[opr::Elemwise::typeinfo()] = replace_elemwise_like_opr;
-    replace_func[opr::TypeCvt::typeinfo()] = replace_elemwise_like_opr;
-    replace_func[opr::ElemwiseMultiType::typeinfo()] =
-            replace_elemwise_like_opr;
-    replace_func[opr::PowC::typeinfo()] = replace_elemwise_like_opr;
-
-    // format aware
-    replace_func[opr::PoolingForward::typeinfo()] = replace_pooling_opr;
-    replace_func[opr::WarpAffineForward::typeinfo()] = replace_warp_affine_opr;
-    replace_func[opr::WarpPerspectiveForward::typeinfo()] =
-            replace_warp_perspective_opr;
-    replace_func[opr::ResizeForward::typeinfo()] = replace_resize_opr;
-
-    // to nchw4
-    replace_func[opr::Reduce::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Concat::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Reshape::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::GetVarShape::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::Dimshuffle::typeinfo()] = replace_inps_to_nchw4;
-    replace_func[opr::BatchConvBias::typeinfo()] = replace_inps_to_nchw4;
-    return ret;
-}
-
-/* ================ EnableNchwxxPass =============== */
-VarNode* EnableNchwxxPass::on_graph_endpoint_var(VarNode* new_var,
-                                                 VarNode* orig_var) const {
-    if (!orig_var->shape().eq_shape(new_var->shape())) {
-        return RelayoutPlaceholder::make(
-                       new_var, RelayoutPlaceholder::LayoutType::NCHW88_TO_NCHW)
-                .node();
-    }
-    return new_var;
-}
-
-std::unique_ptr<EnableNchwxxPass> EnableNchwxxPass::make_nchwxx_converter(
-        size_t pack_c_size) {
-    auto ret = std::make_unique<EnableNchwxxPass>();
-    ret->set_var_replace_check_flag(VarReplaceCheckFlag::NOCHECK);
-    //! First is whether the conv can trans to nchwxx, second is the filter
-    //! trans mode
-    using RelayoutMode = RelayoutPlaceholder::LayoutType;
-    using TestFilterResult = std::pair<TransType, RelayoutMode>;
-    RelayoutMode weight_to_nchwxx_mode_dense =
-            RelayoutMode::WEIGHT_NCHW_TO_NCHW88_DENSE;
-    RelayoutMode weight_to_nchwxx_mode_group =
-            RelayoutMode::WEIGHT_NCHW_TO_NCHW88_GROUP;
-    RelayoutMode weight_to_nchwxx_mode_chan =
-            RelayoutMode::WEIGHT_NCHW_TO_NCHW88_CHAN;
-    RelayoutMode hybrid_nchw_nchwxx = RelayoutMode::WEIGHT_HYBIRD_NCHW_NCHW88;
-    RelayoutMode src_to_nchwxx_mode = RelayoutMode::NCHW_TO_NCHW88;
-    RelayoutMode src_to_nchw_mode = RelayoutMode::NCHW88_TO_NCHW;
-    megdnn::param::ConvBias::Format conv_bias_format =
-            megdnn::param::ConvBias::Format::NCHW88;
-    megdnn::param::Convolution::Format conv_format =
-            megdnn::param::ConvolutionV0::Format::NCHW88;
-    megdnn::param::Pooling::Format pooling_format =
-            megdnn::param::Pooling::Format::NCHW88;
-    std::string convter_pass_name = "conv_format_nchw88";
-    mgb_assert(pack_c_size == static_cast<size_t>(8),
-               "The ConvertFormatPass to nchwxx only support NCHW88 now !");
-    auto test_trans_nchwxx =
-            [pack_c_size, weight_to_nchwxx_mode_dense,
-             weight_to_nchwxx_mode_group, weight_to_nchwxx_mode_chan,
-             hybrid_nchw_nchwxx](
-                    const megdnn::param::Convolution::Sparse conv_mode,
-                    const VarNode* filter) -> TestFilterResult {
-        TestFilterResult ret{TransType::TRANS_NONE, {}};
-        if (conv_mode == megdnn::param::Convolution::Sparse::DENSE) {
-            size_t IC = filter->shape()[1];
-            size_t OC = filter->shape()[0];
-            if ((IC % pack_c_size == 0) && (OC % pack_c_size == 0)) {
-                ret.first = TransType::TRANS_PURE_NCHWXX;
-                ret.second = weight_to_nchwxx_mode_dense;
-            } else if (IC < pack_c_size && OC % pack_c_size == 0) {
-                ret.first = TransType::TRANS_HYBIRD_NCHWXX;
-                ret.second = hybrid_nchw_nchwxx;
-            }
-        } else {
-            mgb_assert(conv_mode == megdnn::param::Convolution::Sparse::GROUP);
-            size_t group = filter->shape()[0];
-            size_t ocpg = filter->shape()[1];
-            size_t icpg = filter->shape()[2];
-            if (icpg == 1 && ocpg == 1 && (group % pack_c_size == 0)) {
-                ret.first = TransType::TRANS_PURE_NCHWXX;
-                ret.second = weight_to_nchwxx_mode_chan;
-            } else if ((icpg % pack_c_size == 0) && (ocpg % pack_c_size == 0)) {
-                ret.first = TransType::TRANS_PURE_NCHWXX;
-                ret.second = weight_to_nchwxx_mode_group;
-            }
-        }
-        return ret;
-    };
-    auto replace_conv_opr = [test_trans_nchwxx, conv_format, src_to_nchwxx_mode,
-                             src_to_nchw_mode](OperatorNodeBase* opr,
-                                               const VarNodeArray& new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& conv_opr = opr->cast_final_safe<opr::ConvolutionForward>();
-        mgb_assert(conv_opr.param().format ==
-                           megdnn::param::Convolution::Format::NCHW,
-                   "ConvertFormat Pass only support converting NCHW to NCHWXX");
-        auto is_trans = test_trans_nchwxx(conv_opr.param().sparse, new_inp[1]);
-        //! can not trans to nchwxx
-        if (is_trans.first == TransType::TRANS_NONE) {
-            mgb_assert(new_inp[1]->shape().ndim == 4 ||
-                               new_inp[1]->shape().ndim == 5,
-                       "The origin filter is not NCHW mode");
-            VarNodeArray temp_inp = new_inp;
-            //! if src is nchwxx, should RelayoutPlaceholder to nchw
-            if (temp_inp[0]->shape().ndim == 5) {
-                auto new_src =
-                        RelayoutPlaceholder::make(new_inp[0], src_to_nchw_mode);
-                temp_inp[0] = new_src.node();
-            }
-            auto new_opr = serialization::copy_opr_shallow(*opr, temp_inp,
-                                                           opr->config());
-            return new_opr;
-        } else if (is_trans.first == TransType::TRANS_PURE_NCHWXX) {
-            //! filter trans to nchwxx mode
-            mgb_assert(new_inp[1]->shape().ndim == 4 ||
-                               new_inp[1]->shape().ndim == 5,
-                       "The origin filter is not NCHW mode");
-            VarNode *conv_src = new_inp[0], *conv_filter = new_inp[1];
-            auto new_filter =
-                    RelayoutPlaceholder::make(new_inp[1], is_trans.second);
-            conv_filter = new_filter.node();
-            //! src trans to nchwxx mode
-            if (new_inp[0]->shape().ndim != 5) {
-                mgb_assert(new_inp[0]->shape().ndim == 4);
-                auto new_src = RelayoutPlaceholder::make(new_inp[0],
-                                                         src_to_nchwxx_mode);
-                conv_src = new_src.node();
-            }
-            auto new_param = conv_opr.param();
-            new_param.format = conv_format;
-            mgb_assert(conv_src->shape().ndim == 5 &&
-                               conv_filter->shape().ndim >= 6,
-                       "The conv src dim is not trans to nchwxx");
-            auto new_conv_opr = opr::Convolution::make(
-                    conv_src, conv_filter, new_param,
-                    conv_opr.execution_policy(), conv_opr.config());
-            OperatorNodeBase* new_opr = new_conv_opr.node()->owner_opr();
-            mgb_assert(new_conv_opr.shape().ndim == 5,
-                       "The conv dst dim is not trans to nchwxx");
-            return new_opr;
-        } else {
-            mgb_assert(is_trans.first == TransType::TRANS_HYBIRD_NCHWXX);
-            VarNode *conv_src = new_inp[0], *conv_filter = new_inp[1];
-            auto new_filter =
-                    RelayoutPlaceholder::make(new_inp[1], is_trans.second);
-            conv_filter = new_filter.node();
-            mgb_assert(conv_src->shape().ndim == 4 &&
-                               conv_filter->shape().ndim == 5,
-                       "The src and filter is OK");
-            auto new_param = conv_opr.param();
-            new_param.format = conv_format;
-            auto new_conv_opr = opr::Convolution::make(
-                    conv_src, conv_filter, new_param,
-                    conv_opr.execution_policy(), conv_opr.config());
-            OperatorNodeBase* new_opr = new_conv_opr.node()->owner_opr();
-            mgb_assert(new_conv_opr.shape().ndim == 5,
-                       "The conv dst dim is not trans to nchwxx");
-            return new_opr;
-        }
-    };
-
-    auto replace_conv_bias_opr = [test_trans_nchwxx, conv_bias_format,
-                                  src_to_nchwxx_mode, src_to_nchw_mode](
-                                         OperatorNodeBase* opr,
-                                         const VarNodeArray& new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& conv_bias_opr = opr->cast_final_safe<opr::ConvBiasForward>();
-        mgb_assert(conv_bias_opr.param().format ==
-                           megdnn::param::ConvBias::Format::NCHW,
-                   "ConvertFormat Pass only support converting NCHW to NCHWXX");
-        auto is_trans =
-                test_trans_nchwxx(conv_bias_opr.param().sparse, new_inp[1]);
-        //! can not trans to nchwxx
-        if (is_trans.first == TransType::TRANS_NONE) {
-            mgb_assert(new_inp[1]->shape().ndim == 4 ||
-                               new_inp[1]->shape().ndim == 5,
-                       "The origin filter is not NCHW mode");
-            VarNodeArray temp_inp = new_inp;
-            //! if src is nchwxx, should RelayoutPlaceholder to nchw
-            if (temp_inp[0]->shape().ndim == 5) {
-                auto new_src =
-                        RelayoutPlaceholder::make(new_inp[0], src_to_nchw_mode);
-                temp_inp[0] = new_src.node();
-            }
-            //! the bias is nchwxx
-            if (temp_inp[2]->shape().ndim == 5) {
-                auto new_bias =
-                        RelayoutPlaceholder::make(new_inp[2], src_to_nchw_mode);
-                temp_inp[2] = new_bias.node();
-            }
-            auto new_opr = serialization::copy_opr_shallow(*opr, temp_inp,
-                                                           opr->config());
-            return new_opr;
-        } else if (is_trans.first == TransType::TRANS_PURE_NCHWXX) {
-            VarNode *conv_bias_src = new_inp[0], *conv_bias_filter = new_inp[1],
-                    *conv_bias_bias = new_inp[2];
-            //! filter trans to nchwxx mode
-            mgb_assert(new_inp[1]->shape().ndim == 4 ||
-                               new_inp[1]->shape().ndim == 5,
-                       "The origin filter is not NCHW mode");
-            auto new_filter =
-                    RelayoutPlaceholder::make(new_inp[1], is_trans.second);
-            conv_bias_filter = new_filter.node();
-            //! src trans to nchwxx mode
-            if (new_inp[0]->shape().ndim != 5) {
-                mgb_assert(new_inp[0]->shape().ndim == 4);
-                auto new_src = RelayoutPlaceholder::make(new_inp[0],
-                                                         src_to_nchwxx_mode);
-                conv_bias_src = new_src.node();
-            }
-            //! bias trans to nchwxx mode, bias may be scale
-            if (new_inp[2]->shape().ndim == 4) {
-                auto new_bias = RelayoutPlaceholder::make(new_inp[2],
-                                                          src_to_nchwxx_mode);
-                conv_bias_bias = new_bias.node();
-            }
-
-            auto new_param = conv_bias_opr.param();
-            new_param.format = conv_bias_format;
-            mgb_assert(conv_bias_src->shape().ndim == 5 &&
-                               conv_bias_filter->shape().ndim >= 6,
-                       "The conv_bias src dim is not trans to nchwxx");
-            auto new_conv_bias_opr = opr::ConvBias::make(
-                    conv_bias_src, conv_bias_filter, conv_bias_bias, new_param,
-                    conv_bias_opr.execution_policy(), conv_bias_opr.config());
-            OperatorNodeBase* new_opr = new_conv_bias_opr.node()->owner_opr();
-            mgb_assert(new_conv_bias_opr.shape().ndim == 5,
-                       "The conv_bias dst dim is not trans to nchwxx");
-            return new_opr;
-        } else {
-            mgb_assert(is_trans.first == TransType::TRANS_HYBIRD_NCHWXX);
-            VarNode *conv_bias_src = new_inp[0], *conv_bias_filter = new_inp[1],
-                    *conv_bias_bias = new_inp[2];
-            auto new_filter =
-                    RelayoutPlaceholder::make(new_inp[1], is_trans.second);
-            conv_bias_filter = new_filter.node();
-            //! bias trans to nchwxx mode, bias may be scale
-            if (new_inp[2]->shape().ndim == 4) {
-                auto new_bias = RelayoutPlaceholder::make(new_inp[2],
-                                                          src_to_nchwxx_mode);
-                conv_bias_bias = new_bias.node();
-            }
-            mgb_assert(conv_bias_src->shape().ndim == 4 &&
-                       conv_bias_filter->shape().ndim == 5);
-            mgb_assert((conv_bias_bias->shape().ndim == 5) ||
-                       conv_bias_bias->shape().is_scalar());
-            auto new_param = conv_bias_opr.param();
-            new_param.format = conv_bias_format;
-            auto new_conv_bias_opr = opr::ConvBias::make(
-                    conv_bias_src, conv_bias_filter, new_param,
-                    conv_bias_opr.execution_policy(), conv_bias_opr.config());
-            OperatorNodeBase* new_opr = new_conv_bias_opr.node()->owner_opr();
-            mgb_assert(new_conv_bias_opr.shape().ndim == 5,
-                       "The conv dst dim is not trans to nchwxx");
-            return new_opr;
-        }
-    };
-
-    auto replace_pooling_opr = [=](OperatorNodeBase* opr,
-                                  const VarNodeArray& new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        auto& pooling_opr = opr->cast_final_safe<opr::PoolingForward>();
-        mgb_assert(pooling_opr.param().format ==
-                           megdnn::param::Pooling::Format::NCHW,
-                   "ConvertFormat Pass only support converting NCHW to NCHWxx");
-        VarNode* inp = new_inp[0];
-        //! if input is nchwxx
-        if (inp->shape().ndim == 5) {
-            auto new_param = pooling_opr.param();
-            new_param.format = pooling_format;
-            auto new_pooling_opr =
-                    opr::PoolingForward::make(inp, new_param, opr->config());
-            mgb_assert(new_pooling_opr.shape().ndim == 5,
-                       "The pooling dst dim is not trans to nchwxx");
-            return new_pooling_opr.node()->owner_opr();
-        } else {
-            auto new_opr = serialization::copy_opr_shallow(*opr, new_inp,
-                                                           opr->config());
-            return new_opr;
-        }
-    };
-
-    auto replace_elemwise_opr = [=](OperatorNodeBase* opr,
-                                    const VarNodeArray& new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        bool has_inp_changed = false;
-        for (size_t i = 0; i < opr->input().size(); i++) {
-            if (new_inp[i]->shape().ndim == 5) {
-                has_inp_changed = true;
-                break;
-            }
-        }
-        if (has_inp_changed) {
-            auto temp_inp = new_inp;
-            for (size_t i = 0; i < opr->input().size(); i++) {
-                if (new_inp[i]->shape().ndim == 4) {
-                    auto new_var = RelayoutPlaceholder::make(
-                            new_inp[i], src_to_nchwxx_mode);
-                    temp_inp[i] = new_var.node();
-                } else {
-                    mgb_assert((new_inp[i]->shape().ndim == 5) ||
-                               new_inp[i]->shape().is_scalar());
-                }
-            }
-            return serialization::copy_opr_shallow(*opr, temp_inp,
-                                                   opr->config());
-        } else {
-            return serialization::copy_opr_shallow(*opr, new_inp,
-                                                   opr->config());
-        }
-    };
-
-    auto relayout_inp_to_nchw = [=](OperatorNodeBase* opr,
-                                  const VarNodeArray& new_inp) {
-        mgb_assert(opr->input().size() == new_inp.size());
-        VarNodeArray temp_inp = new_inp;
-        for (size_t i = 0; i < opr->input().size(); i++) {
-            if (!opr->input(i)->shape().eq_shape(new_inp[i]->shape())) {
-                mgb_assert(opr->input(i)->shape().ndim == 4);
-                mgb_assert(new_inp[i]->shape().ndim == 5);
-                auto new_var =
-                        RelayoutPlaceholder::make(new_inp[i], src_to_nchw_mode);
-                temp_inp[i] = new_var.node();
-            }
-        }
-        return serialization::copy_opr_shallow(*opr, temp_inp, opr->config());
-    };
-
-    ret->set_name(convter_pass_name);
-    auto&& replace_func = ret->m_opr_replace_func;
-    //! supportted nchwxx
-    replace_func[opr::Convolution::typeinfo()] = replace_conv_opr;
-    replace_func[opr::ConvBias::typeinfo()] = replace_conv_bias_opr;
-    replace_func[opr::PoolingForward::typeinfo()] = replace_pooling_opr;
-    replace_func[opr::Elemwise::typeinfo()] = replace_elemwise_opr;
-    replace_func[opr::TypeCvt::typeinfo()] = replace_elemwise_opr;
-    replace_func[opr::ElemwiseMultiType::typeinfo()] = replace_elemwise_opr;
-    replace_func[opr::PowC::typeinfo()] = replace_elemwise_opr;
-    //! not support yet
-    replace_func[opr::ConvolutionBackwardData::typeinfo()] =
-            relayout_inp_to_nchw;
-    replace_func[opr::Subtensor::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::Concat::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::Reshape::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::GetVarShape::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::Dimshuffle::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::Reduce::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::AssertEqual::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::Broadcast::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::IncrSubtensor::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::ResizeForward::typeinfo()] = relayout_inp_to_nchw;
-    replace_func[opr::WarpPerspectiveForward::typeinfo()] =
-            relayout_inp_to_nchw;
-    replace_func[opr::WarpAffineForward::typeinfo()] = relayout_inp_to_nchw;
-    return ret;
-}
-
-/* ==================== ShuffleShuffleRemovePass ================= */
-class ShuffleShuffleRemovePass::Impl {
-    using TensorFormat = opr::ConvBias::Param::Format;
-
-    OptState& m_opt_state;
-    ThinHashMap<std::pair<TensorFormat, TensorFormat>,
-                thin_function<VarNode*(VarNode*)>>
-            m_reformat;
-
-    class AbstractShuffleOpr;
-
-    void detect_shuffle_operations();
-    void do_replace();
-
-public:
-    Impl(OptState& opt_state) : m_opt_state{opt_state} {
-        m_reformat[std::make_pair(TensorFormat::NCHW, TensorFormat::NCHW4)] =
-                [](VarNode* inp) -> VarNode* {
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp = opr::Concat::make(
-                    {sub(0), sub(1) / 4, cv(4), sub(2), sub(3)}, 0);
-            auto y0 = opr::Reshape::make(x, tshp);
-            auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 4, 2});
-            return y1.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW, TensorFormat::NCHW32)] =
-                [](VarNode* inp) -> VarNode* {
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp = opr::Concat::make(
-                    {sub(0), sub(1) / 32, cv(32), sub(2), sub(3)}, 0);
-            auto y0 = opr::Reshape::make(x, tshp);
-            auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 4, 2});
-            return y1.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW4, TensorFormat::NCHW)] =
-                [](VarNode* inp) -> VarNode* {
-            mgb_assert(inp->shape().ndim == 5 && inp->shape()[4] == 4);
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp =
-                    opr::Concat::make({sub(0), sub(1) * 4, sub(2), sub(3)}, 0);
-            auto y0 = opr::Dimshuffle::make(x, {0, 1, 4, 2, 3});
-            auto y1 = opr::Reshape::make(y0, tshp);
-            return y1.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW32, TensorFormat::NCHW)] =
-                [](VarNode* inp) -> VarNode* {
-            mgb_assert(inp->shape().ndim == 5 && inp->shape()[4] == 32);
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp =
-                    opr::Concat::make({sub(0), sub(1) * 32, sub(2), sub(3)}, 0);
-            auto y0 = opr::Dimshuffle::make(x, {0, 1, 4, 2, 3});
-            auto y1 = opr::Reshape::make(y0, tshp);
-            return y1.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW4, TensorFormat::NCHW32)] =
-                [](VarNode* inp) -> VarNode* {
-            mgb_assert(inp->shape().ndim == 5 && inp->shape()[4] == 4);
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp0 = opr::Concat::make(
-                         {sub(0), sub(1) / 8, cv(8), sub(2), sub(3), sub(4)},
-                         0),
-                 tshp1 = opr::Concat::make(
-                         {sub(0), sub(1) / 8, sub(2), sub(3), sub(4) * 8}, 0);
-            auto y0 = opr::Reshape::make(x, tshp0);
-            auto y1 = opr::Dimshuffle::make(y0, {0, 1, 3, 4, 2, 5});
-            auto y2 = opr::Reshape::make(y1, tshp1);
-            return y2.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW32, TensorFormat::NCHW4)] =
-                [](VarNode* inp) -> VarNode* {
-            mgb_assert(inp->shape().ndim == 5 && inp->shape()[4] == 32);
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp0 = opr::Concat::make(
-                         {sub(0), sub(1), sub(2), sub(3), cv(8), sub(4) / 8},
-                         0),
-                 tshp1 = opr::Concat::make(
-                         {sub(0), sub(1) * 8, sub(2), sub(3), sub(4) / 8}, 0);
-            auto y0 = opr::Reshape::make(x, tshp0);
-            auto y1 = opr::Dimshuffle::make(y0, {0, 1, 4, 2, 3, 5});
-            auto y2 = opr::Reshape::make(y1, tshp1);
-            return y2.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW4, TensorFormat::CHWN4)] =
-                [](VarNode* inp) -> VarNode* {
-            megdnn::param::RelayoutFormat param;
-            param.mode = megdnn::param::RelayoutFormat::Mode::NCHW4_CHWN4;
-            auto reformat = opr::RelayoutFormat::make(inp, param);
-            return reformat.node();
-
-        };
-        
-        m_reformat[std::make_pair(TensorFormat::CHWN4, TensorFormat::NCHW4)] =
-                [](VarNode* inp) -> VarNode* {
-            megdnn::param::RelayoutFormat param;
-            param.mode = megdnn::param::RelayoutFormat::Mode::CHWN4_NCHW4;
-            auto reformat = opr::RelayoutFormat::make(inp, param);
-            return reformat.node();
-        };
-
-        m_reformat[std::make_pair(TensorFormat::NCHW, TensorFormat::CHWN4)] =
-                [](VarNode* inp) -> VarNode* {
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp = opr::Concat::make(
-                    {sub(0), sub(1) / 4, cv(4), sub(2), sub(3)}, 0);
-            auto y0 = opr::Reshape::make(x, tshp);
-            auto y1 = opr::Dimshuffle::make(y0, {1, 3, 4, 0, 2});
-            return y1.node();
-
-        };
-
-        m_reformat[std::make_pair(TensorFormat::CHWN4, TensorFormat::NCHW)] =
-                [](VarNode* inp) -> VarNode* {
-            mgb_assert(inp->shape().ndim == 5 && inp->shape()[4] == 4);
-            auto x = SymbolVar(inp);
-            auto xshp = opr::GetVarShape::make(x);
-
-            auto cv = [&x](int v) { return x.make_scalar(v); };
-            auto sub = [&xshp, &cv](int idx) {
-                return opr::IndexAt::make(xshp, {{0, cv(idx)}});
-            };
-            auto tshp =
-                    opr::Concat::make({sub(3), sub(0) * 4, sub(1), sub(2)}, 0);
-            auto y0 = opr::Dimshuffle::make(x, {3, 0, 4, 1, 2});
-            auto y1 = opr::Reshape::make(y0, tshp);
-            return y1.node();
-        };
-        detect_shuffle_operations();
-        do_replace();
-    }
-};
-
-/*!
- * \brief abstract operator representation of shuffle operation
- */
-MGB_DEFINE_OPR_CLASS(ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr,
-                           cg::SingleCNOperatorNodeBase) // {
-public:
-    AbstractShuffleOpr(VarNode* inpvar, TensorFormat inp_format,
-                       TensorFormat out_format);
-
-    static SymbolVar make(VarNode* inpvar, TensorFormat inp_format,
-                          TensorFormat out_format);
-
-    TensorFormat inp_format() const { return m_inp_format; }
-
-    TensorFormat out_format() const { return m_out_format; }
-
-private:
-    void init_output_static_infer_desc() override;
-    void scn_do_execute() override;
-    const TensorFormat m_inp_format;
-    const TensorFormat m_out_format;
-};
-
-MGB_DYN_TYPE_OBJ_FINAL_IMPL(ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr);
-
-void ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr::scn_do_execute() {
-    mgb_throw(InternalError, "AbstractShuffleOpr cannot be executed");
-}
-
-void ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr::
-        init_output_static_infer_desc() {
-    using namespace cg::static_infer;
-    auto&& mgr = owner_graph()->static_infer_manager();
-    DepVal deps;
-    for (auto i : input())
-        deps.push_back({i, DepType::SHAPE});
-    auto infer_shape = [this](TensorShape& dst, const InpVal& inp) {
-        TensorShape inp_shape = inp.val[0].shape();
-        if (m_inp_format == TensorFormat::NCHW4 &&
-            m_out_format == TensorFormat::NCHW32) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 4);
-            dst = inp_shape;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] / 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4] * 8;
-        } else if (m_inp_format == TensorFormat::NCHW32 &&
-                   m_out_format == TensorFormat::NCHW4) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 32);
-            dst = inp_shape;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] * 8;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = inp_shape[4] / 8;
-        } else if (m_inp_format == TensorFormat::NCHW &&
-                   m_out_format == TensorFormat::NCHW4) {
-            mgb_assert(inp_shape.ndim == 4);
-            dst.ndim = 5;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] / 4;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-            dst[4] = 4;
-        } else if (m_inp_format == TensorFormat::NCHW4 &&
-                   m_out_format == TensorFormat::NCHW) {
-            mgb_assert(inp_shape.ndim == 5 && inp_shape[4] == 4);
-            dst.ndim = 4;
-            dst[0] = inp_shape[0];
-            dst[1] = inp_shape[1] * 4;
-            dst[2] = inp_shape[2];
-            dst[3] = inp_shape[3];
-        } else if (m_inp_format == TensorFormat::NCHW4 &&
-                   m_out_format == TensorFormat::CHWN4) {
-            dst.ndim = 5;
-            dst[0] = inp_shape[1];
-            dst[1] = inp_shape[2];
-            dst[2] = inp_shape[3];
-            dst[3] = inp_shape[0];
-            dst[4] = inp_shape[4];
-        } else if (m_inp_format == TensorFormat::CHWN4 &&
-                   m_out_format == TensorFormat::NCHW4) {
-            dst.ndim = 5;
-            dst[0] = inp_shape[3];
-            dst[1] = inp_shape[0];
-            dst[2] = inp_shape[1];
-            dst[3] = inp_shape[2];
-            dst[4] = inp_shape[4];
-        } else {
-            mgb_throw(InternalError,
-                      "Unsupported input format and output format.");
-        }
-        return true;
-    };
-    mgr.register_shape_infer(output(0), {SourceType::DEP, deps, infer_shape});
-}
-
-ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr::AbstractShuffleOpr(
-        VarNode* inpvar, TensorFormat inp_format, TensorFormat out_format)
-        : Super(inpvar->owner_graph(), {}, "AbstractShuffleOpr", {inpvar}),
-          m_inp_format{inp_format},
-          m_out_format{out_format} {
-    add_input({inpvar});
-    add_equivalence_component<ScalarHash<TensorFormat>>(m_inp_format);
-    add_equivalence_component<ScalarHash<TensorFormat>>(m_out_format);
-    add_output(None)->dtype(inpvar->dtype());
-}
-
-SymbolVar ShuffleShuffleRemovePass::Impl::AbstractShuffleOpr::make(
-        VarNode* inpvar, TensorFormat inp_format, TensorFormat out_format) {
-    return inpvar->owner_graph()
-            ->insert_opr(std::make_unique<AbstractShuffleOpr>(
-                    inpvar, inp_format, out_format))
-            ->output(0);
-}
-
-void ShuffleShuffleRemovePass::Impl::detect_shuffle_operations() {
-    auto rewriter = m_opt_state.graph().make_rewriter();
-    auto uniq_reader_check = UniqReaderCheck{m_opt_state.graph()};
-    auto try_reshape_shuffle = [&rewriter,
-                                &uniq_reader_check](OperatorNodeBase* opr) {
-        // check shuffle
-        auto shuffle = try_cast_as_op<opr::Dimshuffle>(opr);
-        if (shuffle == nullptr)
-            return false;
-        auto&& param = shuffle->param();
-        if (param.pattern_len != 5)
-            return false;
-        bool is_nchw2nchw4 = param.pattern[0] == 0 && param.pattern[1] == 1 &&
-                             param.pattern[2] == 3 && param.pattern[3] == 4 &&
-                             param.pattern[4] == 2 &&
-                             opr->output(0)->shape()[4] == 4;
-        if (!is_nchw2nchw4)
-            return false;
-        if (!uniq_reader_check(shuffle->input(0)))
-            return false;
-
-        // check reshape
-        auto reshape = try_cast_as_op<opr::Reshape>(opr->input(0)->owner_opr());
-        if (reshape == nullptr)
-            return false;
-        auto inp_var = rewriter.get_var(reshape->input(0));
-        auto abstract_shuffle = AbstractShuffleOpr::make(
-                inp_var, TensorFormat::NCHW, TensorFormat::NCHW4);
-        rewriter.replace_var(
-                opr->output(0), abstract_shuffle.node(),
-                mgb_cstr_log("replace reformat(nchw -> nchw4) to "
-                             "AbstractShuffleOpr(nchw -> nchw4)."));
-        return true;
-    };
-
-    auto try_reshape_shuffle_reshape = [&rewriter, &uniq_reader_check](
-                                               OperatorNodeBase* opr) {
-        // check reshape
-        auto reshape1 = try_cast_as_op<opr::Reshape>(opr);
-        if (reshape1 == nullptr)
-            return false;
-        if (!uniq_reader_check(reshape1->input(0)))
-            return false;
-
-        // check shuffle
-        auto shuffle =
-                try_cast_as_op<opr::Dimshuffle>(opr->input(0)->owner_opr());
-        if (shuffle == nullptr)
-            return false;
-        auto&& param = shuffle->param();
-        if (param.pattern_len != 6)
-            return false;
-        bool is_nchw42nchw32 = param.pattern[0] == 0 && param.pattern[1] == 1 &&
-                               param.pattern[2] == 3 && param.pattern[3] == 4 &&
-                               param.pattern[4] == 2 && param.pattern[5] == 5 &&
-                               shuffle->input(0)->shape()[5] == 4 &&
-                               shuffle->input(0)->shape()[2] == 8;
-        bool is_nchw322nchw4 = param.pattern[0] == 0 && param.pattern[1] == 1 &&
-                               param.pattern[2] == 4 && param.pattern[3] == 2 &&
-                               param.pattern[4] == 3 && param.pattern[5] == 5 &&
-                               shuffle->input(0)->shape()[4] == 8 &&
-                               shuffle->input(0)->shape()[5] == 4;
-        if (!is_nchw42nchw32 && !is_nchw322nchw4)
-            return false;
-        if (!uniq_reader_check(shuffle->input(0)))
-            return false;
-
-        // check reshape
-        auto reshape2 =
-                try_cast_as_op<opr::Reshape>(shuffle->input(0)->owner_opr());
-        if (reshape2 == nullptr)
-            return false;
-        auto inp_var = rewriter.get_var(reshape2->input(0));
-        TensorFormat inp_format = is_nchw42nchw32 ? TensorFormat::NCHW4
-                                                  : TensorFormat::NCHW32,
-                     out_format = is_nchw42nchw32 ? TensorFormat::NCHW32
-                                                  : TensorFormat::NCHW4;
-        auto abstract_shuffle =
-                AbstractShuffleOpr::make(inp_var, inp_format, out_format);
-        std::string reformat_type =
-                is_nchw42nchw32 ? "nchw4 -> nchw32" : "nchw32 -> nchw4";
-        rewriter.replace_var(opr->output(0), abstract_shuffle.node(),
-                             mgb_cstr_log(ssprintf("replace reformat(%s) to "
-                                                   "AbstractShuffleOpr(%s).",
-                                                   reformat_type.c_str(),
-                                                   reformat_type.c_str())
-                                                  .c_str()));
-        return true;
-    };
-
-    auto try_shuffle_reshape = [&rewriter,
-                                &uniq_reader_check](OperatorNodeBase* opr) {
-        // check reshape
-        auto reshape = try_cast_as_op<opr::Reshape>(opr);
-        if (reshape == nullptr)
-            return false;
-        if (!uniq_reader_check(reshape->input(0)))
-            return false;
-
-        // check shuffle
-        auto shuffle =
-                try_cast_as_op<opr::Dimshuffle>(opr->input(0)->owner_opr());
-        if (shuffle == nullptr)
-            return false;
-        auto&& param = shuffle->param();
-        if (param.pattern_len != 5)
-            return false;
-        bool is_nchw42nchw = param.pattern[0] == 0 && param.pattern[1] == 1 &&
-                             param.pattern[2] == 4 && param.pattern[3] == 2 &&
-                             param.pattern[4] == 3 &&
-                             shuffle->input(0)->shape()[4] == 4;
-        if (!is_nchw42nchw)
-            return false;
-        auto inp_var = rewriter.get_var(shuffle->input(0));
-        auto abstract_shuffle = AbstractShuffleOpr::make(
-                inp_var, TensorFormat::NCHW4, TensorFormat::NCHW);
-        rewriter.replace_var(
-                opr->output(0), abstract_shuffle.node(),
-                mgb_cstr_log("replace reformat(nchw4 -> nchw) to "
-                             "AbstractShuffleOpr(nchw4 -> nchw)."));
-        return true;
-    };
-
-    auto try_relayout_format = [&rewriter](OperatorNodeBase* opr) {
-        // check relayout format
-        auto reformat = try_cast_as_op<opr::RelayoutFormat>(opr);
-        if (reformat == nullptr)
-            return false;
-        auto&& param = reformat->param();
-        if (param.mode != opr::RelayoutFormat::Param::Mode::CHWN4_NCHW4 &&
-            param.mode != opr::RelayoutFormat::Param::Mode::NCHW4_CHWN4)
-            return false;
-        auto inp_var = rewriter.get_var(reformat->input(0));
-        cg::SymbolVar abstract_shuffle;
-        if (param.mode == opr::RelayoutFormat::Param::Mode::NCHW4_CHWN4) {
-            abstract_shuffle = AbstractShuffleOpr::make(
-                    inp_var, TensorFormat::NCHW4, TensorFormat::CHWN4);
-        } else {
-            abstract_shuffle = AbstractShuffleOpr::make(
-                    inp_var, TensorFormat::CHWN4, TensorFormat::NCHW4);
-        }
-        rewriter.replace_var(
-                opr->output(0), abstract_shuffle.node(),
-                mgb_cstr_log("replace reformat(nchw4 -> nchw) to "
-                             "AbstractShuffleOpr(nchw4 -> nchw)."));
-        return true;
-    };
-
-    auto on_opr = [&try_reshape_shuffle, &try_shuffle_reshape,
-                   &try_reshape_shuffle_reshape, &try_relayout_format,
-                   &rewriter, &uniq_reader_check](OperatorNodeBase* opr) {
-        if (!try_reshape_shuffle_reshape(opr) && !try_reshape_shuffle(opr) &&
-            !try_shuffle_reshape(opr) && !try_relayout_format(opr)) {
-            auto new_opr = rewriter.auto_replace_outputs(opr);
-            uniq_reader_check.update_on_opr_auto_replace(opr, new_opr);
-        }
-    };
-    m_opt_state.graph().iter(on_opr);
-    rewriter.apply_inplace();
-}
-
-void ShuffleShuffleRemovePass::Impl::do_replace() {
-    auto rewriter = m_opt_state.graph().make_rewriter();
-    auto uniq_reader_check = UniqReaderCheck{m_opt_state.graph()};
-    ThinHashMap<VarNode*, VarNode*> var2endpoint;
-    ThinHashSet<VarNode*> trt_opr_inps;
-    SmallVector<OperatorNodeBase*> topo_order;
-
-    auto cb = [&topo_order, &trt_opr_inps](OperatorNodeBase* opr) {
-        topo_order.push_back(opr);
-        MGB_MARK_USED_VAR(trt_opr_inps);
-#if MGB_ENABLE_TENSOR_RT
-        if (opr->same_type<opr::TensorRTOpr>()) {
-            for (auto&& inp : opr->input())
-                trt_opr_inps.insert(inp);
-        }
-#endif
-    };
-    m_opt_state.graph().iter(cb);
-
-    for (auto&& opr : reverse_adaptor(topo_order)) {
-        if (opr->same_type<opr::TypeCvt>() ||
-            opr->same_type<AbstractShuffleOpr>()) {
-            auto find = var2endpoint.find(opr->output(0));
-            if (find != var2endpoint.end()) {
-                if (uniq_reader_check(opr->output(0))) {
-                    var2endpoint[opr->input(0)] = find->second;
-                } else {
-                    var2endpoint[opr->input(0)] = opr->output(0);
-                }
-            } else {
-                var2endpoint[opr->input(0)] = opr->output(0);
-            }
-        }
-    }
-
-    auto on_opr = [this, &rewriter, &uniq_reader_check, &trt_opr_inps,
-                   &var2endpoint](OperatorNodeBase* opr) {
-        MGB_MARK_USED_VAR(trt_opr_inps);
-        bool cond_opr = opr->same_type<opr::TypeCvt>() ||
-                        opr->same_type<AbstractShuffleOpr>();
-        if (cond_opr) {
-            bool cond_endpoint = var2endpoint[opr->input(0)] == opr->output(0);
-            if (!cond_endpoint)
-                return;
-            auto cur = opr;
-            auto var = opr->output(0), inp_var = opr->input(0);
-            bool force_folding_typecvt = false;
-            bool first_shuffle = false;
-            // initialize inp_format and out_format
-            TensorFormat out_format = TensorFormat::NCHW, inp_format = out_format;
-            megdnn::DType inp_dtype = cur->input(0)->dtype(),
-                          out_dtype = cur->output(0)->dtype();
-            SmallVector<megdnn::DType> out_dtype_vec;
-            while (cond_opr) {
-                if (cur->same_type<AbstractShuffleOpr>()) {
-                    auto shuffle = try_cast_as_op<AbstractShuffleOpr>(cur);
-                    inp_format = shuffle->inp_format();
-                    if (!first_shuffle) {
-                        out_format = shuffle->out_format();
-                        first_shuffle = true;
-                    }
-                } else {
-                    mgb_assert(cur->same_type<opr::TypeCvt>());
-                    out_dtype_vec.push_back(cur->output(0)->dtype());
-                }
-                inp_var = cur->input(0);
-                bool cond_reader = uniq_reader_check(inp_var);
-                if (!cond_reader)
-                    break;
-                cur = cur->input(0)->owner_opr();
-                cond_opr = cur->same_type<opr::TypeCvt>() ||
-                           cur->same_type<AbstractShuffleOpr>();
-            }
-            std::reverse(out_dtype_vec.begin(), out_dtype_vec.end());
-#if MGB_ENABLE_TENSOR_RT
-            force_folding_typecvt =
-                    inp_var->owner_opr()->same_type<opr::TensorRTOpr>() ||
-                    trt_opr_inps.count(var);
-#endif
-            auto new_var = rewriter.get_var(inp_var);
-            if (inp_format != out_format) {
-                new_var = m_reformat[std::make_pair(inp_format, out_format)](
-                        new_var);
-            }
-            if (force_folding_typecvt) {
-                inp_dtype = inp_var->dtype();
-                if (inp_dtype != out_dtype) {
-                    auto type_cvt = opr::TypeCvt::make(new_var, out_dtype);
-                    new_var = type_cvt.node();
-                }
-            } else {
-                if (out_dtype_vec.back() != var->dtype())
-                    out_dtype_vec.push_back(var->dtype());
-                for (auto&& dtype : out_dtype_vec) {
-                    auto type_cvt = opr::TypeCvt::make(new_var, dtype);
-                    new_var = type_cvt.node();
-                }
-            }
-            rewriter.replace_var(
-                    var, new_var,
-                    mgb_cstr_log("replace Dimshuffle and TypeCvt chain"));
-        } else {
-            auto new_opr = rewriter.auto_replace_outputs(opr);
-            uniq_reader_check.update_on_opr_auto_replace(opr, new_opr);
-        }
-    };
-    m_opt_state.graph().iter(on_opr);
-    rewriter.apply_inplace();
-}
-
-const char* ShuffleShuffleRemovePass::name() const {
-    return mgb_cstr_log("shuffle shuffle remove pass");
-}
-
-void ShuffleShuffleRemovePass::apply(OptState& opt) const {
-    opt.set_var_replace_check_flag(VarReplaceCheckFlag::CHECK_SHAPE |
-                                   VarReplaceCheckFlag::CHECK_DTYPE);
-    Impl{opt};
-}
-
-void gopt::reformat_to_chwn4_transform_dest_vars_inplace(
-        mgb::cg::VarNodeArray& dest_vars) {
-    gopt::GraphOptimizer optimizer;
-    optimizer.add_pass<FuseConvBiasNonlinPass>();
-    optimizer.add_pass<FuseConvBiasZPass>();
-    optimizer.add_pass(EnableCHWN4Pass::make_chwn4_converter());
-    optimizer.add_pass<ShuffleShuffleRemovePass>();
-    optimizer.add_pass<RemoveRedundantTypeCvtPass>();
-    optimizer.add_pass<ParamFusePass>();
-    optimizer.apply_inplace(dest_vars);
+    MIDOUT_E
 }
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

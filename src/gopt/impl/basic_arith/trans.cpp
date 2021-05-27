@@ -2,7 +2,7 @@
  * \file src/gopt/impl/basic_arith/trans.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -12,6 +12,20 @@
 #include "megbrain/opr/basic_arith_wrapper.h"
 #include "megbrain/gopt/basic_arith.h"
 #include "megbrain/serialization/serializer.h"
+
+//! TODO: here has to be know some megdnn::opr when there is produced midout.h
+//! fix it if there is another graceful way.
+#include "megdnn/oprs.h"
+
+#include "megbrain/utils/hash_ct.h"
+#include "midout.h"
+
+MIDOUT_DECL(megbrain_trans)
+#define MIDOUT_B(tag) \
+    MIDOUT_BEGIN(megbrain_trans, midout_iv(MGB_HASH_STR(tag))) {
+#define MIDOUT_E \
+    }            \
+    MIDOUT_END();
 
 using namespace mgb;
 using namespace gopt;
@@ -284,7 +298,9 @@ const char* ArithMulDistributePass::name() const {
 }
 
 void ArithMulDistributePass::apply(OptState &opt) const {
+    MIDOUT_B("ArithMulDistributePass::apply")
     Impl{*this, opt};
+    MIDOUT_E
 }
 
 /* ================ FinalArithTransformPass ================ */
@@ -488,7 +504,9 @@ const char* FinalArithTransformPass::name() const {
 }
 
 void FinalArithTransformPass::apply(OptState &opt) const {
+    MIDOUT_B("FinalArithTransformPass::apply")
     Impl{*this, opt};
+    MIDOUT_E
 }
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

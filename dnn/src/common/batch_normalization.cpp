@@ -2,7 +2,7 @@
  * \file dnn/src/common/batch_normalization.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -58,6 +58,7 @@ void BNBackward::check_exec(const TensorLayout& x, const TensorLayout& dy,
             get_workspace_in_bytes(x, dy, saved_batch_mean, saved_batch_variance,
                                    bn_scale, d_bn_scale, d_bn_bias, dx);
     megdnn_assert(workspace_in_bytes >= required_workspace_in_bytes);
+    megdnn_assert(param().fwd_mode == Param::FwdMode::TRAINING, "BNBackward only support TRAINING mode");
 }
 
 }  // namespace megdnn

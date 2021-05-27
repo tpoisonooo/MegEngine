@@ -2,11 +2,12 @@
  * \file dnn/src/common/relayout_format.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #include "megdnn/oprs.h"
@@ -28,6 +29,26 @@ void RelayoutFormat::deduce_layout_fwd(const TensorLayout& src,
             dst[3] = src[3];
             dst[4] = 4;
             break;
+        case Param::Mode::NCHW_NCHW4_IC_SMALL:
+            dst.ndim = 5;
+            megdnn_assert(src[1] <= 4_z, "ic should be less equal 4");
+            dst[0] = src[0];
+            dst[1] = div_ceil(src[1], 4_z);
+            dst[2] = src[2];
+            dst[3] = src[3];
+            dst[4] = 4;
+            break;
+        case Param::Mode::NCHW_NCHW4_IC_SMALL_CONV_DENSE_WEIGHT:
+            megdnn_assert(src.ndim == 4, "src must be oihw, ndim == 4");
+            megdnn_assert(src[1] <= 4_z, "ic should be less equal 4");
+            dst.ndim = 5;
+            dst[0] = src[0];
+            dst[1] = div_ceil(src[1], 4_z);
+            dst[2] = src[2];
+            dst[3] = src[3];
+            dst[4] = 4;
+            break;
+
         case Param::Mode::NCHW_NCHW88:
             dst.ndim = 5;
             dst[0] = src[0];
@@ -187,6 +208,49 @@ void RelayoutFormat::deduce_layout_fwd(const TensorLayout& src,
             dst[3] = src[2];
             dst[4] = src[4];
             break;
+        case Param::Mode::NCHW_NCHW4: {
+            megdnn_assert(src.ndim == 4);
+            const size_t group = param().group;
+            megdnn_assert(src[1] % group == 0);
+            const size_t icpg = src[1] / group;
+            dst.ndim = 5;
+            dst[0] = src[0];
+            dst[1] = group * div_ceil<size_t>(icpg, 4);
+            dst[2] = src[2];
+            dst[3] = src[3];
+            dst[4] = 4;
+        }; break;
+        case Param::Mode::NCHW_NCHW4_WEIGHT:;
+            {
+                if (src.ndim == 4) {
+                    //! dense case
+                    dst.ndim = 5;
+                    dst[0] = div_ceil<size_t>(src[0], 4) * 4;
+                    dst[1] = div_ceil<size_t>(src[1], 4);
+                    dst[2] = src[2];
+                    dst[3] = src[3];
+                    dst[4] = 4;
+                } else if (src.ndim == 5) {
+                    //! group case
+                    dst.ndim = 6;
+                    dst[0] = src[0];
+                    dst[1] = div_ceil<size_t>(src[1], 4) * 4;
+                    dst[2] = div_ceil<size_t>(src[2], 4);
+                    dst[3] = src[3];
+                    dst[4] = src[4];
+                    dst[5] = 4;
+                }
+            };
+            break;
+        case Param::Mode::NCHW4_NCHW:
+            megdnn_assert(src.ndim == 5);
+            dst.ndim = 4;
+            dst[0] = src[0];
+            dst[1] = param().oc == 0 ? src[1] * 4 : param().oc;
+            dst[2] = src[2];
+            dst[3] = src[3];
+            megdnn_assert(dst[1] % param().group == 0);
+            break;
         default:
             megdnn_assert(0, "Invalid RelayoutFormat Mode");
             break;
@@ -194,7 +258,9 @@ void RelayoutFormat::deduce_layout_fwd(const TensorLayout& src,
     TensorFormat dst_fmt;
     deduce_format(src.format, dst_fmt);
     dst.format = dst_fmt;
-    dst.dtype = src.dtype;
+    if (!dst.dtype.valid()) {
+        dst.dtype = src.dtype;
+    }
     dst.init_contiguous_stride();
 }
 
@@ -204,6 +270,7 @@ void RelayoutFormat::deduce_layout(const TensorLayout& src, TensorLayout& dst) {
 
 void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
     size_t align = handle()->image2d_pitch_alignment();
+    auto vendor_type = handle()->vendor_type();
     using Param = param::RelayoutFormat;
 #define CHECK_SRC(_expect)                                                \
     megdnn_assert(src == _expect, "invalid src format: expect=%s got=%s", \
@@ -219,7 +286,7 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
             break;
         case Param::Mode::NHWC_NHWCD4I:
             CHECK_SRC(DefaultTensorFormat::make());
-            dst = Image2DPack4TensorFormat::make_raw(2, align);
+            dst = Image2DPack4TensorFormat::make_raw(2, align, vendor_type);
             break;
         case Param::Mode::NCHW_NHWCD4:
             CHECK_SRC(DefaultTensorFormat::make());
@@ -227,10 +294,11 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
             break;
         case Param::Mode::NCHW_NHWCD4I:
             CHECK_SRC(DefaultTensorFormat::make());
-            dst = Image2DPack4TensorFormat::make_raw(2, align);
+            dst = Image2DPack4TensorFormat::make_raw(2, align, vendor_type);
             break;
         case Param::Mode::NHWCD4I_NCHW:
-            CHECK_SRC(Image2DPack4TensorFormat::make_raw(2, align));
+            CHECK_SRC(
+                    Image2DPack4TensorFormat::make_raw(2, align, vendor_type));
             dst = DefaultTensorFormat::make();
             break;
         case Param::Mode::NHWCD4_NCHW:
@@ -244,7 +312,7 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
         case Param::Mode::INTER_WEIGHT_DENSEI:
         case Param::Mode::INTER_WEIGHT_DENSEI_DOT:
             CHECK_SRC(DefaultTensorFormat::make());
-            dst = Image2DPack4TensorFormat::make_raw(3, align);
+            dst = Image2DPack4TensorFormat::make_raw(3, align, vendor_type);
             break;
         case Param::Mode::INTER_WEIGHT_GROUP:
             CHECK_SRC(DefaultTensorFormat::make());
@@ -253,7 +321,7 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
         case Param::Mode::INTER_WEIGHT_GROUPI:
         case Param::Mode::INTER_WEIGHT_GROUPI_DOT:
             CHECK_SRC(DefaultTensorFormat::make());
-            dst = Image2DPack4TensorFormat::make_raw(4, align);
+            dst = Image2DPack4TensorFormat::make_raw(4, align, vendor_type);
             break;
         case Param::Mode::INTER_WEIGHT_CHAN:
             CHECK_SRC(DefaultTensorFormat::make());
@@ -261,7 +329,7 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
             break;
         case Param::Mode::INTER_WEIGHT_CHANI:
             CHECK_SRC(DefaultTensorFormat::make());
-            dst = Image2DPack4TensorFormat::make_raw(1, align);
+            dst = Image2DPack4TensorFormat::make_raw(1, align, vendor_type);
             break;
         case Param::Mode::NCHW4_CHWN4:
             CHECK_SRC(DefaultTensorFormat::make());
@@ -271,11 +339,16 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
             CHECK_SRC(DefaultTensorFormat::make());
             dst = src;
             break;
+        case Param::Mode::NCHW4_NCHW:
+        case Param::Mode::NCHW_NCHW4:
+        case Param::Mode::NCHW_NCHW4_WEIGHT:
         case Param::Mode::NCHW_NCHW88:
         case Param::Mode::NCHW88_NCHW:
         case Param::Mode::NCHW_NCHW88_CONV_DENSE_WEIGHT:
         case Param::Mode::NCHW_NCHW88_CONV_CHAN_WEIGHT:
         case Param::Mode::NCHW_NCHW88_CONV_GROUP_WEIGHT:
+        case Param::Mode::NCHW_NCHW4_IC_SMALL:
+        case Param::Mode::NCHW_NCHW4_IC_SMALL_CONV_DENSE_WEIGHT:
             CHECK_SRC(DefaultTensorFormat::make());
             dst = src;
             break;
@@ -284,12 +357,30 @@ void RelayoutFormat::deduce_format(TensorFormat src, TensorFormat& dst) {
             megdnn_throw("Invalid relayout format mode");
             break;
     }
+
+    if (!dst.is_default() &&
+        (
+                handle()->type() != Handle::HandleType::NAIVE)) {
+#if MEGDNN_ENABLE_MANGLING
+        megdnn_throw(
+                "Only naive and opencl handle support "
+                "Image2DPack4TensorFormat, try build with debug for get more "
+                "info");
+#else
+        megdnn_throw(
+                "Only naive and opencl handle support "
+                "Image2DPack4TensorFormat, try to export MGB_USE_MEGDNN_DBG=2 "
+                "and also export CUDA_VISIBLE_DEVICES=\'\' at CUDA env"
+                "to enable naive handle");
+#endif
+    }
 #undef CHECK_SRC
 }
 
 void RelayoutFormat::check_layout_fwd(const TensorLayout& src,
                                       const TensorLayout& dst) {
     TensorLayout dst_expected;
+    dst_expected.dtype = dst.dtype;
     deduce_layout_fwd(src, dst_expected);
     megdnn_assert_eq_layout(dst_expected, dst);
 }
@@ -304,6 +395,7 @@ void RelayoutFormat::check_exec(const TensorLayout& src,
 
 void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
                                         const TensorLayout& dst,
+                                        TensorLayout& exec_workspace,
                                         TensorLayout& exec_src,
                                         TensorLayout& exec_dst) {
     check_layout_fwd(src, dst);
@@ -312,13 +404,69 @@ void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
         case Param::Mode::NCHW_NCHW88:
             // nchw to nchw8c
             {
-                TensorLayout work_space_layout(
+                exec_workspace = TensorLayout(
                         {src[0], round_up(src[1], 8_z), src[2], src[3]},
                         src.dtype, src.format);
-                exec_src = work_space_layout
+                exec_src = exec_workspace
                                    .reshape({src[0], div_ceil(src[1], 8_z), 8,
                                              src[2], src[3]})
                                    .dimshuffle({0, 1, 3, 4, 2});
+                exec_dst = dst;
+            }
+            break;
+        case Param::Mode::NCHW_NCHW4:
+            // nchw to nchw4
+            {
+                const size_t group = param().group;
+                const size_t icpg = src[1] / group;
+                exec_workspace = TensorLayout(
+                        {src[0], group * round_up(icpg, 4_z), src[2], src[3]},
+                        src.dtype, src.format);
+                exec_src =
+                        exec_workspace
+                                .reshape({src[0], group * div_ceil(icpg, 4_z),
+                                          4, src[2], src[3]})
+                                .dimshuffle({0, 1, 3, 4, 2});
+                exec_dst = dst;
+            }
+            break;
+        case Param::Mode::NCHW_NCHW4_WEIGHT:
+            // nchw to nchw4_weight
+            {
+                if (src.ndim == 4) {
+                    exec_workspace = TensorLayout(
+                            {round_up(src[0], 4_z), round_up(src[1], 4_z),
+                             src[2], src[3]},
+                            src.dtype, src.format);
+                    exec_src = exec_workspace
+                                       .reshape({round_up(src[0], 4_z),
+                                                 div_ceil(src[1], 4_z), 4,
+                                                 src[2], src[3]})
+                                       .dimshuffle({0, 1, 3, 4, 2});
+                    exec_dst = dst;
+                } else if (src.ndim == 5) {
+                    exec_workspace = TensorLayout(
+                            {src[0], round_up(src[1], 4_z),
+                             round_up(src[2], 4_z), src[3], src[4]},
+                            src.dtype, src.format);
+                    exec_src = exec_workspace
+                                       .reshape({src[0], round_up(src[1], 4_z),
+                                                 div_ceil(src[2], 4_z), 4,
+                                                 src[3], src[4]})
+                                       .dimshuffle({0, 1, 2, 4, 5, 3});
+                    exec_dst = dst;
+                }
+            }
+            break;
+        case Param::Mode::NCHW4_NCHW:
+            // nchw to nchw4
+            {
+                exec_workspace =
+                        TensorLayout({src[0], src[1] * 4, src[2], src[3]},
+                                     src.dtype, src.format)
+                                .reshape({src[0], src[1], 4, src[2], src[3]})
+                                .dimshuffle({0, 1, 3, 4, 2});
+                exec_src = src;
                 exec_dst = dst;
             }
             break;
@@ -333,11 +481,11 @@ void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
             {
                 megdnn_assert(src.ndim == 4);
                 megdnn_assert(src[0] % 8 == 0);
-                TensorLayout work_space_layout(
+                exec_workspace = TensorLayout(
                         {src[0], round_up(src[1], 8_z), src[2], src[3]},
                         src.dtype, src.format);
                 exec_src =
-                        work_space_layout
+                        exec_workspace
                                 .reshape({src[0] / 8, 8, div_ceil(src[1], 8_z),
                                           8, src[2], src[3]})
                                 .dimshuffle({0, 2, 4, 5, 3, 1});
@@ -348,10 +496,10 @@ void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
             // goihw to goihw8g
             {
                 megdnn_assert(src.ndim == 5);
-                TensorLayout work_space_layout(
+                exec_workspace = TensorLayout(
                         {round_up(src[0], 8_z), src[1], src[2], src[3], src[4]},
                         src.dtype, src.format);
-                exec_src = work_space_layout
+                exec_src = exec_workspace
                                    .reshape({div_ceil(src[0], 8_z), 8, src[1],
                                              src[2], src[3], src[4]})
                                    .dimshuffle({0, 2, 3, 4, 5, 1});
@@ -363,10 +511,10 @@ void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
             {
                 megdnn_assert(src.ndim == 5);
                 megdnn_assert(src[1] % 8 == 0);
-                TensorLayout work_space_layout(
+                exec_workspace = TensorLayout(
                         {src[0], src[1], round_up(src[2], 8_z), src[3], src[4]},
                         src.dtype, src.format);
-                exec_src = work_space_layout
+                exec_src = exec_workspace
                                    .reshape({src[0], src[1] / 8, 8,
                                              div_ceil(src[2], 8_z), 8, src[3],
                                              src[4]})
@@ -374,6 +522,22 @@ void RelayoutFormat::deduce_exec_layout(const TensorLayout& src,
                 exec_dst = dst;
             }
             break;
+
+        case Param::Mode::NCHW_NCHW4_IC_SMALL:
+        case Param::Mode::NCHW_NCHW4_IC_SMALL_CONV_DENSE_WEIGHT:
+            // nchw to nchw4c or oihw to oihw4i
+            {
+                exec_workspace = TensorLayout(
+                        {src[0], round_up(src[1], 4_z), src[2], src[3]},
+                        src.dtype, src.format);
+                exec_src = exec_workspace
+                                   .reshape({src[0], div_ceil(src[1], 4_z), 4,
+                                             src[2], src[3]})
+                                   .dimshuffle({0, 1, 3, 4, 2});
+                exec_dst = dst;
+            }
+            break;
+
         case Param::Mode::NCHW_NHWCD4:
         case Param::Mode::NCHW_NHWCD4I:
             // src is {N, C, H, W}

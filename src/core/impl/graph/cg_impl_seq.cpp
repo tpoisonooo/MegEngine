@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/cg_impl_seq.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -11,6 +11,7 @@
 
 #include "./cg_impl_seq.h"
 #include "megbrain/graph/exc_extra_info.h"
+#include "megbrain/opr/tensor_manip.h"
 
 using namespace mgb;
 using namespace cg;
@@ -78,14 +79,16 @@ class ComputingGraphImpl::ComputingSequence::ExecContext {
 
     void warmup_for_fake_exec_with_recorder() {
         // Rerun recorder to ensure that all internal caches stabilize
-        m_recorder->enter_fake_exec();
+        auto comp_node = *(m_comp_seq->m_used_comp_node.begin());
+        m_recorder->enter_fake_exec(comp_node);
         m_comp_seq->m_exec_env.start_exec();
         m_comp_seq->m_exec_env.wait_all();
-        m_recorder->exit_fake_exec();
+        m_recorder->exit_fake_exec(comp_node);
     }
 
     void stop_and_move_recorder() {
-        m_recorder->stop();
+        auto comp_node = *(m_comp_seq->m_used_comp_node.begin());
+        m_recorder->stop(comp_node);
         if (m_fake_next_exec) {
             m_owner_graph->options().fake_next_exec = false;
         } else {
@@ -253,6 +256,22 @@ ComputingGraphImpl::ComputingSequence::check_enable_comp_node_seq_recorder() {
             }
         }
     }
+    auto check_const_shape = [&]() {
+        for (auto i : *m_opr_seq) {
+            for (auto j : i->output()) {
+                if (j->shape().ndim && !is_const_var_shape(j)) {
+                    mgb_log_warn(
+                            "Non-const var shape detected. Make sure all "
+                            "shapes are constant. Check whether "
+                            "'const_var_shape' is set "
+                            "in GraphLoadConfig under record mode");
+                    return;
+                }
+            }
+        }
+    };
+    check_const_shape();
+
     auto cn = *m_used_comp_node.begin();
     auto rec = cn.create_seq_recorder(m_owner_graph);
     if (!rec) {
@@ -439,16 +458,21 @@ void ComputingGraphImpl::ComputingSequence::on_first_exec() {
             m_used_comp_node.insert(j->comp_node());
     }
 
+    // we maintain a recorder because events may depend on whether recorder
+    // is enabled
+    auto recorder = check_enable_comp_node_seq_recorder();
     auto&& options = m_owner_graph->options();
-    m_exec_env.set_async_level(options.async_exec_level);
+    //! The recorder in comp_node is thread_local, so the create thread should
+    //! the same as the execute thread, so set the Synchronize mode
+    if (m_enable_comp_node_seq_recorder) {
+        m_exec_env.set_async_level(0);
+    } else {
+        m_exec_env.set_async_level(options.async_exec_level);
+    }
     if (options.async_exec_level) {
         for (auto i : m_used_comp_node)
             m_exec_env.add_comp_node(i);
     }
-
-    // we maintain a recorder because events may depend on whether recorder
-    // is enabled
-    auto recorder = check_enable_comp_node_seq_recorder();
 
     // create events for timing and sync
     for (auto&& i : m_used_comp_node) {
@@ -537,14 +561,28 @@ std::shared_ptr<json::Value> ComputingGraphImpl::ComputingSequence::to_json()
         comp_seq->add(json::String::make(i->id_str()));
     }
 
-    // expand opr and var nodes that do not appear in comp seq
+    // expand opr and var nodes that do not appear in comp seq,
+    // also expand var nodes which are only used in static infer
     {
         VarNodeArray new_var_node;
+        auto&& mgr = m_owner_graph->static_infer_manager_impl();
         auto check_opr_input = [&](OperatorNodeBase* opr) {
+            auto update = [&](VarNode* var) {
+                if (!(all_var_node.count(var))) {
+                    all_var_node.insert(var);
+                    new_var_node.push_back(var);
+                }
+            };
             for (auto i : opr->input()) {
-                if (!(all_var_node.count(i))) {
-                    all_var_node.insert(i);
-                    new_var_node.push_back(i);
+                update(i);
+            }
+            for (auto &&out : opr->output()) {
+                using DepType = static_infer::DepType;
+                for (auto&& i : mgr.get_deps({out, DepType::SHAPE})) {
+                    update(i.dest);
+                }
+                for (auto&& i : mgr.get_deps({out, DepType::VALUE})) {
+                    update(i.dest);
                 }
             }
         };

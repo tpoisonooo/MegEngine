@@ -2,7 +2,7 @@
  * \file src/core/impl/comp_node/mem_alloc/impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -94,7 +94,7 @@ class MemAllocImplHelper: virtual public MemAllocBase {
          * \brief directly insert a free block into m_free_blk_size and
          *      m_free_blk_addr, without merging
          */
-        inline void insert_free_unsafe(const FreeBlock &block);
+        virtual void insert_free_unsafe(const FreeBlock &block);
 
         /*!
          * \brief allocate from parent allocator; this method must either return
@@ -153,6 +153,12 @@ class StreamMemAllocImpl final: public StreamMemAlloc,
         {}
 };
 
+/*!
+ * \Note: DevMemAlloc has two-level structure, but when only one stream was
+ * registered into the DevMemAlloc, the DevMemAlloc would behave like a
+ * single-level allocator(i.e. only the FreeBlock pool in its child stream
+ * allocator will be used) for better performance
+ */
 class DevMemAllocImpl final: public DevMemAlloc,
                              public MemAllocImplHelper {
     friend class StreamMemAllocImpl;
@@ -193,6 +199,14 @@ class DevMemAllocImpl final: public DevMemAlloc,
 
     size_t get_used_memory() override { return m_used_size.load(); }
 
+    void insert_free_unsafe(const FreeBlock &block) override;
+
+    /*!
+     * \brief return stream allocator if DevMemAlloc has single child,
+     * otherwise return nullptr
+     */
+    StreamMemAllocImpl* get_single_child_stream_unsafe();
+
 public:
     DevMemAllocImpl(
             int device, size_t reserve_size,
@@ -211,7 +225,32 @@ public:
     FreeMemStat get_free_memory_dev() override;
 };
 
+class SimpleCachingAllocImpl : public SimpleCachingAlloc,
+                               public MemAllocImplHelper {
+    struct AllocatedBlock {
+        bool is_head;
+        size_t size;
+    };
+
+    std::unique_ptr<RawAllocator> m_raw_alloc;
+    std::unordered_map<void*, size_t> m_alloc_from_raw;
+    std::unordered_map<void*, AllocatedBlock> m_allocated_blocks;
+    size_t m_used_size = 0;
+
+public:
+    SimpleCachingAllocImpl(std::unique_ptr<RawAllocator> m_raw_alloc);
+    ~SimpleCachingAllocImpl();
+
+    void* alloc(size_t size) override;
+    void free(void* ptr) override;
+    size_t get_used_memory() override;
+    FreeMemStat get_free_memory_dev() override;
+
+protected:
+    MemAddr alloc_from_parent(size_t size) override;
+    std::string get_name() const override;
+};
+
 }
 }
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
-

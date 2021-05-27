@@ -2,7 +2,7 @@
  * \file dnn/test/common/mesh_indexing.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -89,7 +89,7 @@ public:
         auto ptr = tensor.ptr<int>();
         for (size_t n = 0; n < size; ++n) {
             std::set<int> used;
-            std::random_shuffle(seq.begin(), seq.end());
+            COMPAT_RANDOM(seq.begin(), seq.end());
             for (size_t step = 0; step < stride; ++step) {
                 megdnn_assert(used.size() < m_size);
                 ptr[n * stride + step] = seq[step];

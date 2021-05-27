@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/argsort.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,7 +32,7 @@ class ArgsortRNG final : public RNG {
         } else {
             for (int i = 0; i < n; ++i)
                 ptr[i] = static_cast<T>(i - n / 2);
-            std::random_shuffle(ptr, ptr + n);
+            COMPAT_RANDOM(ptr, ptr + n);
         }
     }
 
@@ -86,7 +86,7 @@ void run_backward_test(Handle* handle, DType dtype) {
                 for (size_t j = 0; j < n; ++j) {
                     ptr[j] = j;
                 }
-                std::random_shuffle(ptr, ptr + n);
+                COMPAT_RANDOM(ptr, ptr + n);
                 ptr += n;
             }
         }

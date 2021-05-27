@@ -2,7 +2,7 @@
  * \file dnn/src/naive/conv_bias/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,12 +17,98 @@
 #include "src/naive/handle.h"
 #include "src/naive/lowbit_utils.h"
 #include "src/common/conv_bias.h"
+#include "src/common/opr_delegate.h"
 
 #include "midout.h"
 MIDOUT_DECL(megdnn_naive_conv_bias_fwd)
 
 namespace megdnn {
 namespace naive {
+
+//! Only used for naive implementation. DO NOT use the following function in
+//! other backends.
+void handle_z_inp_and_activation_naive(
+        param::ConvBias::NonlineMode nonline_mode,
+        const TensorND& conv_bias_tensor, const TensorND& z_tensor,
+        const TensorND& dst_tensor, dt_byte* workspace_ptr) {
+    auto res = dst_tensor, z_float = z_tensor;
+    //!create naive inplace handle
+    auto handle = inplace_cpu_handle(2);
+    if (z_tensor.layout.ndim > 0 &&
+        z_tensor.layout.dtype.category() != DTypeCategory::FLOAT) {
+        dt_byte *res_float_workspace_ptr = nullptr,
+                *z_float_workspace_ptr = nullptr;
+        megdnn_assert(z_tensor.layout.eq_shape(dst_tensor.layout));
+        res_float_workspace_ptr = workspace_ptr;
+        z_float_workspace_ptr = res_float_workspace_ptr +
+                                TensorLayout{z_tensor.layout, dtype::Float32()}
+                                        .span()
+                                        .dist_byte();
+        res = TensorND{res_float_workspace_ptr,
+                       TensorLayout{dst_tensor.layout, dtype::Float32()}};
+        z_float = TensorND{z_float_workspace_ptr,
+                           TensorLayout{z_tensor.layout, dtype::Float32()}};
+    }
+    // ====================sfb + z_tensor=====================
+    if (z_tensor.layout.ndim > 0) {
+        if (z_tensor.layout.dtype.category() != DTypeCategory::FLOAT) {
+            auto&& type_cvt = handle->create_operator<TypeCvt>();
+            type_cvt->exec(conv_bias_tensor, res);
+            type_cvt->exec(z_tensor, z_float);
+        }
+        auto add_opr = handle->create_operator<ElemwiseForward>();
+        add_opr->param().mode = Elemwise::Param::Mode::ADD;
+        add_opr->exec({res, z_float}, res);
+    } else {
+        res = conv_bias_tensor;
+    }
+
+    using NonlineMode = param::ConvBias::NonlineMode;
+
+    switch (nonline_mode) {
+#define cb(_mode)                                                          \
+    case NonlineMode::_mode: {                                             \
+        if (res.layout.dtype.category() != DTypeCategory::QUANTIZED) {     \
+            auto nonlinear = handle->create_operator<ElemwiseForward>();   \
+            nonlinear->param().mode = Elemwise::Param::Mode::_mode;        \
+            if (res.layout.dtype == dst_tensor.layout.dtype) {             \
+                nonlinear->exec({res}, dst_tensor);                        \
+            } else {                                                       \
+                nonlinear->exec({res}, res);                               \
+                handle->create_operator<TypeCvt>()->exec(res, dst_tensor); \
+            }                                                              \
+        } else {                                                           \
+            auto nonlinear = handle->create_operator<ElemwiseMultiType>(); \
+            nonlinear->param().mode =                                      \
+                    ElemwiseMultiType::Param::Mode::Q##_mode;              \
+            nonlinear->exec({res}, dst_tensor);                            \
+        }                                                                  \
+        break;                                                             \
+    }
+        cb(RELU);
+        cb(H_SWISH);
+#undef cb
+        case NonlineMode::SIGMOID: {
+            megdnn_assert(res.layout.dtype.category() !=
+                          DTypeCategory::QUANTIZED);
+            auto nonlinear = handle->create_operator<ElemwiseForward>();
+            nonlinear->param().mode = Elemwise::Param::Mode::SIGMOID;
+            nonlinear->exec({res}, res);
+            if (res.raw_ptr != dst_tensor.raw_ptr) {
+                handle->create_operator<TypeCvt>()->exec(res, dst_tensor);
+            }
+            break;
+        }
+        case NonlineMode::IDENTITY: {
+            if (res.raw_ptr != dst_tensor.raw_ptr) {
+                handle->create_operator<TypeCvt>()->exec(res, dst_tensor);
+            }
+            break;
+        }
+        default:
+            megdnn_assert(false);
+    }
+}
 
 namespace convolution {
 
@@ -54,7 +140,8 @@ size_t ConvBiasForwardImpl::get_workspace_in_bytes(const TensorLayout& src,
                                                    const TensorLayout& flt,
                                                    const TensorLayout& bias,
                                                    const TensorLayout& z,
-                                                   const TensorLayout& dst) {
+                                                   const TensorLayout& dst,
+                                                   const PreprocessedFilter*) {
     size_t float_workspace_size = 0;
 
     if (z.ndim > 0 && z.dtype.category() != DTypeCategory::FLOAT) {
@@ -79,13 +166,15 @@ size_t ConvBiasForwardImpl::get_workspace_in_bytes(const TensorLayout& src,
 void ConvBiasForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in filter,
                                _megdnn_tensor_in bias, _megdnn_tensor_in z,
                                _megdnn_tensor_out dst,
+                               const PreprocessedFilter* preprocessed_filter,
                                _megdnn_workspace workspace) {
     MIDOUT_BEGIN(megdnn_naive_conv_bias_fwd) {
         dt_byte *workspace_ptr = workspace.raw_ptr;
         // ============================w * f + b================================
 
-        auto filter_meta = check_exec(src.layout, filter.layout, bias.layout,
-                                      z.layout, dst.layout, workspace.size);
+        auto filter_meta =
+                check_exec(src.layout, filter.layout, bias.layout, z.layout,
+                           dst.layout, workspace.size, preprocessed_filter);
         auto sfb = dst;
         if (bias.layout.dtype.enumv() != dst.layout.dtype.enumv()) {
             // intermediate result
@@ -114,13 +203,20 @@ void ConvBiasForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in filter,
         DISPATCH(Int8, Int16)
         DISPATCH(Int8, Int32)
         DISPATCH(QuantizedS8, QuantizedS32)
+        DISPATCH(QuantizedS8, Float32)
         DISPATCH(Quantized8Asymm, QuantizedS32)
         DISPATCH(Quantized4Asymm, QuantizedS32)
+        DISPATCH_RAW(QuantizedS8, QuantizedS32, QuantizedS32, FLOAT32,
+                     (convolution::forward_bias<dt_int8, dt_int8, dt_int32,
+                                                dt_int32>))
 #if !MEGDNN_DISABLE_FLOAT16
         DISPATCH(Float16, Float16)
         DISPATCH_RAW(Float16, Float16, Float16, FLOAT32,
                      (convolution::forward_bias<dt_float16, dt_float16,
                                                 dt_float16, dt_float32>))
+        DISPATCH_RAW(BFloat16, BFloat16, BFloat16, FLOAT32,
+                     (convolution::forward_bias<dt_bfloat16, dt_bfloat16,
+                                                dt_bfloat16, dt_float32>))
 #endif
         else {
             megdnn_throw(ssprintf(
@@ -131,8 +227,8 @@ void ConvBiasForwardImpl::exec(_megdnn_tensor_in src, _megdnn_tensor_in filter,
         }
 #undef DISPATCH
 #undef DISPATCH_RAW
-        handle_z_inp_and_activation(handle(), param().nonlineMode, sfb, z, dst,
-                                    workspace_ptr);
+        MEGDNN_DISPATCH_CPU_KERN_OPR(handle_z_inp_and_activation_naive(
+                param().nonlineMode, sfb, z, dst, workspace_ptr));
     }
     MIDOUT_END();
 }
@@ -150,17 +246,21 @@ ConvBiasForward::Algorithm* ConvBiasForwardImpl::get_algorithm_heuristic(
         const TensorLayout& /* src */, const TensorLayout& /* filter */,
         const TensorLayout& /* bias */, const TensorLayout& /* z */,
         const TensorLayout& /* dst */, size_t /* workspace_limit_in_bytes */,
-        bool reproducible) {
+        const AlgoAttribute& positive_attr,
+        const AlgoAttribute& negative_attr) {
     auto algo =
             static_cast<HandleImpl*>(handle())->default_conv_bias_fwd_algo();
-    if (reproducible) {
-        megdnn_assert(algo->is_reproducible(),
-                      "require reproducible algorithm, but heuristic "
-                      "algorithm(%s) is not "
-                      "reproducible",
-                      algo->name());
-    }
+    algo->check_attribute(positive_attr, negative_attr);
     return algo;
+}
+
+ConvBiasForward::Algorithm*
+ConvBiasForwardImpl::get_algorithm_from_desc(
+        const AlgorithmDesc& desc) {
+    Algorithm* ret =
+            static_cast<HandleImpl*>(handle())->default_conv_bias_fwd_algo();
+    megdnn_assert(desc == ret->info().desc);
+    return ret;
 }
 
 const char* ConvBiasForwardImpl::get_algorithm_set_name() const {

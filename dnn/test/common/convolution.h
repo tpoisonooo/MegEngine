@@ -2,11 +2,12 @@
  * \file dnn/test/common/convolution.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 #pragma once
 
@@ -47,6 +48,8 @@ std::vector<TestArg> get_args_cudnn_7_5_failures();
 std::vector<TestArg> get_1x1_args();
 std::vector<TestArg> get_dilated_args();
 std::vector<TestArg> get_chanwise_args();
+std::vector<TestArg> get_args_int8_nchw4_conv_bwd_data();
+std::vector<TestArg> get_args_int8_nchw_conv_bwd_data();
 
 //! \param stage 0 for fwd, 1 for bwd data, 2 for bwd filter
 using ConvEPSGetter =
@@ -55,7 +58,8 @@ using ConvEPSGetter =
 //! check for various conv configurations (dilation, group, stride, padding)
 //! and run all usable algorithms
 void test_conv_config_combinations(
-        Handle* handle, bool test_int8, bool test_backward, bool is_cuda,
+        int k_size, Handle* handle, bool test_int8, bool test_backward,
+        bool is_cuda,
         ConvEPSGetter conv_eps_getter = [](bool f16, int, const char*)
                 -> float { return f16 ? 1e-1 : 1e-3; },
         bool use_io16xc32 = false);

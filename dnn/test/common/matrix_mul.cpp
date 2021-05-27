@@ -2,19 +2,22 @@
  * \file dnn/test/common/matrix_mul.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
-#include "test/common/matrix_mul.h"
 #include "src/common/utils.h"
 #include "test/common/benchmarker.h"
 #include "test/common/checker.h"
+#include "test/common/matrix_mul.h"
 
 using namespace megdnn;
 using namespace test;
+
+constexpr size_t matrix_mul::TestArg::UNSET_STRIDE_VAL;
 
 std::vector<matrix_mul::TestArg> matrix_mul::get_matmul_args_no_mask() {
     std::vector<TestArg> args;
@@ -39,9 +42,9 @@ std::vector<matrix_mul::TestArg> matrix_mul::get_matmul_args_no_mask() {
 std::vector<matrix_mul::TestArg> matrix_mul::get_matmul_mk_packed_args(
         size_t nbase) {
     std::vector<TestArg> args;
-    for (size_t m : {1, 2, 3, 4, 5})
-        for (size_t n : {1, 2, 3, 4, 5, 8, 16, 24})
-            for (size_t k : {1, 2, 3, 4, 5})
+    for (size_t m : {1, 2, 3, 4, 5, 6, 7, 8, 11})
+        for (size_t n : {1, 2, 3, 4, 5, 8, 12, 16, 24})
+            for (size_t k : {1, 2, 3, 4, 5, 9, 10, 11})
                 args.emplace_back(m, n * nbase, k, 0);
     return args;
 }
@@ -56,7 +59,9 @@ matrix_mul::get_batched_matmul_args_cublaslt() {
             // so please uncomment it if the bug is fixed
 
             for (size_t k : {32, 64}) {
-                args.emplace_back(m, n, k, 0, 0, 0, 0, 2);
+                args.emplace_back(m, n, k, 0, TestArg::UNSET_STRIDE_VAL,
+                                  TestArg::UNSET_STRIDE_VAL,
+                                  TestArg::UNSET_STRIDE_VAL, 2);
             }
         }
     }
@@ -69,7 +74,9 @@ matrix_mul::get_batched_matmul_args_int8x8x32() {
     for (size_t m : {1, 2, 3, 4, 5, 8, 64}) {
         for (size_t n : {1, 2, 3, 4, 5, 8, 64}) {
             for (size_t k : {1, 2, 3, 4, 5, 8, 64}) {
-                args.emplace_back(m, n, k, 0, 0, 0, 0, 2);
+                args.emplace_back(m, n, k, 0, TestArg::UNSET_STRIDE_VAL,
+                                  TestArg::UNSET_STRIDE_VAL,
+                                  TestArg::UNSET_STRIDE_VAL, 2);
             }
         }
     }
@@ -110,6 +117,18 @@ std::vector<matrix_mul::TestArg> matrix_mul::get_matmul_args() {
     return args;
 }
 
+std::vector<matrix_mul::TestArg> matrix_mul::get_matmul_args_split_k() {
+    std::vector<TestArg> args = get_matmul_args();
+    for (auto iter = args.begin(); iter < args.end();) {
+        if (iter->k <= iter->n) {
+            iter = args.erase(iter);
+        } else {
+            iter++;
+        }
+    }
+    return args;
+}
+
 std::vector<matrix_mul::TestArg> matrix_mul::get_batched_matmul_args_mask(
         uint8_t mask) {
     std::vector<TestArg> args;
@@ -135,14 +154,39 @@ std::vector<matrix_mul::TestArg> matrix_mul::get_batched_matmul_args() {
     return args;
 }
 
+std::vector<matrix_mul::TestArg>
+matrix_mul::get_batched_matmul_broadcast_args() {
+    std::vector<TestArg> args;
+    for (size_t mask = 0; mask < 4; ++mask) {
+        std::vector<TestArg> args_temp =
+                matrix_mul::get_batched_matmul_broadcast_args_mask(mask);
+        for (auto arg : args_temp)
+            args.emplace_back(arg);
+    }
+    return args;
+}
+
+std::vector<matrix_mul::TestArg>
+matrix_mul::get_batched_matmul_broadcast_args_mask(uint8_t mask) {
+    std::vector<TestArg> args;
+    std::vector<TestArg> args_temp =
+            matrix_mul::get_batched_matmul_args_mask(mask);
+    for (auto arg : args_temp) {
+        args.emplace_back(arg);
+        args.back().A_batch_stride = 0;
+    }
+    return args;
+}
+
 template <typename Opr>
 void matrix_mul::check_matrix_mul(DType A_dtype, DType B_dtype, DType C_dtype,
-                                  Handle* handle, const char* algo,
+                                  Handle* handle,
+                                  const ExecutionPolicyAlgoName& algo,
                                   param::MatrixMul::Format format, size_t nbase,
                                   float eps, std::vector<TestArg>&& user_args) {
     megdnn_assert(A_dtype.enumv() == B_dtype.enumv());
     Checker<Opr> checker(handle);
-    if (algo) {
+    if (!algo.name.empty()) {
         checker.set_before_exec_callback(AlgoChecker<Opr>(algo));
     }
     std::unique_ptr<RNG> rng;
@@ -168,9 +212,9 @@ void matrix_mul::check_matrix_mul(DType A_dtype, DType B_dtype, DType C_dtype,
         checker.set_rng(0, rng.get()).set_rng(1, rng.get());
     }
 
-    //! return expect if stride == 0, stride otherwise
+    //! return expect if stride == -1, stride otherwise
     auto stride_val = [](size_t stride, size_t expect) -> size_t {
-        if (stride == 0) {
+        if (stride == TestArg::UNSET_STRIDE_VAL) {
             return expect;
         } else {
             return stride;
@@ -266,7 +310,8 @@ void matrix_mul::check_matrix_mul(DType A_dtype, DType B_dtype, DType C_dtype,
 
 void matrix_mul::check_batched_matrix_mul(DType A_dtype, DType B_dtype,
                                           DType C_dtype, Handle* handle,
-                                          const char* algo, float eps,
+                                          const ExecutionPolicyAlgoName& algo,
+                                          float eps,
                                           std::vector<TestArg>&& args) {
     check_matrix_mul<megdnn::BatchedMatrixMul>(
             A_dtype, B_dtype, C_dtype, handle, algo,
@@ -275,7 +320,8 @@ void matrix_mul::check_batched_matrix_mul(DType A_dtype, DType B_dtype,
 }
 
 void matrix_mul::check_matrix_mul(DType A_dtype, DType B_dtype, DType C_dtype,
-                                  Handle* handle, const char* algo,
+                                  Handle* handle,
+                                  const ExecutionPolicyAlgoName& algo,
                                   param::MatrixMul::Format format, size_t nbase,
                                   float eps) {
     check_matrix_mul<megdnn::MatrixMul>(A_dtype, B_dtype, C_dtype, handle, algo,

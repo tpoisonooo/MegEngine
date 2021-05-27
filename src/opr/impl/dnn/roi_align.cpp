@@ -2,7 +2,7 @@
  * \file src/opr/impl/dnn/roi_align.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -40,10 +40,8 @@ SymbolVar ROIAlignForward::make(SymbolVar src, SymbolVar rois,
             src.node(), rois.node(), param, config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(ROIAlignForward) {
-    if (out_grad[1]) {
-        return InvalidGrad::make(opr, wrt_idx);
-    }
     if (wrt_idx == 0) {
         // wrt src
         SymbolVar grad =
@@ -55,6 +53,7 @@ MGB_IMPL_OPR_GRAD(ROIAlignForward) {
         return nullptr;
     }
 }
+#endif
 
 /* ==================== ROIAlignBackward ==================== */
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(ROIAlignBackward);

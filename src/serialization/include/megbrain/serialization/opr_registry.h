@@ -2,7 +2,7 @@
  * \file src/serialization/include/megbrain/serialization/opr_registry.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -76,7 +76,7 @@ namespace serialization {
 
 #if MGB_ENABLE_DEBUG_UTIL
         //! dump registered oprs
-        static std::vector<std::pair<uint64_t, std::string>> dump_registries();
+        static std::vector<std::pair<size_t, std::string>> dump_registries();
 #endif
     };
 

@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/deformable_conv/fwd/algo.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,7 +22,13 @@ using OprImpl = DeformableConvForwardImpl;
 
 OprImpl::AlgoPack::AlgoPack() {
     all_algos.push_back(&algo_matmul);
+
+    for (auto&& algo : all_algos) {
+        m_all_algos_map.emplace(algo->info().desc, algo);
+    }
 }
+
+MEGDNN_DEF_GET_ALGO_FROM_DESC(DeformableConvForwardImpl)
 
 OprImpl::AlgoPack OprImpl::sm_algo_pack;
 

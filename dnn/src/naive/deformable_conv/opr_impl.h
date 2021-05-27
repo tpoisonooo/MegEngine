@@ -2,7 +2,7 @@
  * \file dnn/src/naive/deformable_conv/opr_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,13 +26,13 @@ public:
         return std::vector<Algorithm*>();
     };
 
-    Algorithm* get_algorithm_heuristic(const TensorLayout& /* src */,
-                                       const TensorLayout& /* filter */,
-                                       const TensorLayout& /* offset */,
-                                       const TensorLayout& /* mask */,
-                                       const TensorLayout& /* dst */,
-                                       size_t /* workspace_limit_in_bytes */,
-                                       bool /* reproducible */) override {
+    Algorithm* get_algorithm_heuristic(
+            const TensorLayout& /* src */, const TensorLayout& /* filter */,
+            const TensorLayout& /* offset */, const TensorLayout& /* mask */,
+            const TensorLayout& /* dst */,
+            size_t /* workspace_limit_in_bytes */,
+            const AlgoAttribute& /*positive_attr*/,
+            const AlgoAttribute& /*negative_attr*/) override {
         return nullptr;
     };
 
@@ -47,6 +47,10 @@ public:
     const char* get_algorithm_set_name() const override {
         return "DEFORMABLE_CONV2_NAIVE";
     };
+
+    Algorithm* get_algorithm_from_desc(const AlgorithmDesc&) override {
+        return {};
+    }
 
     void exec(_megdnn_tensor_in src, _megdnn_tensor_in filter,
               _megdnn_tensor_in offset, _megdnn_tensor_in mask,
@@ -64,13 +68,13 @@ public:
         return std::vector<Algorithm*>();
     };
 
-    Algorithm* get_algorithm_heuristic(const TensorLayout& /* im */,
-                                       const TensorLayout& /* offset */,
-                                       const TensorLayout& /* mask */,
-                                       const TensorLayout& /* out_grad */,
-                                       const TensorLayout& /* filter_grad */,
-                                       size_t /* workspace_limit_in_bytes */,
-                                       bool /* reproducible */) override {
+    Algorithm* get_algorithm_heuristic(
+            const TensorLayout& /* im */, const TensorLayout& /* offset */,
+            const TensorLayout& /* mask */, const TensorLayout& /* out_grad */,
+            const TensorLayout& /* filter_grad */,
+            size_t /* workspace_limit_in_bytes */,
+            const AlgoAttribute& /*positive_attr*/,
+            const AlgoAttribute& /*negative_attr*/) override {
         return nullptr;
     };
 
@@ -83,6 +87,10 @@ public:
     const char* get_algorithm_set_name() const override {
         return "DEFORMABLE_CONV2_BWD_FILTER_NAIVE";
     };
+
+    Algorithm* get_algorithm_from_desc(const AlgorithmDesc&) override {
+        return {};
+    }
 
     void exec(_megdnn_tensor_in im, _megdnn_tensor_in offset,
               _megdnn_tensor_in mask, _megdnn_tensor_in out_grad,
@@ -104,16 +112,16 @@ public:
         return std::vector<Algorithm*>();
     };
 
-    Algorithm* get_algorithm_heuristic(const TensorLayout& /* im */,
-                                       const TensorLayout& /* filter */,
-                                       const TensorLayout& /* offset */,
-                                       const TensorLayout& /* mask */,
-                                       const TensorLayout& /* out_grad */,
-                                       const TensorLayout& /* im_grad */,
-                                       const TensorLayout& /* offset_grad */,
-                                       const TensorLayout& /* mask_grad */,
-                                       size_t /* workspace_limit_in_bytes */,
-                                       bool /* reproducible */) override {
+    Algorithm* get_algorithm_heuristic(
+            const TensorLayout& /* im */, const TensorLayout& /* filter */,
+            const TensorLayout& /* offset */, const TensorLayout& /* mask */,
+            const TensorLayout& /* out_grad */,
+            const TensorLayout& /* im_grad */,
+            const TensorLayout& /* offset_grad */,
+            const TensorLayout& /* mask_grad */,
+            size_t /* workspace_limit_in_bytes */,
+            const AlgoAttribute& /*positive_attr*/,
+            const AlgoAttribute& /*negative_attr*/) override {
         return nullptr;
     };
 
@@ -129,6 +137,10 @@ public:
     const char* get_algorithm_set_name() const override {
         return "DEFORMABLE_CONV2_BWD_DATA_NAIVE";
     };
+
+    Algorithm* get_algorithm_from_desc(const AlgorithmDesc&) override {
+        return {};
+    }
 
     void exec(_megdnn_tensor_in im, _megdnn_tensor_in filter,
               _megdnn_tensor_in offset, _megdnn_tensor_in mask,

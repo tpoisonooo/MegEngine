@@ -2,7 +2,7 @@
  * \file dnn/src/common/elemwise/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -74,18 +74,29 @@ const ModeTrait& ModeTrait::from_mode(Mode mode) {
 
 #define cb(_m)                                                  \
     MIDOUT_BEGIN(megdnn_common_elemwise, midout_iv(Mode::_m)) { \
+        get(Mode::_m).allow_bool = true;                       \
+    }                                                           \
+    MIDOUT_END();
+        MEGDNN_FOREACH_ELEMWISE_MODE_UNARY_BOOL(cb);
+        MEGDNN_FOREACH_ELEMWISE_MODE_BINARY_BOOL(cb);
+#undef cb
+
+#define cb(_m)                                                  \
+    MIDOUT_BEGIN(megdnn_common_elemwise, midout_iv(Mode::_m)) { \
         auto&& t = get(Mode::_m);                               \
         t.arity = _a;                                           \
-        t.name = megdnn_mangle(#_m);                            \
+        t.name = (#_m);                                         \
     }                                                           \
     MIDOUT_END();
 #define _a 1
         MEGDNN_FOREACH_ELEMWISE_MODE_UNARY_FLOAT(cb);
         MEGDNN_FOREACH_ELEMWISE_MODE_UNARY_INT(cb);
+        MEGDNN_FOREACH_ELEMWISE_MODE_UNARY_BOOL(cb);
 #undef _a
 #define _a 2
         MEGDNN_FOREACH_ELEMWISE_MODE_BINARY_FLOAT(cb);
         MEGDNN_FOREACH_ELEMWISE_MODE_BINARY_INT(cb);
+        MEGDNN_FOREACH_ELEMWISE_MODE_BINARY_BOOL(cb);
 #undef _a
 #define _a 3
         MEGDNN_FOREACH_ELEMWISE_MODE_TERNARY_FLOAT(cb);
@@ -98,8 +109,9 @@ const ModeTrait& ModeTrait::from_mode(Mode mode) {
         auto&& t = get(Mode::_m);                               \
         t.allow_int = true;                                     \
         t.allow_float = true;                                   \
+        t.allow_bool = true;                                    \
         t.arity = _arity;                                       \
-        t.name = megdnn_mangle(#_m);                            \
+        t.name = (#_m);                                         \
     }                                                           \
     MIDOUT_END();
         FUSE(FUSE_MUL_ADD3, 3);
@@ -129,7 +141,7 @@ const ModeTrait& ModeTrait::from_mode(Mode mode) {
 
 #if MEGDNN_ELEMWISE_MODE_ENABLE_ALL
         for (auto&& i : traits) {
-            megdnn_assert(i.arity && (i.allow_int || i.allow_float) &&
+            megdnn_assert(i.arity && (i.allow_int || i.allow_float || i.allow_bool) &&
                           (!i.commutable || i.arity == 2));
         }
 #else
@@ -147,14 +159,13 @@ const ModeTrait& ModeTrait::from_mode(Mode mode) {
 void ElemwiseForward::deduce_shape(const TensorShapeArray& src,
                                    TensorShape& dst) {
     auto err = [&]() {
-        std::string msg(
-                megdnn_mangle("bad input shape for polyadic operator: "));
+        std::string msg("bad input shape for polyadic operator: ");
         bool first = true;
         for (auto&& i : src) {
             if (first)
                 first = false;
             else
-                msg.append(megdnn_mangle(", "));
+                msg.append(", ");
             msg.append(i.to_string());
         }
         megdnn_throw(msg);
@@ -174,11 +185,12 @@ void ElemwiseForward::deduce_shape(const TensorShapeArray& src,
                 if (cur_idx >= 0 && dst_idx >= 0) {
                     size_t v0 = dst.shape[dst_idx], v1 = cur.shape[cur_idx];
                     if (v0 != v1) {
-                        if (v0 != 1 && v1 != 1)
+                        if (v0 > 1 && v1 > 1)
                             err();
                     }
                     int final_idx = std::max(cur_idx, dst_idx);
-                    dst.shape[final_idx] = std::max(v0, v1);
+                    dst.shape[final_idx] =
+                            (v0 != 0 && v1 != 0) ? std::max(v0, v1) : 0;
                 } else {
                     if (dst_idx < 0) {
                         dst.shape[cur_idx] = cur.shape[cur_idx];
@@ -279,6 +291,10 @@ void ElemwiseForward::check_dtype(DType dtype) {
             break;
         case DTypeCategory::INT:
             megdnn_assert(trait.allow_int, "unsupport mode %s for int\n",
+                          trait.name);
+            break;
+        case DTypeCategory::BOOL:
+            megdnn_assert(trait.allow_bool, "unsupport mode %s for bool\n",
                           trait.name);
             break;
         default:

@@ -2,7 +2,7 @@
  * \file dnn/test/naive/rng.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -63,7 +63,7 @@ TEST_F(NAIVE, UNIFORM_RNG_F32) {
 }
 
 TEST_F(NAIVE, UNIFORM_RNG_F16) {
-    MEGDNN_INC_FLOAT16(run_uniform<dtype::Float16>(handle()));
+    DNN_INC_FLOAT16(run_uniform<dtype::Float16>(handle()));
 }
 
 TEST_F(NAIVE, GAUSSIAN_RNG_F32) {
@@ -71,7 +71,7 @@ TEST_F(NAIVE, GAUSSIAN_RNG_F32) {
 }
 
 TEST_F(NAIVE, GAUSSIAN_RNG_F16) {
-    MEGDNN_INC_FLOAT16(run_gaussian<dtype::Float16>(handle()));
+    DNN_INC_FLOAT16(run_gaussian<dtype::Float16>(handle()));
 }
 
 } // namespace test

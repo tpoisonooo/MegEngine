@@ -5,7 +5,7 @@
  *
  * \brief graph loader and dumper config
  *
- * \copyright Copyright (c) 2014-2019 Megvii Inc. All rights reserved.
+ * \copyright Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  */
 #pragma once
@@ -43,6 +43,9 @@ struct GraphDumpConfig {
     //! whether to keep operator priorities
     bool keep_opr_priority;
 
+    //! whether to keep operator names
+    bool keep_op_name;
+
     //! extra user data to be passed by dump caller into opr dump
     //! implementations; useful for implementing nested opr dump
     std::shared_ptr<UserDataContainer> user_data;
@@ -51,14 +54,20 @@ struct GraphDumpConfig {
     //! tensor value without layout; useful for compression or encryption
     TensorValueDumper tensor_value_dumper;
 
+    //! a list of output nodes and names. one output node may have multiple
+    //! names. this list record the mapping between output node and it's name
+    std::vector<std::pair<std::string, SymbolVar>> alias_name_map;
+
     GraphDumpConfig(int keep_var_name_ = 1, bool keep_param_name_ = false,
                     bool keep_opr_priority_ = false,
+                    bool keep_op_name_ = true,
                     const std::shared_ptr<UserDataContainer>& user_data_ =
                             std::make_shared<UserDataContainer>(),
                     const TensorValueDumper& tensor_value_dumper_ = {})
             : keep_var_name{keep_var_name_},
               keep_param_name{keep_param_name_},
               keep_opr_priority{keep_opr_priority_},
+              keep_op_name{keep_op_name_},
               user_data{user_data_},
               tensor_value_dumper{tensor_value_dumper_} {}
 };

@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/symbol_var.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -47,6 +47,11 @@ SymbolVar SymbolVar::broadcast(SymbolVar tshape) const {
 
 SymbolVar SymbolVar::flatten() const {
     return opr::Reshape::make(*this, make_scalar(1), 0);
+}
+
+SymbolVar SymbolVar::add_axis(size_t idx) const {
+    return opr::AxisAddRemove::make(*this,
+        {opr::AxisAddRemove::AxisDesc::make_add(idx)});
 }
 
 Maybe<DTypeScalar> SymbolVar::as_immutable_scalar() const {
@@ -127,7 +132,7 @@ const DeviceTensorND& SymbolVar::eager_eval_get_value() const {
 #if MGB_BUILD_SLIM_SERVING
     mgb_throw(MegBrainError, "eager eval disabled at compile time");
 #else
-    auto og = static_cast<ComputingGraphImpl*>(node()->owner_graph());
+    auto og = ComputingGraphImpl::downcast(node()->owner_graph());
     mgb_assert(og->options().eager_evaluation);
     return node()->dev_tensor();
 #endif

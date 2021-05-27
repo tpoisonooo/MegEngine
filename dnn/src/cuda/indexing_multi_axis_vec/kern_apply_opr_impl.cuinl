@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/indexing_multi_axis_vec/kern_apply_opr_impl.cuinl
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -72,6 +72,7 @@ namespace indexing_multi_axis_vec {
 #define cb0(_dtype) \
     MEGDNN_FOREACH_TENSOR_NDIM(INST, DTypeTrait<_dtype>::ctype)
     MEGDNN_FOREACH_COMPUTING_DTYPE(cb0)
+    cb0(::megdnn::dtype::Bool)
 #undef cb0
 #undef INST
 

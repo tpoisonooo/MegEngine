@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package mm_handler;
+
+message OprRegisterRequest {
+    string key = 1;
+    bool is_root = 2;
+    int32 rank = 3;
+    uint64 comp_node_hash = 4;
+    uint32 nr_expected_devices = 5;
+}
+
+message OprRegisterResponse {
+    uint64 hash = 1;
+    int32 rank = 2;
+    int32 root_rank = 3;
+}
+
+message BcastAddrRequest {
+    string master_ip = 1;
+    int32 port = 2;
+    string key = 3;
+    uint32 size = 4;
+    uint32 rank = 5;
+    uint32 root = 6;
+}
+
+message BcastAddrResponse {
+    string master_ip = 1;
+    int32 port = 2;
+}
+
+message SetOutputShapeRequest {
+    string key = 1;
+    TensorShape shape = 2;
+}
+
+message SetOutputShapeResponse {
+}
+
+message GetOutputShapeRequest {
+    string key = 1;
+}
+
+message GetOutputShapeResponse {
+    TensorShape shape = 1;
+}
+
+message TensorShape {
+    uint64 ndim = 1;
+    repeated uint64 shape = 2;
+}
+
+message GroupBarrierRequest {
+    uint32 size = 1;
+    uint32 rank = 2;
+}
+
+message GroupBarrierResponse {
+    uint32 size = 1;
+}

@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/seq_sublinear_memory.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -33,6 +33,11 @@ class RNGxorshf {
     uint64_t s[2];
 
 public:
+#if __cplusplus >= 201703L
+    typedef uint64_t result_type;
+    static constexpr uint64_t min() { return 0; }
+    static constexpr uint64_t max() { return UINT64_MAX; }
+#endif
     RNGxorshf(uint64_t seed) {
         std::mt19937_64 gen(seed);
         s[0] = gen();
@@ -681,14 +686,6 @@ class SeqModifierForSublinearMemory::ActionSearcherSingleCN {
     std::vector<std::future<void>> m_futures;
     std::mutex m_mtx;
 
-    struct Config {
-        size_t thresh_nr_try = 10;
-        size_t genetic_nr_iter = 0;
-        size_t genetic_pool_size = 20;
-        double lb_memory = 0;
-    };
-    Config m_config;
-
     /*!
      * \brief check given thresh, and update states
      * \return bottleneck value for given thresh
@@ -725,20 +722,22 @@ class SeqModifierForSublinearMemory::ActionSearcherSingleCN {
 public:
     ActionSearcherSingleCN(SeqModifierForSublinearMemory* par)
             : m_par_modifier{par} {
+        auto & m_config = m_par_modifier->m_config;
+        //! allow environmental variable to overwrite the setting
         if (auto env = MGB_GETENV("MGB_SUBLINEAR_MEMORY_THRESH_NR_TRY")) {
-            m_config.thresh_nr_try = std::stoi(env);
+            m_config->thresh_nr_try = std::stoi(env);
         }
         if (auto env = MGB_GETENV("MGB_SUBLINEAR_MEMORY_GENETIC_NR_ITER")) {
-            m_config.genetic_nr_iter = std::stoi(env);
+            m_config->genetic_nr_iter = std::stoi(env);
         }
         if (auto env = MGB_GETENV("MGB_SUBLINEAR_MEMORY_GENETIC_POOL_SIZE")) {
             auto psize = static_cast<size_t>(std::stoi(env));
-            mgb_assert(psize > 0 || m_config.genetic_nr_iter == 0,
+            mgb_assert(psize > 0 || m_config->genetic_nr_iter == 0,
                        "invalid pool size %zu in genetic algorithm,", psize);
-            m_config.genetic_pool_size = psize;
+            m_config->genetic_pool_size = psize;
         }
         if (auto env = MGB_GETENV("MGB_SUBLINEAR_MEMORY_LOWER_BOUND_MB")) {
-            m_config.lb_memory = std::stod(env) * 1024 * 1024;
+            m_config->lb_memory = std::stoi(env) * 1024 * 1024;
         }
     }
 
@@ -812,7 +811,7 @@ void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_preset() {
         invoke_search(thresh);
     }
 
-    size_t NR_TRY = m_config.thresh_nr_try;
+    size_t NR_TRY = m_par_modifier->m_config->thresh_nr_try;
 
     // search in linear space
     auto step = init_thresh / (NR_TRY + 1);
@@ -833,8 +832,8 @@ void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_preset() {
 
 void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_genetic() {
     RNGxorshf rng(2333);
-    size_t POOL_SIZE = m_config.genetic_pool_size;
-    size_t NR_ITER = m_config.genetic_nr_iter;
+    size_t POOL_SIZE = m_par_modifier->m_config->genetic_pool_size;
+    size_t NR_ITER = m_par_modifier->m_config->genetic_nr_iter;
     auto mutation = [&](const SplitPointSet& sps) {
         auto s = *sps;
         size_t length = s.size();
@@ -931,8 +930,8 @@ void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_genetic() {
             while (true) {
                 if (it == m_cur_records.end())
                     it = m_cur_records.begin();
-                if (8 * (rng() % m_cur_records.begin()->second) <
-                    7 * it->second) {
+                if (8 * (rng() % std::max((size_t)1, m_cur_records.begin()->second)) <
+                    7 * std::max((size_t)1, it->second)) {
                     records.push_back(*it);
                     it = m_cur_records.erase(it);
                     break;
@@ -942,8 +941,12 @@ void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_genetic() {
             }
         }
         m_cur_records = records;
+#if __cplusplus >= 201703L
+        std::shuffle(perm.begin(), perm.end(), rng);
+#else
         std::random_shuffle(perm.begin(), perm.end(),
                             [&](size_t x) { return rng() % x; });
+#endif
         for (size_t i = 0; i < length; ++i) {
             invoke_search(mutation(mutation(records[i].first)));
             invoke_search(crossover(records[i].first, records[perm[i]].first));
@@ -953,7 +956,7 @@ void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_genetic() {
 }
 
 void SeqModifierForSublinearMemory::ActionSearcherSingleCN::search_refine() {
-    size_t lower_bound = m_config.lb_memory;
+    size_t lower_bound = m_par_modifier->m_config->lb_memory;
     if (m_min_bottleneck >= lower_bound)
         return;
     OprFootprint footprint;
@@ -1052,7 +1055,7 @@ SeqModifierForSublinearMemory::ActionSearcherSingleCN::search(
     msg.push_back('\n');
     msg.append(ssprintf("m_min_bottleneck: %-10.2f\n",
                         m_min_bottleneck * SIZE2MB));
-    if(!m_config.genetic_nr_iter) {
+    if(!m_par_modifier->m_config->genetic_nr_iter) {
         msg.append(ssprintf(
             "\nGenetic algorithm is currently DISABLED, "
             "set MGB_SUBLINEAR_MEMORY_GENETIC_NR_ITER [default = 0]"
@@ -1124,7 +1127,7 @@ SeqModifierForSublinearMemory::search_action(
                    "invalid planner concurrency: %zu", set);
         planner_concur = set;
     } else {
-        planner_concur = sys::get_cpu_count() / 2;
+        planner_concur = m_config->num_worker;
     }
 
     mgb_log_debug("use %zu threads to search for sublinear memory plan; "
@@ -1231,26 +1234,32 @@ bool SeqModifierForSublinearMemory::replace_vars(const VarNodeArray& inputs) {
 OperatorNodeBase* SeqModifierForSublinearMemory::copy_opr_from_new_inputs(
         OperatorNodeBase* opr, bool recomp) {
     auto config = opr->config();
-    // set operator instance id to bybass the shallow copy's cache if
+    // update operator instance id to bybass the shallow copy's cache if
     // it's a dup-opr-copying due to discarding.
-    // Don't set instance id(nullptr) if it's a recomp-opr-copying, because:
+    // Don't update instance id by `this` pointer if it's a recomp-opr-copying
+    // because:
     // 0) recomp-opr would be copied iff its input vars is changed
     // 1) some pair of recomp-opr and dup-opr have the same inputs, params
     //    and config, we use instance id to differentiate them.
-    config.name(opr->name() + (recomp ? ":recomp" : ":dup"))
-          .instance_id(recomp ? nullptr : this);
-    if (!config.has_comp_node_set()) {
-        auto out_cn = opr->output(0)->comp_node();
-        for (auto i : opr->output()) {
-            auto cn = i->comp_node();
-            if (out_cn != cn) {
-                out_cn = {};
-                break;
-            }
-        }
-        if (out_cn.valid())
-            config.comp_node(out_cn);
+    config.name(opr->name() + (recomp ? ":recomp" : ":dup"));
+    if (!recomp) {
+       config.update_instance_id(this);
     }
+
+    // Note: if all outputs of op were placed on the same comp_node, since its
+    // stream maybe changed during seq_comp_node_opt, output's comp_node has
+    // higher priority than opr->config()
+    auto out_cn = opr->output(0)->comp_node();
+    for (auto i : opr->output()) {
+        auto cn = i->comp_node();
+        if (out_cn != cn) {
+            out_cn = {};
+            break;
+        }
+    }
+    if (out_cn.valid())
+        config.comp_node(out_cn);
+
     auto opr_new = serialization::copy_opr_shallow(*opr, m_new_inputs, config);
     mgb_assert(opr_new != opr);
 
@@ -1347,8 +1356,8 @@ SeqModifierForSublinearMemory::prev_min_bottleneck() {
 }
 
 SeqModifierForSublinearMemory::SeqModifierForSublinearMemory(
-        ComputingGraphImpl* owner)
-        : m_mem_opt(owner), m_owner_graph(owner) {}
+        ComputingGraphImpl* owner, Config* config_p)
+    : m_config(config_p), m_mem_opt(owner), m_owner_graph(owner) {}
 
 #endif  // !MGB_ENABLE_SUBLINEAR
 

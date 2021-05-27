@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/basic_arith.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -58,7 +58,8 @@ namespace intl {
  * The operands are broadcasted automatically on dimensions of shape one to
  * match shapes of each other; it works like broadcasting in numpy.
  */
-MGB_DEFINE_OPR_CLASS(Elemwise, intl::ElemwiseBase) // {
+MGB_DEFINE_OPR_CLASS(Elemwise, intl::ElemwiseBase,
+                     mixin::FwdIn2OutWritableHelper) // {
     using ModeTrait = megdnn::Elemwise::ModeTrait;
 
     public:
@@ -163,6 +164,7 @@ MGB_DEFINE_OPR_CLASS(Elemwise, intl::ElemwiseBase) // {
 
         void record_execute_deps(ExecDependencyArray& deps) override;
         void add_input_layout_constraint() override;
+        NodeProp* do_make_node_prop() const override;
 };
 
 namespace intl {
@@ -302,6 +304,7 @@ MGB_DEFINE_OPR_CLASS(Reduce, intl::DynamicOutputIfInputDynamic<
         static void perform(Mode mode, DeviceTensorND& dest,
                             DeviceTensorND& workspace,
                             const DeviceTensorND& input,
+                            const DType& target_dtype,
                             const TensorShape& target_shape,
                             intl::UniqPtrWithCN<megdnn::Reduce>& opr,
                             const Param::DataType data_type=Param::DataType::DEFAULT);

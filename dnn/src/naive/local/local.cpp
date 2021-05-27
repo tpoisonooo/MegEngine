@@ -2,7 +2,7 @@
  * \file dnn/src/naive/local/local.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -28,8 +28,8 @@ LocalForwardImpl::dispatch_float_noncontig_batch(
         } else {
             return &naive_kern<false, float>;
         }
-    } else if (MEGDNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), false)) {
-        MEGDNN_INC_FLOAT16(
+    } else if (DNN_FLOAT16_SELECT(src.dtype == dtype::Float16(), false)) {
+        DNN_INC_FLOAT16(
         megdnn_assert(src.dtype == dtype::Float16());
         if (param().mode == Mode::CROSS_CORRELATION) {
             return &naive_kern<true MEGDNN_COMMA dt_float16>;

@@ -2,7 +2,7 @@
  * \file src/tensorrt/test/make_trt_net.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,7 +20,8 @@
 #include "megbrain/utils/debug.h"
 
 #if MGB_ENABLE_TENSOR_RT
-
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "megbrain/tensorrt/tensorrt_opr.h"
 #include "make_trt_net.h"
 
@@ -46,6 +47,7 @@ intl::SimpleTensorRTNetwork::SimpleTensorRTNetwork() {
 
 std::pair<nvinfer1::IBuilder*, INetworkDefinition*>
 intl::SimpleTensorRTNetwork::create_trt_network(bool has_batch_dim) {
+    CompNode::load("xpu0").activate();
     Weights wt_filter{DataType::kFLOAT, nullptr, 0},
             wt_bias{DataType::kFLOAT, nullptr, 0};
     wt_filter.type = DataType::kFLOAT;
@@ -110,7 +112,8 @@ intl::SimpleQuantizedTensorRTNetwork::SimpleQuantizedTensorRTNetwork() {
     host_b = range_gen({1, 8, 1, 1});
 
     {
-        float* ptr = reinterpret_cast<float*>(host_w->raw_ptr());
+        void* w_ptr = host_w->raw_ptr();
+        float* ptr = reinterpret_cast<float*>(w_ptr);
         ptr[0] = -127*1.1f;
         ptr[1] = 127*1.1f;
     }
@@ -205,6 +208,7 @@ intl::SimpleQuantizedTensorRTNetwork::SimpleQuantizedTensorRTNetwork() {
 std::pair<nvinfer1::IBuilder*, INetworkDefinition*>
 intl::SimpleQuantizedTensorRTNetwork::create_trt_network(
         bool has_batch_dim) {
+    CompNode::load("xpu0").activate();
     Weights wt_filter{DataType::kFLOAT, nullptr, 0},
             wt_bias{DataType::kFLOAT, nullptr, 0};
     wt_filter.type = DataType::kFLOAT;
@@ -290,6 +294,7 @@ intl::ConcatConvTensorRTNetwork::ConcatConvTensorRTNetwork() {
 
 std::pair<nvinfer1::IBuilder*, INetworkDefinition*>
 intl::ConcatConvTensorRTNetwork::create_trt_network(bool has_batch_dim) {
+    CompNode::load("xpu0").activate();
     auto builder = createInferBuilder(TensorRTOpr::Logger::instance());
 #if NV_TENSOR_RT_VERSION >= 6001
     nvinfer1::NetworkDefinitionCreationFlags flags;
@@ -359,6 +364,7 @@ intl::ConcatConvTensorRTNetwork::create_trt_network(bool has_batch_dim) {
     return std::make_pair(builder, network);
 }
 
+#pragma GCC diagnostic pop
 #endif  // MGB_ENABLE_TENSOR_RT
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

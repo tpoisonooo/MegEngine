@@ -2,7 +2,7 @@
  * \file dnn/include/megcore.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -84,6 +84,7 @@ megcoreStatus_t megcoreGetDeviceFlags(
         unsigned int *flags);
 
 megcoreStatus_t megcoreActivate(megcoreDeviceHandle_t handle);
+megcoreStatus_t megcoreDeactivate(megcoreDeviceHandle_t handle);
 megcoreStatus_t megcoreMalloc(megcoreDeviceHandle_t handle,
         void **devPtr, size_t sizeInBytes);
 megcoreStatus_t megcoreFree(megcoreDeviceHandle_t handle,

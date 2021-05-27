@@ -2,7 +2,7 @@
  * \file src/serialization/impl/sereg_caller.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,6 +32,12 @@ namespace mgb{void call_sereg(){}}
 #if MGB_ENABLE_TENSOR_RT
 #include "../../tensorrt/impl/tensorrt_opr.sereg.h"
 #endif
+#if MGB_ATLAS
+#include "../../opr/impl/atlas_runtime_op.sereg.h"
+#endif
 #if MGB_JIT
 #include "../../jit/impl/jit.sereg.h"
+#endif
+#if MGB_CAMBRICON
+#include "../../cambricon/impl/cambricon_runtime_opr.sereg.h"
 #endif

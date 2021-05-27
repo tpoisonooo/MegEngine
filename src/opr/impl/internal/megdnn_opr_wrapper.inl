@@ -2,7 +2,7 @@
  * \file src/opr/impl/internal/megdnn_opr_wrapper.inl
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -44,21 +44,6 @@ namespace intl {
         static inline void apply(cg::OperatorNodeBase &opr) {
             MGB_MARK_USED_VAR(opr);
         }
-    };
-
-    /*!
-     * \brief Template that can be specialized and modify input tensors' layout
-     *        before passing to MegDNN. The implementation has to ensure that
-     *        modified layout is compatible with the original one.
-     *        Will be invoked in get_workspace_in_bytes, deduce_layout and exec.
-     *        Note that the output layout maybe invalid during deduce_layout.
-     *
-     * \tparam Opr An MegDNN opr class
-     */
-    template <class MegDNNOpr>
-    struct MegDNNOprInputsLayoutModifier {
-        static inline void apply(const typename MegDNNOpr::Param&,
-                                 std::initializer_list<const TensorLayout*>) {}
     };
 
     //! get megdnn Workspace object from a workspace var
@@ -176,6 +161,11 @@ namespace {
 #define _NR_INPUTS 3
 #define _NR_OUTPUTS 2
 #define _FOREACH_IO(_i, _o) _i(0), _i(1), _i(2), _o(0), _o(1)
+#include "./megdnn_opr_wrapper_megdnn_opr_meth_invoker_impl.inl"
+
+#define _NR_INPUTS 3
+#define _NR_OUTPUTS 3
+#define _FOREACH_IO(_i, _o) _i(0), _i(1), _i(2), _o(0), _o(1), _o(2)
 #include "./megdnn_opr_wrapper_megdnn_opr_meth_invoker_impl.inl"
 
 #define _NR_INPUTS 4

@@ -2,7 +2,7 @@
  * \file dnn/test/common/mask_conv.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -74,7 +74,7 @@ void mask_conv_test(Handle* handle) {
             arg[8], arg[9], arg[10], arg[11], arg[12]);
     }
 }
-
+#if MEGDNN_WITH_BENCHMARK
 void mask_conv_benchmark(Handle* handle) {
     auto benchmark = [&](size_t N, size_t IC, size_t OC, size_t IH, size_t IW,
                          size_t FH, size_t FW, size_t SH, size_t SW, size_t PH,
@@ -113,5 +113,6 @@ void mask_conv_benchmark(Handle* handle) {
                   arg[7], arg[8], arg[9], arg[10], arg[11], arg[12]);
     }
 }
+#endif
 
 }  // namespace

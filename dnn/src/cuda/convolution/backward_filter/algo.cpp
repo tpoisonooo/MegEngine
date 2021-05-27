@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/convolution/backward_filter/algo.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -43,7 +43,15 @@ ConvolutionBackwardFilterImpl::AlgoPack::AlgoPack() {
     megdnn_assert(all_algos_data == all_algos.data());
 
     non_cudnn_algos.push_back(all_algos.rbegin()[0]);   // group matmul
+    all_algos.push_back(&bfloat16);
+    bfloat16_algos.push_back(&bfloat16);
+
+    for (auto&& algo : all_algos) {
+        m_all_algos_map.emplace(algo->info().desc, algo);
+    }
 }
+
+MEGDNN_DEF_GET_ALGO_FROM_DESC(ConvolutionBackwardFilterImpl)
 
 ConvolutionBackwardFilterImpl::AlgoCUDNN*
 ConvolutionBackwardFilterImpl::AlgoPack::cudnn_from_enum(
@@ -52,9 +60,8 @@ ConvolutionBackwardFilterImpl::AlgoPack::cudnn_from_enum(
         if (i.cudnn_enum() == algo)
             return &i;
     }
-    megdnn_throw(megdnn_mangle(ssprintf(
-                    "can not find cudnn bwd_filter algorithm %d",
-                    static_cast<int>(algo))));
+    megdnn_throw(ssprintf("can not find cudnn bwd_filter algorithm %d",
+                          static_cast<int>(algo)));
 }
 
 ConvolutionBackwardFilterImpl::AlgoPack
@@ -64,21 +71,20 @@ ConvolutionBackwardFilterImpl::AlgoBase::SizeArgs::SizeArgs(
         ConvolutionBackwardFilterImpl *o,
         const TensorLayout &src, const TensorLayout &diff,
         const TensorLayout &grad):
-    SizeArgs(o, src, diff, o->check_layout_fwd(src, grad, diff))
+    SizeArgs(o, src, diff, grad, o->check_layout_fwd(src, grad, diff))
 {
 }
 
 ConvolutionBackwardFilterImpl::AlgoBase::SizeArgs::SizeArgs(
-        ConvolutionBackwardFilterImpl *o,
-        const TensorLayout &src, const TensorLayout &diff,
-        const CanonizedFilterMeta &grad):
-    handle{concrete_handle(o->handle())},
-    src_layout{&src},
-    diff_layout{&diff},
-    grad_filter_meta{grad},
-    opr{o}
-{
-}
+        ConvolutionBackwardFilterImpl* o, const TensorLayout& src,
+        const TensorLayout& diff, const TensorLayout& grad,
+        const CanonizedFilterMeta& grad_meta)
+        : handle{concrete_handle(o->handle())},
+          src_layout{&src},
+          diff_layout{&diff},
+          grad_layout{&grad},
+          grad_filter_meta{grad_meta},
+          opr{o} {}
 
 ConvolutionBackwardFilterImpl::AlgoBase::ExecArgs::ExecArgs(
         ConvolutionBackwardFilterImpl *opr,
@@ -96,16 +102,14 @@ std::string
 ConvolutionBackwardFilterImpl::AlgoBase::SizeArgs::to_string() const {
     auto &&fm = grad_filter_meta;
     MEGDNN_MARK_USED_VAR(fm);
-    return megdnn_mangle(ssprintf(
-                "src=%s diff=%s grad_filter=%u{%u,%u,%u,%u}, "
-                "pad=%ux%u, stride=%ux%u, dilate=%ux%u, xcorr=%d, dtype=%s,%s",
-                src_layout->to_string().c_str(),
-                diff_layout->to_string().c_str(),
-                fm.group, fm.ocpg, fm.icpg, fm.spatial[0], fm.spatial[1],
-                fm.padding[0], fm.padding[1], fm.stride[0], fm.stride[1],
-                fm.dilation[0], fm.dilation[1],
-                !fm.should_flip,
-                src_layout->dtype.name(), diff_layout->dtype.name()));
+    return ssprintf(
+            "src=%s diff=%s grad_filter=%u{%u,%u,%u,%u}, "
+            "pad=%ux%u, stride=%ux%u, dilate=%ux%u, xcorr=%d, dtype=%s,%s",
+            src_layout->to_string().c_str(), diff_layout->to_string().c_str(),
+            fm.group, fm.ocpg, fm.icpg, fm.spatial[0], fm.spatial[1],
+            fm.padding[0], fm.padding[1], fm.stride[0], fm.stride[1],
+            fm.dilation[0], fm.dilation[1], !fm.should_flip,
+            src_layout->dtype.name(), diff_layout->dtype.name());
 }
 
 // vim: syntax=cpp.doxygen

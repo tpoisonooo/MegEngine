@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/conv_bias/matmul_8x8x32.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -21,7 +21,7 @@ bool ConvBiasForwardImpl::AlgoMatmul8x8x32::is_available(
         const SizeArgs& args) const {
     if (args.z_layout->ndim > 0)
         return false;
-    if (cuda::current_device_prop().major < 6)
+    if (!is_compute_capability_required(6, 1))
         return false;
 
     auto dst_layout = *args.dst_layout;

@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/dtype.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,7 +17,8 @@
 namespace mgb {
 
 using ::megdnn::dt_byte;
-MEGDNN_INC_FLOAT16(using ::megdnn::dt_float16;)
+DNN_INC_FLOAT16(using ::megdnn::dt_float16;)
+DNN_INC_FLOAT16(using ::megdnn::dt_bfloat16;)
 using ::megdnn::dt_float32;
 using ::megdnn::dt_int8;
 using ::megdnn::dt_uint8;
@@ -26,6 +27,8 @@ using ::megdnn::dt_int32;
 using ::megdnn::dt_quint8;
 using ::megdnn::dt_qint8;
 using ::megdnn::dt_qint32;
+using ::megdnn::dt_bool;
+using ::megdnn::dt_uint16;
 using ::megdnn::DType;
 using ::megdnn::DTypeEnum;
 using ::megdnn::DTypeTrait;

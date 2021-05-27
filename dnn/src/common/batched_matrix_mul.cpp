@@ -2,7 +2,7 @@
  * \file dnn/src/common/batched_matrix_mul.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -39,15 +39,15 @@ void BatchedMatrixMulForward::deduce_layout(const TensorLayout& A,
                                             TensorLayout& C) {
     auto errmsg = [&]() {
         std::string msg;
-        msg.append(megdnn_mangle("A="));
+        msg.append("A=");
         msg.append(A.to_string());
-        msg.append(megdnn_mangle(", B="));
+        msg.append(", B=");
         msg.append(B.to_string());
-        msg.append(megdnn_mangle(", C="));
+        msg.append(", C=");
         msg.append(C.to_string());
-        msg.append(megdnn_mangle(", transposeA="));
+        msg.append(", transposeA=");
         msg.append(std::to_string(m_param.transposeA));
-        msg.append(megdnn_mangle(", transposeB="));
+        msg.append(", transposeB=");
         msg.append(std::to_string(m_param.transposeB));
         return msg;
     };

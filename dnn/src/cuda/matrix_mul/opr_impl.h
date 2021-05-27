@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/matrix_mul/opr_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -25,15 +25,6 @@ public:
 
     bool is_thread_safe() const override { return true; }
 
-    std::vector<Algorithm*> get_all_algorithms(const TensorLayout& A,
-                                               const TensorLayout& B,
-                                               const TensorLayout& C) override;
-    Algorithm* get_algorithm_heuristic(const TensorLayout& A,
-                                       const TensorLayout& B,
-                                       const TensorLayout& C,
-                                       size_t workspace_limit_in_bytes,
-                                       bool reproducible) override;
-
     const char* get_algorithm_set_name() const override {
         return "CUDA MATMUL";
     }
@@ -47,11 +38,29 @@ public:
     class AlgoCuBlasLt;
 #endif
     class AlgoNaive;
+#if !MEGDNN_DISABLE_FLOAT16
+    class AlgoBFloat16;
+#endif
+#if CUDA_VERSION >= 9020
+    class AlgoFloat32SIMT;
+    class AlgoFloat32SIMTSplitK;
+    class AlgoFloat32SIMTGemvBatchedStrided;
+#endif
     class AlgoPack;
 
     static const AlgoPack& algo_pack() {
         return sm_algo_pack;
     }
+    Algorithm* get_algorithm_from_desc(const AlgorithmDesc& desc) override;
+
+protected:
+    std::vector<Algorithm*> get_all_algorithms(const TensorLayout& A,
+                                               const TensorLayout& B,
+                                               const TensorLayout& C) override;
+    Algorithm* get_algorithm_heuristic(
+            const TensorLayout& A, const TensorLayout& B, const TensorLayout& C,
+            size_t workspace_limit_in_bytes, const AlgoAttribute& positive_attr,
+            const AlgoAttribute& negative_attr) override;
 
 private:
     static AlgoPack sm_algo_pack;

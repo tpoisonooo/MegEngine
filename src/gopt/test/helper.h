@@ -2,7 +2,7 @@
  * \file src/gopt/test/helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,14 +26,16 @@ namespace mgb {
             HostTensorGenerator<> gen;
             std::shared_ptr<ComputingGraph> graph = ComputingGraph::make();
 
-            SymbolVar mkvar(const char *name, const TensorShape &shp = {1}) {
-                return opr::Host2DeviceCopy::make(
-                        *graph, gen(shp)).rename(name);
+            SymbolVar mkvar(const char* name, const TensorShape& shp = {1},
+                            CompNode cn = CompNode::load("xpu0")) {
+                return opr::Host2DeviceCopy::make(*graph, gen(shp), cn)
+                        .rename(name);
             }
 
-            SymbolVar mkcvar(const char *name, const TensorShape &shp = {1}) {
+            SymbolVar mkcvar(const char* name, const TensorShape& shp = {1},
+                             CompNode cn = CompNode::load("xpu0")) {
                 return opr::SharedDeviceTensor::make(
-                        *graph, *gen(shp)).rename(name);
+                        *graph, *gen(shp), cn).rename(name);
             }
 
             template<typename ...Args>
@@ -73,4 +75,3 @@ namespace mgb {
     TEST_F(TestGopt##pass, name)
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
-

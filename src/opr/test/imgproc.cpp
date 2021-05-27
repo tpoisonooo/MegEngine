@@ -2,7 +2,7 @@
  * \file src/opr/test/imgproc.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -216,7 +216,10 @@ TEST(TestOprImgproc, WarpPerspectiveWithMatIdx) {
             .set_input_generator(1, gen_mat)
             .set_input_generator(2, gen_mat_idx)
             .set_input_dtype(2, dtype::Int32{})
+            /*! it's hard to make the grad check success,
+                the cuda implementation is grad sum */
             .disable_grad_check()
+            .set_input_allow_grad(2,false)
             .run({TensorShape{N_SRC, C, 4, 5}, {N_MAT, 3, 3}, {N_MAT}})
             .run({TensorShape{N_SRC, C, 6, 5}, {N_MAT, 3, 3}, {N_MAT}})
             .run({TensorShape{N_SRC, C, 22, 19}, {N_MAT, 3, 3}, {N_MAT}});
@@ -636,4 +639,218 @@ TEST(TestOprImgproc, WarpAffineForward) {
         run({TensorShape{N, 10, 9, C}, {N, 2, 3}}, opt);
 }
 
+TEST(TestOprImgproc, Remap_NCHW) {
+    constexpr size_t N = 2, C = 8, OH = 10, OW = 10;
+
+    opr::Remap::Param param;
+    using Checker = AutoOprChecker<2, 1>;
+    TensorShape out_shp{N, C, OH, OW};
+    param.format = opr::Remap::Param::Format::NCHW;
+    auto make_graph = [&](const Checker::SymInpArray &inputs) ->
+            Checker::SymOutArray {
+        return {opr::Remap::make(inputs[0], inputs[1], param)};
+    };
+    auto fwd = [&](Checker::NumOutArray &dest, Checker::NumInpArray inp) {
+        auto opr = megdnn_naive_handle()->create_operator<megdnn::Remap>();
+        opr->param() = param;
+        dest[0].resize(out_shp);
+        opr->exec(inp[0]->as_megdnn(), inp[1]->as_megdnn(), dest[0].as_megdnn(), {});
+    };
+
+    std::mt19937 rng(next_rand_seed());
+    auto rand_real = [&](double lo, double hi) {
+        auto real = rng() / (std::mt19937::max() + 1.0) * (hi - lo) + lo;
+        if(std::abs(std::round(real) - real) <= 1e-2)
+            return real + 1e-1;
+        return real;
+    };
+    auto rand_real2 = [&](double range) {
+        return rand_real(-range, range);
+    };
+    auto gen_mat = [&](HostTensorND& mat) {
+        auto ptr = mat.ptr<float>();
+        for (size_t i = 0; i < N; ++ i) {
+            for(size_t j = 0; j < OH * OW * 2; j++) {
+                //! undifferentiable when map is an integer
+                ptr[j] = static_cast<float>(rand_real2(20));
+            }
+            ptr += OH * OW * 2;
+        }
+        mgb_assert(ptr == mat.ptr<float>() + mat.shape().total_nr_elems());
+    };
+
+    Checker::RunOptions opt;
+    Checker(make_graph, fwd, CompNode::load("cpu1"))
+            .set_input_generator(1, gen_mat)
+            .run({TensorShape{N, C, 3, 20}, TensorShape{N, OH, OW, 2}}, opt)
+            .run({TensorShape{N, C, 6, 5}, TensorShape{N, OH, OW, 2}}, opt)
+            .run({TensorShape{N, C, 20, 20}, TensorShape{N, OH, OW, 2}}, opt);
+}
+
+TEST(TestOprImgproc, Remap_NHWC) {
+    constexpr size_t N = 2, C = 8;
+
+    opr::Remap::Param param;
+    using Checker = AutoOprChecker<2, 1>;
+    TensorShape out_shp{N, 10, 10, C};
+    param.format = opr::Remap::Param::Format::NHWC;
+    auto make_graph = [&](const Checker::SymInpArray &inputs) ->
+            Checker::SymOutArray {
+        return {opr::Remap::make(inputs[0], inputs[1], param)};
+    };
+    auto fwd = [&](Checker::NumOutArray &dest, Checker::NumInpArray inp) {
+        auto opr = megdnn_naive_handle()->create_operator<megdnn::Remap>();
+        opr->param() = param;
+        dest[0].resize(out_shp);
+        opr->exec(inp[0]->as_megdnn(), inp[1]->as_megdnn(), dest[0].as_megdnn(), {});
+    };
+
+    Checker::RunOptions opt;
+    Checker(make_graph, fwd, CompNode::load("cpu1"))
+            .disable_grad_check()
+            .run({TensorShape{N, 3, 20, C}, TensorShape{N, 10, 10, 2}}, opt)
+            .run({TensorShape{N, 6, 5, C}, TensorShape{N, 10, 10, 2}}, opt)
+            .run({TensorShape{N, 20, 20, C}, TensorShape{N, 10, 10, 2}}, opt);
+}
+
+TEST(TestOprImgproc, DCT) {
+    REQUIRE_GPU(1);
+    using Checker3 = AutoOprChecker<3, 1>;
+    using Checker1 = AutoOprChecker<1, 1>;
+    opr::DctChannelSelectForward::Param param;
+    opr::DctChannelSelectForward::Param param_nchw4;
+    param_nchw4.format = opr::DctChannelSelectForward::Param::Format::NCHW4;
+    auto make_graph3 =
+            [&](const Checker3::SymInpArray& inputs) -> Checker3::SymOutArray {
+        return {opr::DctChannelSelectForward::make(inputs[0], inputs[1],
+                                                   inputs[2], param)};
+    };
+    auto fwd3 = [&](Checker3::NumOutArray& dest, Checker3::NumInpArray inp) {
+        auto opr = megdnn_naive_handle()
+                           ->create_operator<megdnn::DctChannelSelectForward>();
+        auto& in_shape = inp[0]->shape();
+        TensorShape out_shp{in_shape[0], in_shape[1] * 64, in_shape[2] / 8,
+                            in_shape[3] / 8};
+        dest[0].comp_node(inp[0]->comp_node()).resize(out_shp);
+        opr->param() = param;
+        opr->exec(inp[0]->as_megdnn(), inp[1]->as_megdnn(), inp[2]->as_megdnn(),
+                  dest[0].as_megdnn(), {});
+    };
+    auto make_graph1 =
+            [&](const Checker1::SymInpArray& inputs) -> Checker1::SymOutArray {
+        return {opr::DctChannelSelectForward::make(inputs[0], param)};
+    };
+    auto make_graph1_s8 =
+            [&](const Checker1::SymInpArray& inputs) -> Checker1::SymOutArray {
+        return {opr::DctChannelSelectForward::make(
+                inputs[0], param_nchw4,
+                OperatorNodeConfig(dtype::QuantizedS8(10.f)))};
+    };
+    auto fwd1 = [&](Checker1::NumOutArray& dest, Checker1::NumInpArray inp) {
+        auto opr = megdnn_naive_handle()
+                           ->create_operator<megdnn::DctChannelSelectForward>();
+        auto& in_shape = inp[0]->shape();
+        TensorShape out_shp{in_shape[0], in_shape[1] * 64, in_shape[2] / 8,
+                            in_shape[3] / 8};
+        dest[0].comp_node(inp[0]->comp_node()).resize(out_shp);
+        opr->param() = param;
+        opr->exec(inp[0]->as_megdnn(), {}, {}, dest[0].as_megdnn(), {});
+    };
+    auto fwd1_s8 = [&](Checker1::NumOutArray& dest, Checker1::NumInpArray inp) {
+        auto opr = megdnn_naive_handle()
+                           ->create_operator<megdnn::DctChannelSelectForward>();
+        auto& in_shape = inp[0]->shape();
+        TensorShape out_shp{in_shape[0], in_shape[1] * 64 / 4, in_shape[2] / 8,
+                            in_shape[3] / 8, 4};
+        dest[0].comp_node(inp[0]->comp_node()).resize(out_shp);
+        opr->param() = param_nchw4;
+        opr->exec(inp[0]->as_megdnn(), {}, {}, dest[0].as_megdnn(), {});
+    };
+    Checker3::RunOptions opt3;
+    Checker1::RunOptions opt1;
+    Checker1::RunOptions opt1_qint8;
+    opt3.outputs_max_err = 1e-3;
+    opt1.outputs_max_err = 1e-3;
+    opt1_qint8.outputs_max_err = 1.001;
+
+    auto gen_input = [](HostTensorND& dest) {
+        HostTensorGenerator<dtype::Uint8, RandomDistribution::UNIFORM>
+                mask_generator{0, 255};
+        dest = *mask_generator(dest.shape(), dest.comp_node());
+    };
+    auto gen_mask = [](HostTensorND& dest) {
+        HostTensorGenerator<dtype::Int32, RandomDistribution::UNIFORM>
+                mask_generator{0, 8};
+        dest = *mask_generator(dest.shape(), dest.comp_node());
+    };
+    Checker1(make_graph1, fwd1, CompNode::load("gpu0"))
+            .disable_grad_check()
+            .set_input_generator(0, gen_input)
+            .set_input_dtype(0, dtype::Uint8())
+            .run({TensorShape{1, 1, 16, 16}}, opt1)
+            .run({TensorShape{1, 3, 256, 256}}, opt1)
+            .run({TensorShape{4, 3, 512, 512}}, opt1);
+
+    Checker1(make_graph1_s8, fwd1_s8, CompNode::load("gpu0"))
+            .disable_grad_check()
+            .set_input_generator(0, gen_input)
+            .set_input_dtype(0, dtype::Uint8())
+            .run({TensorShape{1, 1, 16, 16}}, opt1_qint8)
+            .run({TensorShape{1, 3, 256, 256}}, opt1_qint8)
+            .run({TensorShape{4, 3, 512, 512}}, opt1_qint8);
+
+    MGB_MARK_USED_VAR(make_graph3);
+    MGB_MARK_USED_VAR(fwd3);
+    MGB_MARK_USED_VAR(gen_mask);
+}
+
+TEST(TestOprImgproc, DCT_BAD_MASK) {
+    HostTensorGenerator<dtype::Uint8> gen_u8;
+    HostTensorGenerator<dtype::Int32> gen_s32;
+    TensorShape src_shape({1, 2, 256, 256}), mask_offset_shape({3}),
+            mask_val_shape({8});
+    opr::DctChannelSelectForward::Param param;
+
+    auto graph = ComputingGraph::make();
+
+    auto src_tensor = gen_u8(src_shape);
+    auto mask_offset_tensor = gen_s32(mask_offset_shape);
+    auto mask_val_tensor = gen_s32(mask_val_shape);
+    auto mask_offset_ptr = mask_offset_tensor->ptr<int32_t>();
+    auto mask_val_ptr = mask_val_tensor->ptr<int32_t>();
+    mask_offset_ptr[0] = 1;
+    mask_val_ptr[0] = 64;
+    auto src_sym = opr::ImmutableTensor::make(*graph, *src_tensor);
+    auto mask_offset_sym =
+            opr::ImmutableTensor::make(*graph, *mask_offset_tensor);
+    auto mask_val_sym = opr::ImmutableTensor::make(*graph, *mask_val_tensor);
+
+    ASSERT_THROW(opr::DctChannelSelect::make(src_sym, mask_offset_sym,
+                                             mask_val_sym, param),
+                 MegBrainError);
+
+    mask_offset_ptr[0] = 0;
+    mask_offset_ptr[1] = 2;
+    mask_offset_ptr[2] = 8;
+    mask_offset_sym = opr::ImmutableTensor::make(*graph, *mask_offset_tensor);
+    ASSERT_THROW(opr::DctChannelSelect::make(src_sym, mask_offset_sym,
+                                             mask_val_sym, param),
+                 MegBrainError);
+
+    mask_val_ptr[0] = 0;
+    mask_val_ptr[1] = 1;
+    mask_val_ptr[2] = 2;
+    mask_val_ptr[3] = 3;
+    mask_val_ptr[4] = 4;
+    mask_val_ptr[5] = 5;
+    mask_val_ptr[6] = 6;
+    mask_val_ptr[7] = 7;
+    mask_val_sym = opr::ImmutableTensor::make(*graph, *mask_val_tensor);
+    opr::DctChannelSelect::make(src_sym, mask_offset_sym, mask_val_sym, param);
+
+    param.format = opr::DctChannelSelect::Param::Format::NCHW4;
+    ASSERT_THROW(opr::DctChannelSelect::make(src_sym, mask_offset_sym,
+                                             mask_val_sym, param),
+                 MegBrainError);
+}
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

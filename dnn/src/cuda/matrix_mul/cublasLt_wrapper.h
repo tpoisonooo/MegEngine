@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/matrix_mul/cublasLt_wrapper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -47,7 +47,12 @@ struct CUBLASLTMatmulDesc {
     };
     bool is_batched;
     cublasLtMatmulDesc_t matmul_desc;
-    cudaDataType_t dt_a, dt_b, dt_c, dt_compute;
+    cudaDataType_t dt_a, dt_b, dt_c;
+#if CUDA_VERSION >= 11000
+    cublasComputeType_t dt_compute;
+#else
+    cudaDataType_t dt_compute;
+#endif
     cublasLtMatrixLayout_t layout_a, layout_b, layout_c;
     cublasLtMatrixLayout_t layout_trans_a, layout_trans_b, layout_trans_c;
     size_t workspace_a, workspace_b, workspace_c;

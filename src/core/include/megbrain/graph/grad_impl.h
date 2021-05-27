@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/grad_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -72,6 +72,11 @@ namespace cg {
      * \brief register grad func for an operator type
      */
     void register_grad_func(Typeinfo *opr_type, OprGradFunc grad);
+
+    /*!
+     * \brief lookup grad func for an operator type
+     */
+    OprGradFunc* lookup_grad_func(Typeinfo *opr_type);
 
     /*!
      * \brief add a callback to be invoked when grad of given var is computed

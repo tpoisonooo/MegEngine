@@ -2,7 +2,7 @@
  * \file dnn/include/megdnn/handle.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -29,7 +29,24 @@ class Handle {
             NAIVE = 0,
             FALLBACK = 1,
             X86 = 2,
+            ARM_COMMON = 3,
+            ARMV7 = 4,
+            AARCH64 = 5,
             CUDA = 6,
+            ROCM = 11,
+            ATLAS = 13,
+            CAMBRICON = 12,
+        };
+
+        //! Device vendor
+        enum class HandleVendorType : uint32_t {
+            NOT_SPEC = 0,
+            MALI = 1,
+            ADRENO = 2,
+            CUDA = 3,
+            INTEL = 4,
+            POWERVR = 5,
+            AMD = 6,
         };
 
     protected:
@@ -66,6 +83,13 @@ class Handle {
         template <typename opr>
         std::unique_ptr<opr> create_cuda_operator();
 #endif
+#if MEGDNN_WITH_ROCM
+        static std::unique_ptr<Handle> make_rocm_handle(
+                megcoreComputingHandle_t computing_handle);
+        template <typename opr>
+        std::unique_ptr<opr> create_rocm_operator();
+#endif
+
 
         virtual ~Handle();
 
@@ -116,6 +140,9 @@ class Handle {
 
         //! get alignment in bytes for rows of image 2D tensor format
         virtual size_t image2d_pitch_alignment() const;
+
+        //! get vendor type
+        virtual HandleVendorType vendor_type() const;
 
         HandleType type() const {
             return m_handle_type;

@@ -2,7 +2,7 @@
  * \file dnn/src/common/separableConv.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -20,17 +20,15 @@ void SeparableConvBase::deduce_layout_fwd(const TensorLayout &src,
         TensorLayout &dst)
 {
     auto errmsg = [&]() {
-        return megdnn_layout_msg(src) + ", "
-            + megdnn_layout_msg(filter_x) + ", "
-            + megdnn_layout_msg(dst) + ", "
-            + megdnn_mangle("is_xcorr=")
-            + megdnn_mangle("borderMode=")
-            + std::to_string((param().mode == Mode::CROSS_CORRELATION)) + ", "
-            + std::to_string((int)(param().borderMode)) + ", "
-            + megdnn_mangle("pad_h=") + std::to_string(param().pad_h) + ", "
-            + megdnn_mangle("pad_w=") + std::to_string(param().pad_w) + ", "
-            + megdnn_mangle("stride_h=") + std::to_string(param().stride_h) + ", "
-            + megdnn_mangle("stride_w=") + std::to_string(param().stride_w);
+        return megdnn_layout_msg(src) + ", " + megdnn_layout_msg(filter_x) +
+               ", " + megdnn_layout_msg(dst) + ", " +
+               "is_xcorr=" + "borderMode=" +
+               std::to_string((param().mode == Mode::CROSS_CORRELATION)) +
+               ", " + std::to_string((int)(param().borderMode)) + ", " +
+               "pad_h=" + std::to_string(param().pad_h) + ", " +
+               "pad_w=" + std::to_string(param().pad_w) + ", " +
+               "stride_h=" + std::to_string(param().stride_h) + ", " +
+               "stride_w=" + std::to_string(param().stride_w);
     };
     MEGDNN_MARK_USED_VAR(errmsg);
     megdnn_assert_contiguous(src);

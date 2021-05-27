@@ -2,7 +2,7 @@
  * \file dnn/src/x86/simd_helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -137,82 +137,6 @@ struct simd_traits<SIMDType::FMA>: simd_traits_avx_base {
     static type fmadd(type a, type b, type c) MEGDNN_ATTRIBUTE_TARGET("fma")
     {
         return _mm256_fmadd_ps(a, b, c);
-    }
-};
-
-template <typename ctype, size_t len>
-struct Vector;
-
-template <>
-struct Vector<float, 8> {
-    __m256 value;
-    Vector() {}
-    Vector(const float v) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = _mm256_set1_ps(v);
-    }
-    Vector(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = lr.value;
-    }
-    Vector(const Vector&& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = std::move(lr.value);
-    }
-    Vector(const __m256& v) MEGDNN_ATTRIBUTE_TARGET("avx") { value = v; }
-    static Vector load(const float* addr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector v;
-        v.value = _mm256_loadu_ps(addr);
-        return v;
-    }
-    static void save(float* addr, const Vector& v)
-            MEGDNN_ATTRIBUTE_TARGET("avx") {
-        _mm256_storeu_ps(addr, v.value);
-    }
-    void save(float* addr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        save(addr, *this);
-    }
-    Vector operator+(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector dst;
-        dst.value = _mm256_add_ps(value, lr.value);
-        return dst;
-    }
-    Vector& operator+=(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = _mm256_add_ps(value, lr.value);
-        return *this;
-    }
-    Vector operator-(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector dst;
-        dst.value = _mm256_sub_ps(value, lr.value);
-        return dst;
-    }
-    Vector& operator-=(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = _mm256_sub_ps(value, lr.value);
-        return *this;
-    }
-    Vector operator*(float lr)MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector dst;
-        dst.value = _mm256_mul_ps(value, _mm256_set1_ps(lr));
-        return dst;
-    }
-    Vector operator*(const Vector& lr)MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector dst;
-        dst.value = _mm256_mul_ps(value, lr.value);
-        return dst;
-    }
-    Vector& operator*=(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = _mm256_mul_ps(value, lr.value);
-        return *this;
-    }
-    Vector& operator=(const Vector& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = lr.value;
-        return *this;
-    }
-    Vector& operator=(const Vector&& lr) MEGDNN_ATTRIBUTE_TARGET("avx") {
-        value = std::move(lr.value);
-        return *this;
-    }
-    Vector operator-() MEGDNN_ATTRIBUTE_TARGET("avx") {
-        Vector dst;
-        dst.value = -value;
-        return dst;
     }
 };
 

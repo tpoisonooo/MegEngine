@@ -2,7 +2,7 @@
  * \file src/core/include/megbrain/graph/symbol_var.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -66,6 +66,7 @@ class SymbolVar {
         SymbolVar broadcast(SymbolVar tshape) const;
         SymbolVar symshape() const;
         SymbolVar flatten() const;
+        SymbolVar add_axis(size_t idx) const;
 
         const TensorShape& shape() const {
             return m_node->shape();

@@ -2,7 +2,7 @@
  * \file src/opr/test/blas.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -269,7 +269,7 @@ void run_trans_inp_test_case(bool trans_a, bool trans_b) {
     if (DTypeTrait<dt_dst>::enumv == DTypeEnum::Int16) {
         config.output_dtype(dtype::Int16());
     }
-    auto z = opr::MatrixMul::make(x, y, {}, config);
+    auto z = opr::MatrixMul::make(x, y, {}, {}, config);
     HostTensorND host_z;
     auto func = graph->compile({make_callback_copy(z, host_z)});
 
@@ -359,7 +359,7 @@ void run_bgemm_trans_inp_test_case(bool trans_a, bool trans_b) {
     trans_a ? (x = opr::Dimshuffle::make(x, {0, 2, 1})) : 0;
     trans_b ? (y = opr::Dimshuffle::make(y, {0, 2, 1})) : 0;
 
-    auto z = opr::BatchedMatrixMul::make(x, y, {}, OperatorNodeConfig{});
+    auto z = opr::BatchedMatrixMul::make(x, y, {}, {}, OperatorNodeConfig{});
     HostTensorND host_z;
     auto func = graph->compile({make_callback_copy(z, host_z)});
     auto run = [&](size_t B, size_t M, size_t K, size_t N) {
@@ -404,71 +404,217 @@ void run_bgemm_trans_inp_test_case(bool trans_a, bool trans_b) {
 
 }  // anonymous namespace
 
-TEST(TestOprBlas, MatrixMul) {
+TEST(TestOprBlas, MatrixMul_NN) {
     run_sgemm_test(false, false);
+}
+
+TEST(TestOprBlas, MatrixMul_NT) {
     run_sgemm_test(false, true);
+}
+
+TEST(TestOprBlas, MatrixMul_TN) {
     run_sgemm_test(true, false);
+}
+
+TEST(TestOprBlas, MatrixMul_TT) {
     run_sgemm_test(true, true);
 }
 
-TEST(TestOprBlas, BatchedMatrixMulFp32) {
+TEST(TestOprDNN, MatrixMulExePolicy) {
+    using Param = opr::MatrixMul::Param;
+    Param param;
+    using Policy = opr::MatrixMul::ExecutionPolicy;
+    using S = Policy::Strategy;
+
+    auto cn = CompNode::load("cpux");
+
+#if MGB_ENABLE_FASTRUN
+    for (auto strategy :
+         SmallVector<S>{S::PROFILE, S::HEURISTIC, S::PROFILE | S::REPRODUCIBLE,
+                        S::PROFILE | S::HEURISTIC}) {
+#else
+    for (auto strategy: {S:HEURISTIC, S::PROFILE | S::HEURISTIC}) {
+#endif
+
+        auto graph = ComputingGraph::make();
+        HostTensorGenerator<> gen;
+
+        auto mkvar = [&](const char* name, const TensorShape& shp) {
+            return opr::Host2DeviceCopy::make(*graph, gen(shp), cn)
+                    .rename(name);
+        };
+
+        auto A = mkvar("A", {32, 64});
+        auto B = mkvar("B", {64, 32});
+
+        Policy policy;
+        policy.strategy = strategy;
+
+        auto C = opr::MatrixMul::make(A, B, param, policy);
+        HostTensorND host_c;
+        auto func = graph->compile({make_callback_copy(C, host_c)});
+        func->execute();
+    }
+}
+
+
+TEST(TestOprBlas, BatchedMatrixMulFp32_NN) {
     run_batched_sgemm_test(false, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp32_NT) {
     run_batched_sgemm_test(false, true);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp32_TN) {
     run_batched_sgemm_test(true, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp32_TT) {
     run_batched_sgemm_test(true, true);
 }
 
-TEST(TestOprBlas, BatchedMatrixMulFp16) {
+TEST(TestOprBlas, BatchedMatrixMulFp16_NN) {
     run_batched_hgemm_test(false, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp16_NT) {
     run_batched_hgemm_test(false, true);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp16_TN) {
     run_batched_hgemm_test(true, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulFp16_TT) {
     run_batched_hgemm_test(true, true);
 }
 
-TEST(TestOprBlas, BatchedMatrixMulInt8) {
+TEST(TestOprBlas, BatchedMatrixMulInt8_NN) {
     if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
         !check_compute_capability(6, 1)) {
         return;
     }
     run_batched_igemm_test(false, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulInt8_NT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_batched_igemm_test(false, true);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulInt8_TN) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_batched_igemm_test(true, false);
+}
+
+TEST(TestOprBlas, BatchedMatrixMulInt8_TT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_batched_igemm_test(true, true);
 }
 
-TEST(TestOprBlas, TransBatchedMatrixMulFp32) {
+TEST(TestOprBlas, TransBatchedMatrixMulFp32_NN) {
     run_bgemm_trans_inp_test_case<float, float>(false, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp32_NT) {
     run_bgemm_trans_inp_test_case<float, float>(false, true);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp32_TN) {
     run_bgemm_trans_inp_test_case<float, float>(true, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp32_TT) {
     run_bgemm_trans_inp_test_case<float, float>(true, true);
 }
 
-TEST(TestOprBlas, TransBatchedMatrixMulInt8) {
+TEST(TestOprBlas, TransBatchedMatrixMulInt8_NN) {
     if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
         !check_compute_capability(6, 1)) {
         return;
     }
     run_bgemm_trans_inp_test_case<int8_t, int32_t>(false, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulInt8_NT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<int8_t, int32_t>(false, true);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulInt8_TN) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<int8_t, int32_t>(true, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulInt8_TT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<int8_t, int32_t>(true, true);
 }
 
-TEST(TestOprBlas, TransBatchedMatrixMulFp16) {
+TEST(TestOprBlas, TransBatchedMatrixMulFp16_NN) {
     run_bgemm_trans_inp_test_case<dt_float16, dt_float16>(false, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp16_NT) {
     run_bgemm_trans_inp_test_case<dt_float16, dt_float16>(false, true);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp16_TN) {
     run_bgemm_trans_inp_test_case<dt_float16, dt_float16>(true, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulFp16_TT) {
     run_bgemm_trans_inp_test_case<dt_float16, dt_float16>(true, true);
 }
 
-TEST(TestOprBlas, TransBatchedMatrixMulQS8) {
+TEST(TestOprBlas, TransBatchedMatrixMulQS8_NN) {
     if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
         !check_compute_capability(6, 1)) {
         return;
     }
     run_bgemm_trans_inp_test_case<dt_qint8, dt_qint32>(false, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulQS8_NT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<dt_qint8, dt_qint32>(false, true);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulQS8_TN) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<dt_qint8, dt_qint32>(true, false);
+}
+
+TEST(TestOprBlas, TransBatchedMatrixMulQS8_TT) {
+    if (CompNode::load("xpux").device_type() == CompNode::DeviceType::CUDA &&
+        !check_compute_capability(6, 1)) {
+        return;
+    }
     run_bgemm_trans_inp_test_case<dt_qint8, dt_qint32>(true, true);
 }
 
@@ -597,7 +743,12 @@ TEST(TestOprBlas, MatrixInverse) {
         }
         auto ptr = inp[0]->ptr<float>();
         for (size_t i = 0; i < batch; ++i, ptr += n * n) {
+#if __cplusplus >= 201703L
+            std::default_random_engine rng_engine;
+            std::shuffle(perm.begin(), perm.end(), rng_engine);
+#else
             std::random_shuffle(perm.begin(), perm.end());
+#endif
             for (size_t j = 0; j < n; ++j) {
                 ptr[j * n + perm[j]] += 5;
             }
@@ -733,6 +884,45 @@ TEST(TestOprBlas, SingularValueDecompositionZeroGrad) {
     run_svd_empty_grad_test<1, 1, 0>();
     run_svd_empty_grad_test<1, 1, 1>();
 }
+
+#if MGB_ENABLE_FASTRUN
+TEST(TestOprBlas, MatrixMulExePolicy) {
+    using Param = opr::MatrixMul::Param;
+    Param param;
+    using Policy = opr::MatrixMul::ExecutionPolicy;
+    using S = Policy::Strategy;
+    Policy policy;
+    policy.strategy = S::PROFILE;
+
+    auto cn = CompNode::load("cpux");
+
+    int nr_get = 0;
+    auto on_get = [&nr_get](const std::string&, const void*, size_t,
+                            const void*, size_t) { ++nr_get; };
+    PersistentCacheHook cache_hook{on_get};
+
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<> gen;
+
+    auto mkvar = [&](const char* name, const TensorShape& shp) {
+        return opr::Host2DeviceCopy::make(*graph, gen(shp), cn).rename(name);
+    };
+
+    auto a = mkvar("a", {20, 50});
+    auto b = mkvar("b", {50, 40});
+    auto matmul = opr::MatrixMul::make(a, b, param, policy, {});
+
+    HostTensorND host_y;
+    graph->options().no_profiling_on_shape_change = true;
+    auto func = graph->compile({make_callback_copy(matmul, host_y)});
+    func->execute();
+    ASSERT_EQ(nr_get, 0);
+    graph->options().no_profiling_on_shape_change = false;
+    func = graph->compile({make_callback_copy(matmul, host_y)});
+    func->execute();
+    ASSERT_GT(nr_get, 0);
+}
+#endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}
 //

@@ -2,7 +2,7 @@
  * \file src/serialization/impl/opr_registry.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -71,7 +71,6 @@ namespace {
 
 void OprRegistry::add(const OprRegistry& record) {
     auto&& sd = static_data();
-
     auto persist_id = record.persist_type_id;
     auto registry_ins = sd.id2reg.emplace(persist_id, record);
     mgb_assert(registry_ins.second ||
@@ -159,9 +158,9 @@ void OprRegistry::add_using_dynamic_loader(
 }
 
 #if MGB_ENABLE_DEBUG_UTIL
-std::vector<std::pair<uint64_t, std::string>> OprRegistry::dump_registries() {
-    auto &&id2reg = static_data().id2reg;
-    std::vector<std::pair<uint64_t, std::string>> result;
+std::vector<std::pair<size_t, std::string>> OprRegistry::dump_registries() {
+    auto&& id2reg = static_data().id2reg;
+    std::vector<std::pair<size_t, std::string>> result;
     for (auto iter = id2reg.begin(); iter != id2reg.end(); ++iter) {
         if (iter->second.name.size() == 0)
             result.push_back({iter->first, "<special>"});

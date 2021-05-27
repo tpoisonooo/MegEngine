@@ -2,7 +2,7 @@
  * \file dnn/test/fallback/roi_copy.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -34,7 +34,7 @@ TEST_F(FALLBACK, ROICOPY) {
     }
 
 }
-
+#if MEGDNN_WITH_BENCHMARK
 TEST_F(FALLBACK, BENCHMARK_ROICOPY) {
     auto run = [&](const TensorShapeArray& shapes) {
         Benchmarker<ROICopy> benchmarker(handle());
@@ -62,6 +62,7 @@ TEST_F(FALLBACK, BENCHMARK_ROICOPY) {
 
     run(shapes);
 }
+#endif
 
 
 }  // namespace test

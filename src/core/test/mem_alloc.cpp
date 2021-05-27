@@ -2,7 +2,7 @@
  * \file src/core/test/mem_alloc.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -209,16 +209,71 @@ TEST(TestMemAlloc, Alloc) {
 
     auto ptr = strm_alloc->alloc_shared(REQ);
     EXPECT_EQ(REQ, strm_alloc->get_used_memory());
-    EXPECT_EQ(0u, strm_alloc->get_free_memory().tot);
-    EXPECT_EQ(REQ, dev_alloc->get_used_memory());
-    EXPECT_EQ(TOT - REQ, dev_alloc->get_free_memory().tot);
+    EXPECT_EQ(TOT - REQ, strm_alloc->get_free_memory().tot);
+    EXPECT_EQ(TOT, dev_alloc->get_used_memory());
+    EXPECT_EQ(0u, dev_alloc->get_free_memory().tot);
     auto addr = ptr.get();
     ptr.reset();
     EXPECT_EQ(0u, strm_alloc->get_used_memory());
-    EXPECT_EQ(REQ, strm_alloc->get_free_memory().tot);
-    EXPECT_EQ(REQ, dev_alloc->get_used_memory());
-    EXPECT_EQ(TOT - REQ, dev_alloc->get_free_memory().tot);
+    EXPECT_EQ(TOT, strm_alloc->get_free_memory().tot);
+    EXPECT_EQ(TOT, dev_alloc->get_used_memory());
+    EXPECT_EQ(0u, dev_alloc->get_free_memory().tot);
     EXPECT_EQ(addr, strm_alloc->alloc_shared(REQ).get());
+}
+
+TEST(TestMemAlloc, MergeFreeBlock) {
+    using StreamKey = DevMemAlloc::StreamKey;
+    auto raw_alloc = std::make_shared<DummyAllocator>(7000);
+    auto runtime_policy = std::make_shared<DummyRuntimePolicy>(0);
+    auto dev_alloc = DevMemAlloc::make(0, 7000, raw_alloc, runtime_policy);
+
+    StreamKey stream_key = nullptr;
+    auto strm_alloc =
+            dev_alloc->add_stream(static_cast<StreamKey>(&stream_key));
+
+    auto ptr = strm_alloc->alloc_shared(2000);
+    auto addr = ptr.get();
+    ptr.reset();
+    ptr = strm_alloc->alloc_shared(3000);
+    EXPECT_EQ(addr, ptr.get());
+    strm_alloc->alloc_shared(4000);
+}
+
+TEST(TestMemAlloc, AllocTwoStream) {
+    constexpr size_t TOT = 2048, REQ0 = 1000, REQ1 = 2000;
+    using StreamKey = DevMemAlloc::StreamKey;
+    auto raw_alloc = std::make_shared<DummyAllocator>(TOT);
+    auto runtime_policy = std::make_shared<DummyRuntimePolicy>(0);
+    auto dev_alloc = DevMemAlloc::make(0, TOT, raw_alloc, runtime_policy);
+
+    StreamKey stream_key0, stream_key1;
+    auto strm_alloc0 =
+            dev_alloc->add_stream(static_cast<StreamKey>(&stream_key0)),
+         strm_alloc1 =
+            dev_alloc->add_stream(static_cast<StreamKey>(&stream_key1));
+    ASSERT_NE(strm_alloc0, strm_alloc1);
+
+    auto ptr0 = strm_alloc0->alloc_shared(REQ0);
+    EXPECT_EQ(REQ0, strm_alloc0->get_used_memory());
+    EXPECT_EQ(0u, strm_alloc0->get_free_memory().tot);
+    EXPECT_EQ(REQ0, dev_alloc->get_used_memory());
+    EXPECT_EQ(TOT - REQ0, dev_alloc->get_free_memory().tot);
+    ptr0.reset();
+    EXPECT_EQ(0u, strm_alloc0->get_used_memory());
+    EXPECT_EQ(REQ0, strm_alloc0->get_free_memory().tot);
+    EXPECT_EQ(REQ0, dev_alloc->get_used_memory());
+    EXPECT_EQ(TOT - REQ0, dev_alloc->get_free_memory().tot);
+    auto ptr1 = strm_alloc1->alloc_shared(REQ1);
+    EXPECT_EQ(0u, strm_alloc0->get_free_memory().tot);
+    EXPECT_EQ(REQ1, strm_alloc1->get_used_memory());
+    EXPECT_EQ(0u, strm_alloc1->get_free_memory().tot);
+    EXPECT_EQ(REQ1, dev_alloc->get_used_memory());
+    EXPECT_EQ(0u, dev_alloc->get_free_memory().tot);
+    ptr1.reset();
+    EXPECT_EQ(0u, strm_alloc1->get_used_memory());
+    EXPECT_EQ(REQ1, strm_alloc1->get_free_memory().tot);
+    EXPECT_EQ(REQ1, dev_alloc->get_used_memory());
+    EXPECT_EQ(0u, dev_alloc->get_free_memory().tot);
 }
 
 TEST(TestMemAlloc, AllocMoreThanReserve) {
@@ -440,6 +495,54 @@ TEST(TestMemAlloc, RandomOprs) {
     ASSERT_EQ(dummy_alloc->nr_alloc(), dummy_alloc->nr_free());
 }
 
+TEST(TestSimpleCachingAlloc, Basic) {
+    constexpr size_t TOT = 2048, REQ = 1000;
+    static_assert(TOT > REQ * 2, "");
+    auto raw_alloc = new DummyAllocator(TOT);
+    auto alloc = SimpleCachingAlloc::make(std::unique_ptr<RawAllocator>(raw_alloc));
+
+    auto ptr = alloc->alloc(REQ);
+    EXPECT_EQ(TOT - REQ, raw_alloc->free_size());
+    EXPECT_EQ(REQ, alloc->get_used_memory());
+    EXPECT_EQ(0u, alloc->get_free_memory().tot);
+
+    alloc->free(ptr);
+    EXPECT_EQ(0u, raw_alloc->nr_free());
+    EXPECT_EQ(REQ, alloc->get_free_memory().tot);
+
+    ptr = alloc->alloc(REQ / 2);
+    EXPECT_EQ(1u, raw_alloc->nr_alloc());
+    EXPECT_EQ(REQ / 2, alloc->get_used_memory());
+    EXPECT_EQ(REQ - REQ / 2, alloc->get_free_memory().tot);
+
+    auto ptr2 = alloc->alloc(REQ / 2);
+    EXPECT_EQ(1u, raw_alloc->nr_alloc());
+    EXPECT_EQ(REQ / 2 * 2, alloc->get_used_memory());
+    EXPECT_EQ(REQ - REQ / 2 * 2, alloc->get_free_memory().tot);
+    EXPECT_EQ(REQ / 2, (char*)ptr2 - (char*)ptr);
+
+    alloc->free(ptr);
+    EXPECT_EQ(1u, raw_alloc->nr_alloc());
+    EXPECT_EQ(REQ / 2, alloc->get_used_memory());
+    EXPECT_EQ(REQ - REQ / 2, alloc->get_free_memory().tot);
+
+    ptr = alloc->alloc(REQ);
+    EXPECT_EQ(2u, raw_alloc->nr_alloc());
+    EXPECT_EQ(TOT - REQ * 2, raw_alloc->free_size());
+    EXPECT_EQ(REQ + REQ / 2, alloc->get_used_memory());
+    EXPECT_EQ(REQ - REQ / 2, alloc->get_free_memory().tot);
+
+    alloc->free(ptr2);
+    ptr2 = alloc->alloc(REQ);
+    EXPECT_EQ(2u, raw_alloc->nr_alloc());
+    EXPECT_EQ(REQ * 2, alloc->get_used_memory());
+    EXPECT_EQ(0u, alloc->get_free_memory().tot);
+
+    alloc->free(ptr);
+    alloc->free(ptr2);
+    EXPECT_EQ(0u, raw_alloc->nr_free());
+};
+
 namespace {
 class DevicePolicy {
 public:
@@ -464,21 +567,23 @@ public:
     }
     void raw_dev_free(void* ptr) override { MGB_CUDA_CHECK(cudaFree(ptr)); }
 };
+#endif
 
 using Callback = std::function<void()>;
-void test_free_mem(CompNode cn0, CompNode cn1, DevicePolicy* policy,
+void test_free_mem(CompNode::Locator loc0, CompNode::Locator loc1, DevicePolicy* policy,
                    const Callback& before_run, const Callback& after_run) {
     size_t tot, free;
     policy->set_device(0);
     policy->get_mem_info(free, tot);
 
     // exception
-    auto do_run = [cn0, cn1, policy, free]() {
+    auto do_run = [loc0, loc1, policy, free]() {
         void* tmp;
         policy->raw_dev_malloc(&tmp, free / 3);
         auto dev_free = [&](void* ptr) {
             policy->raw_dev_free(ptr);
         };
+        auto cn0 = CompNode::load(loc0), cn1 = CompNode::load(loc1);
         std::unique_ptr<void, decltype(dev_free)> tmp_owner{tmp, dev_free};
         auto check_free = [&](const char* msg, size_t expect) {
             auto get = cn0.get_mem_status_bytes().second;
@@ -529,7 +634,7 @@ void test_gather_other(CompNode cn0, CompNode cn1) {
     opr::Sleep::sleep(cn1, 0.7);
     func->execute();
 }
-#endif
+
 }  // namespace
 
 #if MGB_CUDA
@@ -544,7 +649,8 @@ TEST(TestCudaMemAlloc, FreeMem) {
     REQUIRE_GPU(1);
     CompNode::finalize();
     // same device but different stream
-    auto cn0 = CompNode::load("gpu0"), cn1 = CompNode::load("gpu0:1");
+    using Locator = CompNode::Locator;
+    auto loc0 = Locator::parse("gpu0"), loc1 = Locator::parse("gpu0:1");
     auto policy = std::make_unique<CudaDevicePolicy>();
 
     constexpr const char* KEY = "MGB_CUDA_RESERVE_MEMORY";
@@ -558,8 +664,9 @@ TEST(TestCudaMemAlloc, FreeMem) {
         }
         CompNode::finalize();
     };
-    test_free_mem(cn0, cn1, policy.get(), reserve, restore);
+    test_free_mem(loc0, loc1, policy.get(), reserve, restore);
 }
 #endif  // MGB_CUDA
+
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

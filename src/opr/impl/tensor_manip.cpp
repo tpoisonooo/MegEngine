@@ -2,7 +2,7 @@
  * \file src/opr/impl/tensor_manip.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -13,6 +13,7 @@
 #include "megbrain/opr/basic_arith.h"
 #include "megbrain/opr/param_defs.h"
 #include "megbrain/opr/utility.h"
+#include "megbrain/opr/io.h"
 #include "megbrain/graph/event.h"
 #include "megbrain/comp_node_env.h"
 #include "megbrain/utils/arith_helper.h"
@@ -164,12 +165,13 @@ void GetVarShape::init_output_static_infer_desc() {
     mgr.register_value_infer(output(0),
             {SourceType::DEP, deps, infer_value});
 }
-
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(GetVarShape) {
     MGB_MARK_USED_VAR(wrt_idx);
     MGB_MARK_USED_VAR(out_grad);
     return nullptr;
 }
+#endif
 
 SymbolVar GetVarShape::make(const VarNodeArrayView& inp, Param param,
                             const OperatorNodeConfig& config) {
@@ -235,7 +237,8 @@ void GetVarShape::record_execute_deps(ExecDependencyArray& deps) {
 
 void ReshapeBrdcastHelper::reshapebrdcast_init(VarNode *inp, VarNode *tshp) {
     add_input({inp, tshp});
-    add_output(None)->dtype(inp->dtype());
+    add_output(None)->dtype(inp->dtype())
+                    .add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
     if (reshapebrdcast_output_shape_need_input_shape())
         outshape_by_symvar_enable(1, 1);
     else
@@ -338,6 +341,14 @@ void ReshapeBrdcastHelper::init_output_static_infer_desc() {
             infer_value});
 }
 
+ReshapeBrdcastHelper::NodeProp*
+ReshapeBrdcastHelper::do_make_node_prop() const {
+    auto ret = Super::do_make_node_prop();
+    ret->add_dep_type_existing_var(input(0),
+                                   NodeProp::DepType::VALUE_ALLOW_EMPTY);
+    return ret;
+}
+
 // f}}}
 
 /* f{{{ ======================= Reshape ======================= */
@@ -361,11 +372,13 @@ SymbolVar Reshape::make(SymbolVar inp, SymbolVar tshp,
             inp.node(), tshp.node(), unspec_axis, config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Reshape) {
     if (wrt_idx)
         return InvalidGrad::make(opr, wrt_idx);
     return Reshape::make(out_grad[0], GetVarShape::make(opr.input(0))).node();
 }
+#endif
 
 Maybe<TensorLayout> Reshape::reshapebrdcast_get_dest_layout(
         const TensorLayout &src, const TensorShape &tshape) const {
@@ -390,7 +403,7 @@ Maybe<TensorLayout> Reshape::reshapebrdcast_get_dest_layout(
     }
     auto tot_nr_elem = src.total_nr_elems();
     actual_tshape.shape[unspec] = 0;
-    mgb_throw_if(tot_nr_elem % rem_nr_elem, TensorReshapeError,
+    mgb_throw_if(!rem_nr_elem || tot_nr_elem % rem_nr_elem, TensorReshapeError,
             "could not reshape: src=%s tshape=%s unspec_axis=%zd",
             static_cast<const TensorShape&>(src).to_string().c_str(),
             actual_tshape.to_string().c_str(),
@@ -428,12 +441,14 @@ SymbolVar Broadcast::make(SymbolVar inp, SymbolVar tshp,
             inp.node(), tshp.node(), config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Broadcast) {
     if (wrt_idx)
         return InvalidGrad::make(opr, wrt_idx);
     return Reduce::make(out_grad.at(0), Reduce::Mode::SUM,
             GetVarShape::make(opr.input(0))).node();
 }
+#endif
 
 Maybe<TensorLayout> Broadcast::reshapebrdcast_get_dest_layout(
         const TensorLayout &src, const TensorShape &tshape) const {
@@ -478,6 +493,17 @@ void AxisManipOprBase::init_output_static_infer_desc() {
             {SourceType::DEP, {{input(0), DepType::VALUE}}, infer_value});
 }
 
+AxisManipOprBase::NodeProp* AxisManipOprBase::do_make_node_prop() const {
+    auto ret = Super::do_make_node_prop();
+    ret->add_dep_type_existing_var(input(0),
+                                   NodeProp::DepType::VALUE_ALLOW_EMPTY);
+    return ret;
+}
+
+void AxisManipOprBase::axis_manip_init(VarNode* inp) {
+    add_input({inp});
+    add_output(None)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
+}
 
 // f}}}
 
@@ -498,8 +524,7 @@ Dimshuffle::Dimshuffle(VarNode *inp, const std::vector<int> &pattern,
         mgb_throw_if(i < -1 || i >= int(ndim), GraphError,
                 "bad Dimshuffle pattern");
     }
-    add_input({inp});
-    add_output(None);
+    axis_manip_init(inp);
     add_equivalence_component<PODHash<int>>(m_pattern.data(), m_pattern.size());
 }
 
@@ -561,9 +586,11 @@ VarNode* Dimshuffle::grad(
     return Dimshuffle::make(out_grad.at(0), back, m_pattern.size()).node();
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Dimshuffle) {
     return opr.grad(wrt_idx, out_grad);
 }
+#endif
 
 // f}}}
 
@@ -579,8 +606,7 @@ AxisAddRemove::AxisAddRemove(
 {
     mgb_throw_if(desc.empty(), GraphError,
             "desc for AxisAddRemove could not be empty");
-    add_input({inp});
-    add_output(None)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
+    axis_manip_init(inp);
     add_equivalence_component<PODHash<AxisDesc>>(m_desc.data(), m_desc.size());
 }
 
@@ -623,17 +649,12 @@ TensorLayout AxisAddRemove::axis_manip_get_output_layout(
     return layout;
 }
 
-AxisAddRemove::NodeProp* AxisAddRemove::do_make_node_prop() const {
-    auto ret = Super::do_make_node_prop();
-    ret->add_dep_type_existing_var(input(0),
-                                   NodeProp::DepType::VALUE_ALLOW_EMPTY);
-    return ret;
-}
-
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(AxisAddRemove) {
     MGB_MARK_USED_VAR(wrt_idx);
     return Reshape::make(out_grad[0], GetVarShape::make(opr.input(0))).node();
 }
+#endif
 
 // f}}}
 
@@ -641,6 +662,7 @@ MGB_IMPL_OPR_GRAD(AxisAddRemove) {
 
 MGB_IMPL_FANCY_INDEXING_OPR_GET(Subtensor, "subtensor", true);
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Subtensor) {
     if (wrt_idx)
         return InvalidGrad::make(opr, wrt_idx);
@@ -649,6 +671,7 @@ MGB_IMPL_OPR_GRAD(Subtensor) {
             SymbolVar{opr.input(0)}.fill_retain_dtype(0),
             out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 void Subtensor::init_output_static_infer_desc() {
     using namespace cg::static_infer;
@@ -719,7 +742,8 @@ void ModifySubtensorImplHelper::init_output_static_infer_desc() {
                 !cg::is_static_var_shape(input(1)))
             return false;
         for (size_t i = 2; i < input().size(); ++ i) {
-            if (!cg::is_static_var_value(input(i)))
+            if (!cg::is_static_var_value(input(i)) ||
+                !mgr.infer_value_fallible(input(i)))
                 return false;
         }
 
@@ -782,6 +806,7 @@ void SetSubtensor::modify(DeviceTensorND &sub, const DeviceTensorND &val) {
     sub.copy_from_fixlayout(val);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(SetSubtensor) {
     if (wrt_idx >= 2)
         return InvalidGrad::make(opr, wrt_idx);
@@ -792,6 +817,7 @@ MGB_IMPL_OPR_GRAD(SetSubtensor) {
     }
     return Subtensor::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 // f}}}
 
@@ -812,6 +838,7 @@ void IncrSubtensor::modify(DeviceTensorND &sub, const DeviceTensorND &val) {
     opr->exec(sub.as_megdnn(), val.as_megdnn());
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IncrSubtensor) {
     if (wrt_idx >= 2)
         return InvalidGrad::make(opr, wrt_idx);
@@ -820,6 +847,7 @@ MGB_IMPL_OPR_GRAD(IncrSubtensor) {
     }
     return Subtensor::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 // f}}}
 
@@ -1084,6 +1112,7 @@ void Split::do_execute(ExecEnv &env) {
     }
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Split) {
     if (wrt_idx)
         return InvalidGrad::make(opr, wrt_idx);
@@ -1099,6 +1128,7 @@ MGB_IMPL_OPR_GRAD(Split) {
     return Concat::make(grad, opr.options().axis,
             OperatorNodeConfig{}.follow_comp_node(opr.input(0))).node();
 }
+#endif
 
 void Split::mem_plan_fwd_in2out_readonly() {
     m_readonly_fwd_called = true;
@@ -1235,6 +1265,7 @@ SymbolVar Concat::make(const VarNodeArrayView& inp, int axis,
                                                               axis, config);
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(Concat) {
     auto axis = opr.axis();
     mgb_assert(out_grad.size() == 1);
@@ -1249,6 +1280,7 @@ MGB_IMPL_OPR_GRAD(Concat) {
                            OperatorNodeConfig().comp_node_arr(comp_node));
     return cg::to_var_node_array(ret);
 }
+#endif
 
 void Concat::scn_do_execute() {
     auto&& out = output(0)->dev_tensor();
@@ -1339,8 +1371,10 @@ void Concat::init_output_comp_node() {
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(ParamPackConcat);
 ParamPackConcat::ParamPackConcat(VarNodeArray& inp, VarNode* table,
+                                 const std::vector<dt_int32> offsets_val,
                                  const OperatorNodeConfig& config)
-        : Super(inp[0]->owner_graph(), config, "ParamPackConcat", inp) {
+        : Super(inp[0]->owner_graph(), config, "ParamPackConcat", inp),
+          m_offsets(offsets_val) {
     CompNode cn = inp[0]->comp_node();
     add_input({inp[0]});
     for (size_t i = 1; i < inp.size(); i++) {
@@ -1361,14 +1395,16 @@ void ParamPackConcat::add_input_layout_constraint(){
     }
 }
 
-SymbolVar ParamPackConcat::make(const SmallVector<SymbolVar> &inp,
-        const SymbolVar &table, const OperatorNodeConfig& config) {
+SymbolVar ParamPackConcat::make(const SmallVector<SymbolVar>& inp,
+                                const SymbolVar& offsets,
+                                const std::vector<dt_int32> offsets_val,
+                                const OperatorNodeConfig& config) {
     VarNodeArray array(inp.size());
     for (size_t i = 0; i < inp.size(); i++) {
         array[i] = inp[i].node();
     }
-    return inp.front().
-        insert_single_output_opr<ParamPackConcat>(array, table.node(), config);
+    return inp.front().insert_single_output_opr<ParamPackConcat>(
+            array, offsets.node(), offsets_val, config);
 }
 
 void ParamPackConcat::scn_do_execute() {
@@ -1379,13 +1415,13 @@ void ParamPackConcat::scn_do_execute() {
     for (size_t i = 0; i < inputs.size() - 1; i++) {
         ptr[i] = inputs[i]->dev_tensor().as_megdnn().raw_ptr;
     }
-    auto table = inputs.back()->dev_tensor().as_megdnn();
+    auto offsets = inputs.back()->dev_tensor().as_megdnn();
     megdnn::TensorND srcs(
             ptr, megdnn::TensorLayout({inputs.size() - 1}, dtype::Int32()));
 
     auto&& dst = output(0)->dev_tensor().as_megdnn();
 
-    m_opr->exec(srcs, table, dst, get_megdnn_workspace_from_var(output(1)));
+    m_opr->exec(srcs, offsets, dst, get_megdnn_workspace_from_var(output(1)));
 }
 
 void ParamPackConcat::init_output_dtype() {
@@ -1396,8 +1432,8 @@ void ParamPackConcat::init_output_static_infer_desc(){
     using namespace cg::static_infer;
     auto &&mgr = owner_graph()->static_infer_manager();
 
-    auto infer_out = [](TensorShape &dest, const InpVal &inp) {
-        dest = {inp.val.back().shape().total_nr_elems()/2};
+    auto infer_out = [this](TensorShape& dest, const InpVal& inp) {
+        dest = {static_cast<unsigned int>(m_offsets.back())};
         return true;
     };
     DepVal shp_deps;
@@ -1430,20 +1466,19 @@ void ParamPackConcat::on_output_comp_node_stream_changed(){
 /* f{{{ ======================= ParamPackSplit ======================= */
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(ParamPackSplit);
-ParamPackSplit::ParamPackSplit(VarNode* src, VarNode* table,
-        TensorShapeArray& shapes, const OperatorNodeConfig& config)
-        : Super{src->owner_graph(), config, "ParamPackSplit", {src, table}},
-        m_shapes(shapes){
-    mgb_assert(src->comp_node() == table->comp_node());
+ParamPackSplit::ParamPackSplit(VarNode* src,
+                               const std::vector<dt_int32> offsets,
+                               TensorShapeArray& shapes,
+                               const OperatorNodeConfig& config)
+        : Super{src->owner_graph(), config, "ParamPackSplit", {src}},
+          m_shapes(shapes), m_offsets(offsets) {
     add_input({src});
-    add_input({table});
 
     for (size_t i = 0; i < shapes.size(); i++) {
         mgb_assert(shapes[i].total_nr_elems(), "empty param is not allowed!");
-        add_output(ssprintf("param_pack_o%zu", i))->dtype(src->dtype());
+        add_output(ssprintf("param_pack_o%zu", i))
+                ->dtype(src->dtype()).shape(shapes[i]);
     }
-
-    cg::add_workspace_output(this);
 }
 
 void ParamPackSplit::add_input_layout_constraint(){
@@ -1451,59 +1486,47 @@ void ParamPackSplit::add_input_layout_constraint(){
 }
 
 SymbolVarArray ParamPackSplit::make(const SymbolVar& src,
-                                    const SymbolVar& table,
+                                    const std::vector<dt_int32> offsets,
                                     TensorShapeArray shapes,
                                     const OperatorNodeConfig& config) {
     auto&& out = src.node()
                          ->owner_graph()
                          ->insert_opr(std::make_unique<ParamPackSplit>(
-                                 src.node(), table.node(), shapes, config))
+                                 src.node(), offsets,
+                                 shapes, config))
                          ->output();
 
     SymbolVarArray ret;
-    ret.resize(out.size() - 1); // do not return workspace
+    ret.resize(out.size());
     for (size_t i = 0; i < ret.size(); ++i) {
         ret[i] = out[i];
     }
     return ret;
 }
 
-void ParamPackSplit::scn_do_execute() {
-    mgb_assert(m_opr.comp_node() == comp_node());
-    megdnn::TensorND src = input(0)->dev_tensor().as_megdnn(),
-                     table = input(1)->dev_tensor().as_megdnn();
-    auto outputs = output();
-    m_inp_ptr.resize(outputs.size() - 1);
-    auto ptr = m_inp_ptr.data();
-
-    for (size_t i = 0; i < outputs.size() - 1; i++) {
-        ptr[i] = outputs[i]->dev_tensor().as_megdnn().raw_ptr;
-    }
-    megdnn::TensorND dsts(
-            ptr, megdnn::TensorLayout({outputs.size() - 1}, dtype::Int32()));
-
-    m_opr->exec(src, table, dsts,
-                get_megdnn_workspace_from_var(outputs.back()));
-}
-
-void ParamPackSplit::on_output_comp_node_stream_changed() {
-    Super::on_output_comp_node_stream_changed();
-    init_megdnn_opr();
-}
-
-void ParamPackSplit::init_megdnn_opr(){
-    m_opr = intl::create_megdnn_opr<megdnn::ParamPackSplit>(comp_node());
-}
-
 void ParamPackSplit::init_output_dtype() {
     // already initialized in constructor
 }
 
+void ParamPackSplit::init_rt_force_dynamic_mem_alloc_imply_chain() {
+    for (size_t i = 0; i < output().size(); ++i) {
+        auto s = input(0), t = output(i);
+        s->add_rt_force_dynamic_mem_alloc_imply_chain(t);
+        t->add_rt_force_dynamic_mem_alloc_imply_chain(s);
+    }
+}
+
+void ParamPackSplit::mem_plan_fwd_in2out_readonly() {
+    mgb_assert(m_offsets.size() == output().size() * 2);
+    for (size_t i = 0; i < output().size(); i++) {
+        auto layout = output(i)->layout();
+        auto spec = SubTensorSpec::make_from_offset_elem(layout, m_offsets[i * 2]);
+        mgb_assert(output(i)->set_fwd_in2out_readonly(input(0), spec));
+    }
+}
+
 bool ParamPackSplit::infer_shape(size_t index, TensorShape& dest,
                                  const cg::static_infer::InpVal& inp) {
-    if (!m_opr.get()){
-        init_megdnn_opr();
-    }
     dest = m_shapes[index];
     return true;
 }
@@ -1513,50 +1536,65 @@ void ParamPackSplit::init_output_static_infer_desc() {
     using namespace std::placeholders;
     auto&& mgr = owner_graph()->static_infer_manager();
 
-    DepVal shp_deps{{input(0), DepType::SHAPE}, {input(1), DepType::SHAPE}};
-
-    auto infer_wk = [this](TensorShape &dst, const InpVal &inp){
-        dst.ndim = 1;
-
-        if(!m_opr.get()){
-            init_megdnn_opr();
-        }
-
-        dst.shape[0] = m_opr->get_workspace_in_bytes(
-                inp.val.at(0).shape(), inp.val.at(1).shape(), m_shapes);
-        return true;
-    };
-
-    for (size_t i = 0; i < output().size() - 1; i++) {
+    for (size_t i = 0; i < output().size(); i++) {
         auto ov = output(i);
         mgr.register_shape_infer(
-                ov, {SourceType::DEP, shp_deps,
+                ov, {SourceType::CONSTANT, {},
                      std::bind(&ParamPackSplit::infer_shape, this, i, _1, _2)});
     }
-    mgr.register_shape_infer(
-            output().back(), {SourceType::DEP, shp_deps, infer_wk});
 }
 
+void ParamPackSplit::scn_do_execute() {
+    int inp_size = input(0)->shape().total_nr_elems();
+    mgb_assert(inp_size == m_offsets.back(), "input shape should match offsets");
+}
+
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(ParamPackSplit) {
     mgb_assert(out_grad.size() == opr.output().size());
     SmallVector<SymbolVar> grad;
-    // last var is workspace, ignore it
-    for (size_t i = 0; i < out_grad.size() - 1; ++i) {
+    for (size_t i = 0; i < out_grad.size(); ++i) {
         auto gval = out_grad[i];
         if (!gval) {
             gval = SymbolVar{opr.output(i)}.fill_retain_dtype(0).node();
         }
         grad.emplace_back(gval);
     }
+    auto offsets_val = opr.get_offsets();
+    auto cn = opr.input(0)->comp_node();
+    if (opr.config().has_comp_node_set()) {
+        cn = opr.config().get_single_comp_node();
+    }
+    HostTensorND hv{cn, TensorShape{offsets_val.size()}, dtype::Int32{}};
+    memcpy(hv.raw_ptr(), offsets_val.data(), offsets_val.size() * sizeof(int));
+    auto offsets = opr::ImmutableTensor::make(*opr.input(0)->owner_graph(), hv);
 
     return ParamPackConcat::make(
-                   grad, opr.input(1),
+                   grad, offsets, offsets_val,
                    OperatorNodeConfig{}.follow_comp_node(opr.input(0)))
             .node();
 }
+#endif
 // f}}}
 
 /* f{{{ ======================= RelayoutFormat ======================= */
+namespace mgb {
+namespace opr {
+namespace intl {
+template <>
+struct MegDNNOprInitPostCtor<RelayoutFormat> {
+    static void apply(cg::OperatorNodeBase& opr) {
+        if (opr.config().output_dtype().valid()) {            
+            opr.output(0)->dtype(opr.config().output_dtype());
+        } else {
+            opr.output(0)->dtype(opr.input(0)->dtype());
+        }
+    }
+};
+}  // namespace intl
+}  // namespace opr
+}  // namespace mgb
+
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(RelayoutFormat);
 MEGDNN_OPR_INIT1(RelayoutFormat, "relayout_format")
 
@@ -1569,9 +1607,5 @@ void RelayoutFormat::init_output_format() {
 }
 // f}}}
 //
-/* f{{{ ===================== WinogradFilterPreprocess ===================== */
-MGB_DYN_TYPE_OBJ_FINAL_IMPL(WinogradFilterPreprocess);
-MEGDNN_OPR_INIT1(WinogradFilterPreprocess, "winograd_filter_preprocess")
-// f}}}
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

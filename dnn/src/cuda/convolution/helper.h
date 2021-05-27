@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/convolution/helper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -25,6 +25,7 @@ namespace convolution {
     struct ForwardSizeArgs {
         HandleImpl *handle;
         const TensorLayout *src_layout;
+        const TensorLayout *filter_layout;
         CanonizedFilterMeta filter_meta;
         const TensorLayout *dst_layout;
     };
@@ -33,7 +34,8 @@ namespace convolution {
     bool is_cudnn_supported(const ForwardSizeArgs &args);
 
     //! get workspace bundle for matmul algo
-    WorkspaceBundle matmul_get_workspace_bundle(const ForwardSizeArgs &args);
+    SmallVector<size_t> matmul_get_workspace_bundle(
+            const ForwardSizeArgs& args);
 
     struct CUDNNForwardDescs {
         TensorDesc src_desc, dst_desc;

@@ -2,11 +2,12 @@
  * \file dnn/src/fallback/conv_bias/winograd/winograd.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #pragma once
@@ -17,6 +18,9 @@
 #include "include/megdnn/thin/small_vector.h"
 #include "src/fallback/conv_bias/opr_impl.h"
 #include "src/fallback/matrix_mul/opr_impl.h"
+
+#include "midout.h"
+MIDOUT_DECL(megdnn_fallback_conv_bias_winograd_common)
 
 namespace megdnn {
 namespace winograd {
@@ -84,10 +88,7 @@ class ConvBias {
         size_t filter_transform_buf_size = 0;
         //! filter : (alpha, alpha, IC, OC) or (OCB, ICB, IC_BLOCK_SIZE,
         //! OC_BLOCK_SIZE)
-        if (param.filter_meta.format !=
-                    param::ConvBias::Format::NCHW_WINOGRAD &&
-            param.filter_meta.format !=
-                    param::ConvBias::Format::NCHW88_WINOGRAD) {
+        if (param.preprocessed_filter == nullptr) {
             filter_transform_buf_size = Strategy::ALPHA * Strategy::ALPHA * OC *
                                         IC * sizeof(input_filter_compute_type);
         }
@@ -95,15 +96,13 @@ class ConvBias {
                 get_wbundle_compute(param, matmul_algo).total_size_in_bytes() *
                 nr_threads;
         if (param.filter_meta.format == param::ConvBias::Format::NCHW ||
-            param.filter_meta.format == param::ConvBias::Format::NCHW88) {
+            param.filter_meta.format == param::ConvBias::Format::NCHW88 ||
+            param.filter_meta.format == param::ConvBias::Format::NCHW44) {
             return WorkspaceBundle(
                     nullptr,
                     {winograd_comput_size, filter_transform_buf_size * GROUP});
         } else {
-            megdnn_assert(param.filter_meta.format ==
-                                  param::ConvBias::Format::NCHW_WINOGRAD ||
-                          param.filter_meta.format ==
-                                  param::ConvBias::Format::NCHW88_WINOGRAD);
+            megdnn_assert(param.preprocessed_filter != nullptr);
             return WorkspaceBundle(nullptr, {winograd_comput_size});
         }
     }
@@ -131,8 +130,8 @@ class ConvBias {
                 sizeof(output_compute_type) *
                 std::max(Strategy::IC_BLOCK_SIZE, Strategy::OC_BLOCK_SIZE);
 
-        size_t matmul_workspace_size =
-                matmul_algo->get_workspace(get_matmul_kern_param(param));
+        size_t matmul_workspace_size = matmul_algo->get_workspace(
+                get_matmul_kern_param(param, m_unit_oc_size));
 
         //! compute workspace is independent and separated as far as possible
         //! in case of false cache line sharing
@@ -141,14 +140,30 @@ class ConvBias {
                           transform_mid_buf_size, matmul_workspace_size});
     }
 
+    WorkspaceBundle get_preprocess_wbundle(
+            const NCBKernSizeParam& param) const {
+        //! use for inner temporary usage
+        size_t transform_mid_buf_size =
+                2 * Strategy::ALPHA * Strategy::ALPHA *
+                sizeof(output_compute_type) *
+                std::max(Strategy::IC_BLOCK_SIZE, Strategy::OC_BLOCK_SIZE);
+        size_t nr_threads = param.nr_threads;
+        SmallVector<size_t> space_vec(nr_threads, transform_mid_buf_size);
+        return WorkspaceBundle{nullptr, space_vec};
+    }
+
 public:
     //! Get the m_unit_oc_size, according to the nr_threads and
     //! output_featuremap_size. When single thread the m_unit_oc_size is set
     //! 2048 heuristicly, When multi-threads, the m_unit_oc_size is set
-    //! according to  nr_threads and out_featuremap_size
-    ConvBias(const Strategy& strategy, size_t unit_tile_size, size_t nr_threads,
-             size_t OH, size_t OW, size_t OC)
+    //! according to nr_threads and out_featuremap_size
+    ConvBias(const Strategy& strategy, size_t unit_tile_size,
+             const NCBKernSizeParam& param)
             : m_strategy{strategy}, m_unit_tile_size{unit_tile_size} {
+        size_t nr_threads = param.nr_threads;
+        size_t OC = param.filter_meta.ocpg;
+        size_t OH = param.osz[0];
+        size_t OW = param.osz[1];
         if (nr_threads > 1) {
             size_t units_h = div_ceil<size_t>(OH, Strategy::OUTPUT_BLOCK_SIZE);
             size_t units_w = div_ceil<size_t>(OW, Strategy::OUTPUT_BLOCK_SIZE);
@@ -169,12 +184,60 @@ public:
             m_unit_oc_size = UNIT_OC_SIZE_DEFAULT;
         }
     }
+    ConvBias(const Strategy& strategy, size_t unit_tile_size)
+            : m_strategy{strategy}, m_unit_tile_size{unit_tile_size} {
+        m_unit_oc_size = UNIT_OC_SIZE_DEFAULT;
+    }
 
     size_t get_workspace_size(
             const NCBKernSizeParam& param,
             fallback::MatrixMulImpl::AlgoBase* matmul_algo) const {
         return get_wbundle(param, matmul_algo).total_size_in_bytes();
     }
+
+    size_t get_preprocess_workspace_size(
+            const NCBKernSizeParam& param,
+            fallback::MatrixMulImpl::AlgoBase*) const {
+        return get_preprocess_wbundle(param).total_size_in_bytes();
+    }
+
+    SmallVector<TensorLayout> deduce_preprocessed_filter_layout(
+            const NCBKernSizeParam& param, fallback::MatrixMulImpl::AlgoBase*) {
+        if (param.filter_meta.format != param::ConvBias::Format::NCHW &&
+            param.filter_meta.format != param::ConvBias::Format::NCHW88 &&
+            param.filter_meta.format != param::ConvBias::Format::NCHW44) {
+            return {};
+        }
+        size_t OC = param.filter_meta.ocpg;
+        size_t IC = param.filter_meta.icpg;
+        size_t GROUP = param.filter_meta.group;
+        SmallVector<TensorLayout> preprocessed_layouts;
+        DType dtype = m_strategy.filter_dtype;
+        if (dtype.category() == DTypeCategory::QUANTIZED) {
+            if (format == param::MatrixMul::Format::MK4) {
+                dtype = dtype::Float32();
+            } else if (format == param::MatrixMul::Format::MK8) {
+                dtype = dtype::Int16();
+            }
+        }
+        if (format == param::MatrixMul::Format::DEFAULT) {
+            preprocessed_layouts.push_back(
+                    {{GROUP, Strategy::ALPHA, Strategy::ALPHA, OC, IC}, dtype});
+        } else if (format == param::MatrixMul::Format::MK4) {
+            preprocessed_layouts.push_back(
+                    {{GROUP, Strategy::ALPHA, Strategy::ALPHA, OC / 4, IC / 4,
+                      4, 4},
+                     dtype});
+        } else {
+            megdnn_assert(format == param::MatrixMul::Format::MK8);
+            preprocessed_layouts.push_back(
+                    {{GROUP, Strategy::ALPHA, Strategy::ALPHA, OC / 8, IC / 8,
+                      8, 8},
+                     dtype});
+        }
+        return preprocessed_layouts;
+    }
+
     //! Used by winograd_filter_preprocess opr
     void filter_process(const stype* filter_ptr,
                         input_filter_compute_type* filter_transform_buf,
@@ -185,12 +248,11 @@ public:
                 IC, 0, OC);
     }
 
-    static void filter_process(Strategy strategy, WorkspaceBundle bundle_top,
-                               WorkspaceBundle bundle_compute,
+    static void filter_process(Strategy strategy,
+                               const WorkspaceBundle& bundle_top,
+                               const WorkspaceBundle& bundle_compute,
                                const NCBKernParam& kern_param,
                                const NCBKernIndex& ncb_index) {
-        bundle_top.set(kern_param.workspace_ptr);
-        bundle_compute.set(bundle_top.get(0));
         size_t compute_workspace_size_per_thread =
                 bundle_compute.total_size_in_bytes();
         size_t thread_id = ncb_index.thread_id;
@@ -210,19 +272,66 @@ public:
                 reinterpret_cast<input_filter_compute_type*>(
                         reinterpret_cast<uintptr_t>(bundle_compute.get(2)) +
                         compute_workspace_size_per_thread * thread_id);
-        const stype* filter_ptr = kern_param.filter<stype>();
-        size_t oc_start = oc_id, oc_end = oc_id+1;
+
+        const stype* filter_ptr = kern_param.filter<stype>(group_id);
+        size_t oc_start = oc_id, oc_end = oc_id + 1;
+
         if (kern_param.filter_meta.format == param::ConvBias::Format::NCHW88) {
             oc_start = 8 * oc_id;
             oc_end = oc_start + 8;
+        } else if (kern_param.filter_meta.format ==
+                   param::ConvBias::Format::NCHW44) {
+            oc_start = 4 * oc_id;
+            oc_end = oc_start + 4;
+        }
+        strategy.filter(filter_ptr, filter_transform_buf, transform_mid_buf, OC,
+                        IC, oc_start, oc_end);
+    }
+
+    static void filter_preprocess(Strategy strategy,
+                                  const WorkspaceBundle& bundle,
+                                  const TensorND& preprocessed_tensor,
+                                  const NCBKernParam& kern_param,
+                                  const NCBKernIndex& ncb_index) {
+        size_t thread_id = ncb_index.thread_id;
+        size_t oc_id = ncb_index.ndrange_id[1];
+        size_t group_id = ncb_index.ndrange_id[0];
+        size_t OC = kern_param.filter_meta.ocpg;
+        size_t IC = kern_param.filter_meta.icpg;
+        size_t filter_group_size = Strategy::ALPHA * Strategy::ALPHA * OC * IC *
+                                   sizeof(input_filter_compute_type);
+        //! Filter trans dst ptr
+        input_filter_compute_type* filter_transform_buf =
+                reinterpret_cast<input_filter_compute_type*>(
+                        reinterpret_cast<uintptr_t>(
+                                preprocessed_tensor.raw_ptr) +
+                        group_id * filter_group_size);
+        //! Filter trans src ptr
+        input_filter_compute_type* transform_mid_buf =
+                reinterpret_cast<input_filter_compute_type*>(
+                        reinterpret_cast<uintptr_t>(bundle.get(thread_id)));
+
+        const stype* filter_ptr = kern_param.filter<stype>(group_id);
+        size_t oc_start, oc_end;
+
+        if (kern_param.filter_meta.format == param::ConvBias::Format::NCHW88) {
+            oc_start = 8 * oc_id;
+            oc_end = oc_start + 8;
+        } else if (kern_param.filter_meta.format ==
+                   param::ConvBias::Format::NCHW44) {
+            oc_start = 4 * oc_id;
+            oc_end = oc_start + 4;
+        } else {
+            oc_start = oc_id;
+            oc_end = oc_id + 1;
         }
         strategy.filter(filter_ptr, filter_transform_buf, transform_mid_buf, OC,
                         IC, oc_start, oc_end);
     }
 
     static void winograd_compute(
-            Strategy strategy, WorkspaceBundle bundle_top,
-            WorkspaceBundle bundle_compute,
+            Strategy strategy, const WorkspaceBundle& bundle_top,
+            const WorkspaceBundle& bundle_compute,
             fallback::MatrixMulImpl::AlgoBase* matmul_algo,
             fallback::MatrixMulImpl::KernParam matmul_param,
             size_t unit_tile_size, size_t unit_oc_size,
@@ -246,16 +355,16 @@ public:
 
         size_t oc_block_id = ncb_index.ndrange_id[3];
         size_t tile_id = ncb_index.ndrange_id[2];
+        size_t batch_id = ncb_index.ndrange_id[1];
         size_t group_id = ncb_index.ndrange_id[0];
         size_t thread_id = ncb_index.thread_id;
 
-        bundle_top.set(ncb_param.workspace_ptr);
-        bundle_compute.set(bundle_top.get(0));
-
-        const stype* src_ptr = ncb_param.src<stype>();
-        dst_type* dst_ptr = ncb_param.dst<dst_type>();
+        const stype* src_ptr = ncb_param.src<stype>(batch_id, group_id);
+        dst_type* dst_ptr = ncb_param.dst<dst_type>(batch_id, group_id);
         const output_compute_type* bias_ptr =
-                static_cast<const output_compute_type*>(ncb_param.bias_ptr);
+                static_cast<const output_compute_type*>(
+                        ncb_param.bias<output_compute_type>(batch_id,
+                                                            group_id));
 
         input_filter_compute_type* input_transform_buf =
                 reinterpret_cast<input_filter_compute_type*>(
@@ -271,14 +380,29 @@ public:
                         reinterpret_cast<uintptr_t>(bundle_compute.get(2)) +
                         compute_workspace_size_per_thread * thread_id);
 
-        const input_filter_compute_type* filter_transform_buf =
-                static_cast<const input_filter_compute_type*>(
-                        ncb_param.filter_ptr);
-        if (ncb_param.filter_meta.format == param::ConvBias::Format::NCHW ||
-            ncb_param.filter_meta.format == param::ConvBias::Format::NCHW88) {
+        //! NCHW88_WINOGRAD and NCHW_WINOGRAD is the same offset
+        const input_filter_compute_type* filter_transform_buf = nullptr;
+        if (nullptr != ncb_param.preprocessed_filter) {
+            auto preprocess_raw_ptr =
+                    ncb_param.preprocessed_filter->tensors[0].raw_ptr;
             filter_transform_buf = reinterpret_cast<input_filter_compute_type*>(
-                    reinterpret_cast<uintptr_t>(bundle_top.get(1)) +
+                    reinterpret_cast<uintptr_t>(preprocess_raw_ptr) +
                     group_id * filter_group_size);
+        } else {
+            filter_transform_buf =
+                    static_cast<const input_filter_compute_type*>(
+                            ncb_param.filter<input_filter_compute_type>(
+                                    group_id));
+            if (ncb_param.filter_meta.format == param::ConvBias::Format::NCHW ||
+                ncb_param.filter_meta.format ==
+                        param::ConvBias::Format::NCHW88 ||
+                ncb_param.filter_meta.format ==
+                        param::ConvBias::Format::NCHW44) {
+                filter_transform_buf =
+                        reinterpret_cast<input_filter_compute_type*>(
+                                reinterpret_cast<uintptr_t>(bundle_top.get(1)) +
+                                group_id * filter_group_size);
+            }
         }
         //! prepare matmul param
         matmul_param.workspace_ptr = reinterpret_cast<void*>(
@@ -297,24 +421,14 @@ public:
                       "The winograd remain oc is not times of OC_BLOCK_SIZE");
         if (format == param::MatrixMul::Format::MK4 ||
             format == param::MatrixMul::Format::MK8) {
-#if !MEGDNN_X86
-            nr_tiles_in_unit = round_up<size_t>(nr_tiles_in_unit, 4);
-#endif
             megdnn_assert(nr_tiles_in_unit <= unit_tile_size,
                           "nr_tiles_in_unit: %zu TILE_SIZE:%zu",
                           nr_tiles_in_unit, unit_tile_size);
         }
-        rep(unit_idx, nr_tiles_in_unit) {
-            size_t index = unit_start_idx + unit_idx;
-            size_t nh = index / units_w;
-            size_t nw = index % units_w;
-            int ih_start = nh * Strategy::OUTPUT_BLOCK_SIZE - PH;
-            int iw_start = nw * Strategy::OUTPUT_BLOCK_SIZE - PW;
+        //! BTdB
+        strategy.input(src_ptr, input_transform_buf, transform_mid_buf,
+                       IH, IW, IC, PH, PW, unit_start_idx, nr_tiles_in_unit);
 
-            strategy.input(src_ptr, input_transform_buf, transform_mid_buf,
-                           ih_start, iw_start, IH, IW, IC, unit_idx,
-                           nr_tiles_in_unit);
-        }
         rep(i, Strategy::ALPHA) rep(j, Strategy::ALPHA) {
             if (format == param::MatrixMul::Format::DEFAULT) {
                 matmul_param.A_ptr =
@@ -351,23 +465,56 @@ public:
             }
             matmul_kern(matmul_param);
         }
-        /* Y = ATmA */
-        rep(unit_idx, nr_tiles_in_unit) {
-            size_t index = unit_start_idx + unit_idx;
-            auto nh = index / units_w;
-            auto nw = index % units_w;
-            size_t oh_start = nh * Strategy::OUTPUT_BLOCK_SIZE;
-            size_t ow_start = nw * Strategy::OUTPUT_BLOCK_SIZE;
-            size_t oc_end_idx = oc_start_idx + nr_oc_in_unit;
 
-            strategy.output(
-                    output_transform_buf, bias_ptr, dst_ptr,
-                    reinterpret_cast<output_compute_type*>(transform_mid_buf),
-                    ncb_param.bias_mode, ncb_param.nonlineMode, oh_start,
-                    ow_start, OH, OW, oc_start_idx, oc_end_idx, unit_idx,
-                    nr_tiles_in_unit);
-        }
+        //! Y = ATmA
+        size_t oc_end_idx = oc_start_idx + nr_oc_in_unit;
+        strategy.output(
+                output_transform_buf, bias_ptr, dst_ptr,
+                reinterpret_cast<output_compute_type*>(transform_mid_buf),
+                ncb_param.bias_mode, ncb_param.nonlineMode, OH, OW,
+                oc_start_idx, oc_end_idx, unit_start_idx, nr_tiles_in_unit);
     };
+
+    SmallVector<NCBKern> get_preprocess_kerns(
+            const NCBKernSizeParam& param, fallback::MatrixMulImpl::AlgoBase*) {
+        megdnn_assert(
+                param.filter_meta.format == param::ConvBias::Format::NCHW ||
+                param.filter_meta.format == param::ConvBias::Format::NCHW88 ||
+                param.filter_meta.format == param::ConvBias::Format::NCHW44);
+        megdnn_assert(param.preprocessed_filter &&
+                      param.preprocessed_filter->tensors.size() > 0);
+        size_t OC = param.filter_meta.ocpg;
+        size_t GROUP = param.filter_meta.group;
+        const TensorND& preprocessed_dst =
+                param.preprocessed_filter->tensors[0];
+        WorkspaceBundle bundle = get_preprocess_wbundle(param);
+        Strategy strategy = m_strategy;
+        SmallVector<NCBKern> kerns;
+        auto filter_process_kern =
+                [strategy, bundle, &preprocessed_dst, this](
+                        const NCBKernParam& ncb_param,
+                        const NCBKernIndex& ncb_index) mutable {
+                    MEGDNN_MARK_USED_VAR(this);
+                    MIDOUT_BEGIN(megdnn_fallback_conv_bias_winograd_common,
+                                 midout_iv("filter_preprocess"_hash)) {
+                        bundle.set(ncb_param.workspace_ptr);
+                        filter_preprocess(strategy, bundle, preprocessed_dst,
+                                          ncb_param, ncb_index);
+                    }
+                    MIDOUT_END();
+                };
+        size_t oc_parallelism = OC;
+        if (param.filter_meta.format == param::ConvBias::Format::NCHW88) {
+            megdnn_assert(OC % 8 == 0);
+            oc_parallelism = OC / 8;
+        } else if (param.filter_meta.format ==
+                   param::ConvBias::Format::NCHW44) {
+            megdnn_assert(OC % 4 == 0);
+            oc_parallelism = OC / 4;
+        }
+        kerns.push_back({filter_process_kern, {GROUP, oc_parallelism}});
+        return kerns;
+    }
 
     SmallVector<NCBKern> get_kerns(
             const NCBKernSizeParam& param,
@@ -382,9 +529,8 @@ public:
                 get_wbundle_compute(param, matmul_algo);
         fallback::MatrixMulImpl::KernParam matmul_param;
         static_cast<fallback::MatrixMulImpl::KernSizeParam&>(matmul_param) =
-                get_matmul_kern_param(param);
+                get_matmul_kern_param(param, m_unit_oc_size);
 
-        Strategy strategy = m_strategy;
         size_t unit_tile_size = m_unit_tile_size;
         size_t unit_oc_size = m_unit_oc_size;
         size_t units_h = div_ceil<size_t>(OH, Strategy::OUTPUT_BLOCK_SIZE);
@@ -400,61 +546,79 @@ public:
                 param.filter_meta.stride[1] == 1 &&
                 (param.filter_meta.format == param::ConvBias::Format::NCHW ||
                  param.filter_meta.format == param::ConvBias::Format::NCHW88 ||
-                 param.filter_meta.format ==
-                         param::ConvBias::Format::NCHW_WINOGRAD ||
-                 param.filter_meta.format ==
-                         param::ConvBias::Format::NCHW88_WINOGRAD));
+                 param.filter_meta.format == param::ConvBias::Format::NCHW44));
 
         SmallVector<NCBKern> kerns;
-        if (param.filter_meta.format == param::ConvBias::Format::NCHW ||
-            param.filter_meta.format == param::ConvBias::Format::NCHW88) {
-            //! probably a gcc bug, labmda require capturing 'this' to call
-            //! static member function
-            auto filter_process_kern = [this, strategy, bundle_top,
-                                        bundle_compute](
-                                               const NCBKernParam& ncb_param,
-                                               const NCBKernIndex& ncb_index) {
-                MEGDNN_MARK_USED_VAR(this);
-                filter_process(strategy, bundle_top, bundle_compute, ncb_param,
-                               std::move(ncb_index));
-            };
+        if (param.preprocessed_filter == nullptr &&
+            (param.filter_meta.format == param::ConvBias::Format::NCHW ||
+             param.filter_meta.format == param::ConvBias::Format::NCHW88 ||
+             param.filter_meta.format == param::ConvBias::Format::NCHW44)) {
+            auto filter_process_kern =
+                    [strategy = m_strategy, bundle_top, bundle_compute, this](
+                            const NCBKernParam& ncb_param,
+                            const NCBKernIndex& ncb_index) mutable {
+                        MEGDNN_MARK_USED_VAR(this);
+                        MIDOUT_BEGIN(megdnn_fallback_conv_bias_winograd_common,
+                                     midout_iv("filter_process"_hash)) {
+                            bundle_top.set(ncb_param.workspace_ptr);
+                            bundle_compute.set(bundle_top.get(0));
+                            filter_process(strategy, bundle_top, bundle_compute,
+                                           ncb_param, std::move(ncb_index));
+                        }
+                        MIDOUT_END();
+                    };
             size_t oc_parallelism = OC;
             if (param.filter_meta.format == param::ConvBias::Format::NCHW88) {
                 megdnn_assert(OC % 8 == 0);
                 oc_parallelism = OC / 8;
+            } else if (param.filter_meta.format ==
+                       param::ConvBias::Format::NCHW44) {
+                megdnn_assert(OC % 4 == 0);
+                oc_parallelism = OC / 4;
             }
             kerns.push_back({filter_process_kern, {GROUP, 1, oc_parallelism}});
         }
-        auto winograd_compute_kern = [strategy, bundle_top, bundle_compute,
-                                      matmul_algo, matmul_param, unit_tile_size,
-                                      unit_oc_size](
-                                             const NCBKernParam& ncb_param,
-                                             const NCBKernIndex& ncb_index) {
-            winograd_compute(strategy, bundle_top, bundle_compute, matmul_algo,
-                             matmul_param, unit_tile_size, unit_oc_size,
-                             ncb_param, std::move(ncb_index));
-        };
+        auto winograd_compute_kern =
+                [strategy = m_strategy, bundle_top, bundle_compute, matmul_algo,
+                 matmul_param, unit_tile_size, unit_oc_size,
+                 this](const NCBKernParam& ncb_param,
+                       const NCBKernIndex& ncb_index) mutable {
+                    MEGDNN_MARK_USED_VAR(this);
+                    MIDOUT_BEGIN(megdnn_fallback_conv_bias_winograd_common,
+                                 midout_iv("winograd_compute"_hash)) {
+                        bundle_top.set(ncb_param.workspace_ptr);
+                        bundle_compute.set(bundle_top.get(0));
+                        winograd_compute(strategy, bundle_top, bundle_compute,
+                                         matmul_algo, matmul_param,
+                                         unit_tile_size, unit_oc_size,
+                                         ncb_param, std::move(ncb_index));
+                    }
+                    MIDOUT_END();
+                };
         kerns.push_back(
                 {winograd_compute_kern, {GROUP, N, nr_hw_tiles, nr_oc_tiles}});
         return kerns;
     }
 
     fallback::MatrixMulImpl::KernSizeParam get_matmul_kern_param(
-            const NCBKernSizeParam& param) const {
+            const NCBKernSizeParam& param, size_t nr_oc_in_unit = 0) const {
         size_t M = 0;
         size_t N = 0;
         size_t K = 0;
         size_t LDA = 0, LDB = 0, LDC = 0;
+        if (nr_oc_in_unit == 0) {
+            nr_oc_in_unit = param.filter_meta.ocpg;
+        }
 
         if (format == param::MatrixMul::Format::DEFAULT) {
             M = m_unit_tile_size;
-            N = param.filter_meta.ocpg;
+            N = nr_oc_in_unit;
             K = param.filter_meta.icpg;
             LDA = K;
             LDB = N;
             LDC = N;
         } else {
-            M = param.filter_meta.ocpg;
+            M = nr_oc_in_unit;
             N = m_unit_tile_size;
             K = param.filter_meta.icpg;
             megdnn_assert(K % Strategy::IC_BLOCK_SIZE == 0, "invalid K: %zu",
@@ -517,15 +681,15 @@ public:
                     size_t IC, size_t oc_start, size_t oc_end);                \
         void input(const stype* input,                                         \
                    input_filter_compute_type* input_transform_buf,             \
-                   input_filter_compute_type* transform_mid_buf, int ih_start, \
-                   int iw_start, size_t IH, size_t IW, size_t IC,              \
-                   size_t unit_idx, size_t nr_tiles_in_unit);                  \
+                   input_filter_compute_type* transform_mid_buf,               \
+                   size_t IH, size_t IW, size_t IC, size_t PH, size_t PW,      \
+                   size_t unit_start_idx, size_t nr_tiles_in_unit);            \
         void output(const output_compute_type* output_transform_buf,           \
                     const output_compute_type* bias, dst_type* output,         \
                     output_compute_type* transform_mid_buf, BiasMode bmode,    \
-                    NonlineMode nonline_mode, size_t oh_start,                 \
-                    size_t ow_start, size_t OH, size_t OW, size_t oc_start,    \
-                    size_t oc_end, size_t unit_idx, size_t nr_tiles_in_unit);  \
+                    NonlineMode nonline_mode, size_t OH, size_t OW,            \
+                    size_t oc_start, size_t oc_end, size_t unit_start_idx,     \
+                    size_t nr_tiles_in_unit);                                  \
     };
 
 #define MEGDNN_REG_WINOGRAD_STRATEGY_IMPL(_strategy_cls_name)     \
@@ -539,5 +703,55 @@ public:
             : src_dtype(src_dtype),                               \
               filter_dtype(filter_dtype),                         \
               dst_dtype(dst_dtype) {}
+
+#define MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(_class, _fun, _strategy,              \
+                                         _midout_flag, _matmul_format)         \
+    MEGDNN_MARK_USED_VAR(param);                                               \
+    MIDOUT_BEGIN(_midout_flag, midout_iv(#_class #_fun##_hash)) {              \
+        _strategy strategy(param.src_type, param.filter_type, param.dst_type); \
+        return megdnn::winograd::ConvBias<_strategy, _matmul_format>(          \
+                       strategy, m_tile_size, param)                           \
+                ._fun(param, m_matmul_algo);                                   \
+    }                                                                          \
+    MIDOUT_END();
+
+#define MEGDNN_WINOGRAD_ALGO_FUN_DEFINE_ALL(_class, _strategy, _midout_flag,  \
+                                            _matmul_format)                   \
+    size_t ConvBiasImpl::_class::get_workspace(const NCBKernSizeParam& param) \
+            const {                                                           \
+        MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(_class, get_workspace_size,          \
+                                         _strategy, _midout_flag,             \
+                                         _matmul_format);                     \
+        return 0;                                                             \
+    }                                                                         \
+    size_t ConvBiasImpl::_class::get_preprocess_workspace(                    \
+            const NCBKernSizeParam& param) const {                            \
+        MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(                                     \
+                _class, get_preprocess_workspace_size, _strategy,             \
+                _midout_flag, _matmul_format);                                \
+        return 0;                                                             \
+    }                                                                         \
+    SmallVector<TensorLayout>                                                 \
+    ConvBiasImpl::_class::deduce_preprocessed_filter_layout(                  \
+            const NCBKernSizeParam& param) const {                            \
+        MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(                                     \
+                _class, deduce_preprocessed_filter_layout, _strategy,         \
+                _midout_flag, _matmul_format);                                \
+        return {};                                                            \
+    }                                                                         \
+    SmallVector<ConvBiasImpl::NCBKern>                                        \
+    ConvBiasImpl::_class::dispatch_preprocess_kerns(                          \
+            const NCBKernSizeParam& param) const {                            \
+        MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(_class, get_preprocess_kerns,        \
+                                         _strategy, _midout_flag,             \
+                                         _matmul_format);                     \
+        return {};                                                            \
+    }                                                                         \
+    SmallVector<ConvBiasImpl::NCBKern> ConvBiasImpl::_class::dispatch_kerns(  \
+            const NCBKernSizeParam& param) const {                            \
+        MEGDNN_WINOGRADS_ALGO_FUN_DEFINE(_class, get_kerns, _strategy,        \
+                                         _midout_flag, _matmul_format);       \
+        return {};                                                            \
+    }
 
 // vim: syntax=cpp.doxygen

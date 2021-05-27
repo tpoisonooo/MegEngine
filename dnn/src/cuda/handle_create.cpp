@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/handle_create.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -11,6 +11,7 @@
 
 #include "src/common/handle_impl.h"
 
+#include "src/cuda/adaptive_pooling/opr_impl.h"
 #include "src/cuda/add_update/opr_impl.h"
 #include "src/cuda/argmxx/opr_impl.h"
 #include "src/cuda/argsort/opr_impl.h"
@@ -25,6 +26,7 @@
 #include "src/cuda/convpooling/opr_impl.h"
 #include "src/cuda/cumsum/opr_impl.h"
 #include "src/cuda/cvt_color/opr_impl.h"
+#include "src/cuda/dct/opr_impl.h"
 #include "src/cuda/deformable_conv/opr_impl.h"
 #include "src/cuda/deformable_ps_roi_pooling/opr_impl.h"
 #include "src/cuda/dot/opr_impl.h"
@@ -70,10 +72,12 @@
 #include "src/cuda/type_cvt/opr_impl.h"
 #include "src/cuda/warp_affine/opr_impl.h"
 #include "src/cuda/warp_perspective/opr_impl.h"
-#include "src/cuda/winograd_filter_preprocess/opr_impl.h"
 #include "src/cuda/local_share/opr_impl.h"
 #include "src/cuda/roi_align/opr_impl.h"
 #include "src/cuda/batch_conv_bias/opr_impl.h"
+#include "src/cuda/remap/opr_impl.h"
+#include "src/cuda/fake_quant/opr_impl.h"
+#include "src/cuda/tqt/opr_impl.h"
 
 namespace megdnn {
 namespace cuda {

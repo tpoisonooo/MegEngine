@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/sleep.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,7 +24,7 @@ using namespace test;
 
 
 TEST_F(CUDA, SLEEP) {
-    auto opr = this->handle_cuda()->create_operator<Sleep>();
+    auto opr = this->handle_cuda()->create_operator<megdnn::SleepForward>();
 
     auto run = [&](float time) -> double {
         opr->param() = {time};

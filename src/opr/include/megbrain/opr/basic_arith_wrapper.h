@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/basic_arith_wrapper.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,6 +32,7 @@ namespace opr {
     EL1(exp, EXP)
     EL1(log, LOG)
     EL1(abs, ABS)
+    EL1(not_, NOT)
 
 #undef EL1
 
@@ -53,6 +54,10 @@ namespace opr {
     EL2(min, MIN)
     EL2(switch_gt0, SWITCH_GT0)
     EL2(eq, EQ)
+    EL2(and_, AND)
+    EL2(or_, OR)
+    EL2(xor_, XOR)
+    EL2(mod, MOD)
 
 #undef EL2
 

@@ -2,7 +2,7 @@
  * \file src/opr/test/tensor_manip.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,6 +17,7 @@
 #include "megbrain/opr/io.h"
 #include "megbrain/opr/blas.h"
 #include "megbrain/opr/utility.h"
+#include "megbrain/opr/misc.h"
 #include "megbrain/utils/arith_helper.h"
 
 using namespace mgb;
@@ -138,7 +139,7 @@ TEST(TestTensorManip, Reshape) {
         auto &&dep_map = opr0_reshp.node()->owner_opr()->node_prop().dep_map();
         using DT = cg::OperatorNodeBase::NodeProp::DepType;
         ASSERT_EQ(2u, dep_map.size());
-        ASSERT_EQ(DT::DEV_VALUE, dep_map.at(op->input(0)));
+        ASSERT_EQ(DT::DEV_VALUE | DT::VALUE_ALLOW_EMPTY, dep_map.at(op->input(0)));
         ASSERT_EQ(DT::HOST_VALUE, dep_map.at(op->input(1)));
     }
 
@@ -318,6 +319,39 @@ TEST(TestTensorManip, ReshapeInferShapeForDynamicInput) {
     run({23, 12, 5});
 }
 
+TEST(TestTensorManip, ReshapeEmptyShape) {
+    HostTensorGenerator<> gen;
+    constexpr size_t x_length = 233;
+    auto host_x = gen({x_length}),
+         host_v = gen({2, 3, 3, 3});
+    for (size_t i = 0; i < x_length; ++ i) {
+        host_x->ptr<float>()[i] = 1.f;
+    }
+    constexpr auto INVALID_AXIS = opr::Reshape::Param::INVALID_AXIS;
+    for (auto unspec_axis: {INVALID_AXIS, 0, 1, 3}) {
+        auto graph = ComputingGraph::make();
+        graph->options().graph_opt_level = 0;
+        TensorShape tshape{2, 3, 3, 3};
+        auto zero_axis = unspec_axis;
+        if (unspec_axis == INVALID_AXIS) {
+            tshape[zero_axis = 2] = 0;
+        }
+        using CondTakeMode = opr::CondTake::Param::Mode;
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+             x_empty = opr::CondTake::make(x, x, {CondTakeMode::EQ, 0.f})[0],
+             v = opr::Host2DeviceCopy::make(*graph, host_v),
+             x_reshape = opr::Reshape::make(x_empty, tshape, {unspec_axis}),
+             y = opr::Concat::make({x_reshape, v}, zero_axis);
+        HostTensorND host_empty, host_y;
+        auto func = graph->compile({
+            make_callback_copy(x_reshape, host_empty),
+            make_callback_copy(y, host_y)});
+        func->execute().wait();
+        ASSERT_TRUE(host_empty.layout().is_empty());
+        MGB_ASSERT_TENSOR_EQ(*host_v, host_y);
+    }
+}
+
 TEST(TestTensorManip, ReshapeWithNegativeUnspec) {
     HostTensorGenerator<> gen;
     auto host_x = gen({4, 8});
@@ -365,6 +399,26 @@ TEST(TestTensorManip, Broadcast) {
     }
 }
 
+TEST(TestTensorManip, BroadcastEmptyShape) {
+    HostTensorGenerator<> gen;
+    for (auto&& arg:
+        {std::make_pair(TensorShape{1}, TensorShape{0}),
+         {{1, 2, 3}, {0, 2, 3}},
+         {{2, 3}, {1, 0, 2, 3}},
+         {{1, 0, 2, 3}, {4, 0, 2, 3}},
+         {{0, 1, 2, 3}, {3, 0, 4, 2, 3}}}) {
+        auto host_x = gen(arg.first);
+        auto graph = ComputingGraph::make();
+        graph->options().graph_opt_level = 0;
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+             y = opr::Broadcast::make(x, arg.second);
+        HostTensorND host_y;
+        auto func = graph->compile({make_callback_copy(y, host_y)});
+        func->execute();
+        ASSERT_TRUE(host_y.shape().eq_shape(arg.second));
+    }
+}
+
 TEST(TestTensorManip, Dimshuffle) {
     HostTensorGenerator<> gen;
     constexpr size_t S0 = 8, S1 = 3;
@@ -393,6 +447,34 @@ TEST(TestTensorManip, Dimshuffle) {
                 ssprintf("failed at (%zd, %zd): x=%g prod=%g gx=%g",
                         i, j, x, prod, gx);
         }
+}
+
+TEST(TestTensorManip, DimshuffleEmptyShape) {
+    HostTensorGenerator<> gen;
+    for (auto&& arg:
+        {std::make_pair(
+            TensorShape{3, 0},
+            std::vector<int>{1, -1, 0, -1}),
+         {{3, 1, 0, 4}, {-1, 3, -1, 0, 2}},
+         {{2, 0, 3, 0}, {1, 0, 2, 3}}}) {
+        auto host_x = gen(arg.first);
+        auto graph = ComputingGraph::make();
+        graph->options().graph_opt_level = 0;
+        auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+             y = opr::Dimshuffle::make(x, arg.second);
+        HostTensorND host_y;
+        auto func = graph->compile({make_callback_copy(y, host_y)});
+        func->execute();
+        auto&& y_shape = host_y.shape();
+        for(size_t idx = 0; idx < arg.second.size(); ++ idx) {
+            auto elem = arg.second[idx];
+            if (elem == -1) {
+                ASSERT_EQ(y_shape[idx], 1u);
+            } else {
+                ASSERT_EQ(arg.first[elem], y_shape[idx]);
+            }
+        }
+    }
 }
 
 TEST(TestTensorManip, DimshuffleCombined) {
@@ -591,6 +673,32 @@ TEST(TestTensorManip, SubtensorNegativeAxis) {
 
         for (size_t i = 0, it = oshp.total_nr_elems(); i < it; ++ i) {
             optr[i] = iptr[i * stride + 2];
+        }
+    };
+
+    Checker checker(make_graph, fwd);
+    checker.
+        run({TensorShape{5}}).
+        run({TensorShape{2, 3}}).
+        run({TensorShape{2, 3, 4}}).
+        run({TensorShape{2, 3, 4, 5}});
+}
+
+TEST(TestTensorManip, SubtensorWithEmptyIndexDesc) {
+    using Checker = AutoOprChecker<1, 1>;
+
+    auto make_graph = [&](const Checker::SymInpArray &inputs) ->
+            Checker::SymOutArray {
+        auto x = inputs[0];
+        return {opr::Subtensor::make(x, {})};
+    };
+
+    auto fwd = [](Checker::NumOutArray &dest, Checker::NumInpArray inp) {
+        auto iptr = inp[0]->ptr<float>();
+        auto oshp = inp[0]->shape();
+        auto optr = dest[0].resize(oshp).ptr<float>();
+        for (size_t i = 0, it = oshp.total_nr_elems(); i < it; ++i) {
+            optr[i] = iptr[i];
         }
     };
 
@@ -1081,6 +1189,43 @@ TEST(TestTensorManip, SetSubtensor) {
         run(mkshp({18, 5, 2, 3}), opt);
 }
 
+TEST(TestTensorManip, SetSubtensorCheckByShapeInfer) {
+    HostTensorGenerator<> gen;
+    HostTensorGenerator<dtype::Int32> gen_int;
+    auto host_x = gen({12}), host_sub = gen({1}), host_idx = gen_int({1});
+    host_idx->ptr<int>()[0] = 13;
+    auto graph = ComputingGraph::make();
+    using Ad = opr::Subtensor::AxisIndexer;
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         sub = opr::Host2DeviceCopy::make(*graph, host_sub);
+    auto idx1 = Ad::make_index(0,
+                               opr::ImmutableTensor::make(*graph, *host_idx)),
+         idx2 = Ad::make_index(0, opr::Host2DeviceCopy::make(*graph, host_idx));
+
+    MGB_MARK_USED_VAR(x);
+    MGB_MARK_USED_VAR(sub);
+    MGB_MARK_USED_VAR(idx1);
+    MGB_MARK_USED_VAR(idx2);
+    ASSERT_THROW(opr::SetSubtensor::make(x, sub, {idx1}), MegBrainError);
+    ASSERT_THROW(opr::SetSubtensor::make(x, sub, {idx2}), MegBrainError);
+}
+
+TEST(TestTensorManip, SetSubtensorShapeInfer) {
+    HostTensorGenerator<> gen;
+    HostTensorGenerator<dtype::Int32> gen_int;
+    auto host_x = gen({12}), host_sub = gen({1}), host_idx = gen_int({1});
+    host_idx->ptr<int>()[0] = 13;
+    auto graph = ComputingGraph::make();
+    auto&& mgr = graph->static_infer_manager();
+    using Ad = opr::Subtensor::AxisIndexer;
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         sub = opr::Host2DeviceCopy::make(*graph, host_sub),
+         index = opr::Host2DeviceCopy::make_no_value_infer(*graph, host_idx);
+    auto rt_static_idx = Ad::make_index(0, index * 2);
+    auto y = opr::SetSubtensor::make(x, sub, {rt_static_idx});
+    ASSERT_TRUE(mgr.infer_shape_fallible(y.node()));
+}
+
 TEST(TestTensorManip, SetSubtensorDynIdx) {
     HostTensorGenerator<> gen;
     auto host_x = gen({12}), host_sub = gen({1}),
@@ -1104,6 +1249,24 @@ TEST(TestTensorManip, SetSubtensorDynIdx) {
 
     host_x->ptr<float>()[3] = host_sub->ptr<float>()[0];
     MGB_ASSERT_TENSOR_EQ(*host_x, host_y);
+}
+
+TEST(TestTensorManip, SetSubtensorWithEmptyIndexDesc) {
+    HostTensorGenerator<> gen;
+    auto host_x = gen({12}), host_y = gen({12});
+
+    auto graph = ComputingGraph::make();
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::Host2DeviceCopy::make(*graph, host_y),
+         z = opr::SetSubtensor::make(x, y, {});
+
+    ASSERT_TRUE(cg::is_static_var_storage(z.node()));
+    HostTensorND host_z;
+
+    auto func = graph->compile({make_callback_copy(z, host_z)});
+    func->execute();
+
+    MGB_ASSERT_TENSOR_EQ(*host_y, host_z);
 }
 
 TEST(TestTensorManip, IncrSubtensor) {
@@ -1898,15 +2061,15 @@ void test_param_pack_concat(const TensorShapeArray &shapes, DType type){
         srcs.push_back(nd);
     }
 
-    auto host_table_gen = megdnn::ParamPackSplit::gen_table(shapes,
+    auto host_offsets_gen = megdnn::ParamPackConcat::gen_offsets(shapes,
             cn.get_mem_addr_alignment(), 4);
-    ASSERT_EQ(host_table_gen.size(), size * 2);
-    auto host_table = std::make_shared<HostTensorND>();
-    host_table->comp_node(cn).dtype(dtype::Int32{}).resize({size * 2});
-    memcpy(host_table->raw_ptr(), host_table_gen.data(), size * 8);
-    auto table = opr::Host2DeviceCopy::make(*graph, host_table);
+    ASSERT_EQ(host_offsets_gen.back(), size);
+    auto host_offsets = std::make_shared<HostTensorND>();
+    host_offsets->comp_node(cn).dtype(dtype::Int32{}).resize({srcs.size() * 2});
+    memcpy(host_offsets->raw_ptr(), host_offsets_gen.data(), srcs.size() * 8);
+    auto offsets = opr::Host2DeviceCopy::make(*graph, host_offsets);
 
-    auto z = opr::ParamPackConcat::make(srcs, table);
+    auto z = opr::ParamPackConcat::make(srcs, offsets, host_offsets_gen);
     HostTensorND host_z;
 
     auto func = graph->compile({make_callback_copy(z, host_z)});
@@ -1944,17 +2107,16 @@ void test_param_pack_split(const TensorShapeArray& shapes) {
 
     auto make_graph = [&](const typename Checker::SymInpArray& inputs) ->
             typename Checker::SymOutArray {
-        auto table_val = megdnn::ParamPackSplit::gen_table(
+        auto offsets_val = megdnn::ParamPackConcat::gen_offsets(
                 shapes, cn.get_mem_addr_alignment(), 4);
-        HostTensorND table;
-        std::copy_n(table_val.data(), table_val.size(),
-                    table.dtype(dtype::Int32{})
+        HostTensorND offsets;
+        std::copy_n(offsets_val.data(), offsets_val.size(),
+                    offsets.dtype(dtype::Int32{})
                             .comp_node(cn)
-                            .resize({table_val.size()})
+                            .resize({offsets_val.size()})
                             .ptr<dt_int32>());
-        auto sym_table = opr::SharedDeviceTensor::make(
-                *inputs[0].node()->owner_graph(), table);
-        auto out = opr::ParamPackSplit::make(inputs[0], sym_table, shapes);
+        auto out = opr::ParamPackSplit::make(inputs[0], offsets_val,
+                                             shapes);
         mgb_assert(out.size() == nr_out);
         typename Checker::SymOutArray ret;
         for (size_t i = 0; i < nr_out; ++i) {

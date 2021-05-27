@@ -2,48 +2,66 @@
  * \file src/core/impl/utils/debug.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
+#include <cerrno>
+#include <cmath>
 #include "megbrain/utils/debug.h"
 #include "megdnn/tensor_iter.h"
-#include <cmath>
-#include <cerrno>
 
 using namespace mgb;
 using namespace debug;
 
-
 #if MGB_ENABLE_DEBUG_UTIL
 
-#include "megbrain/utils/metahelper.h"
 #include "megbrain/common.h"
+#include "megbrain/utils/metahelper.h"
 
-#include "megbrain/utils/thin/function.h"
-#include <regex>
-#include <cstring>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <regex>
+#include "megbrain/utils/thin/function.h"
 
 #if MGB_CUDA
 #include <cuda.h>
 #include <cuda_runtime.h>
 #endif
 
+#ifndef WIN32
+#include <pthread.h>
+#include <unistd.h>
+#endif
+
 #include <signal.h>
 #include <sys/types.h>
-#include <unistd.h>
-#include <pthread.h>
 
 #ifdef __ANDROID__
+#include <dlfcn.h>
 #include <unwind.h>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #else
+#ifndef WIN32
 #include <execinfo.h>
+#endif
+#endif
+
+#if defined(WIN32)
+#include <process.h>
+#include <windows.h>
+#include <iostream>
+#include <sstream>
+#include "dbghelp.h"
+#pragma comment(lib, "dbghelp.lib")
 #endif
 
 #ifdef __ANDROID__
@@ -54,23 +72,23 @@ struct AndroidBacktraceState {
     void** end;
 };
 
-static _Unwind_Reason_Code android_unwind_callback(struct _Unwind_Context* context,
-                                           void* arg) {
+static _Unwind_Reason_Code android_unwind_callback(
+        struct _Unwind_Context* context, void* arg) {
     AndroidBacktraceState* state = static_cast<AndroidBacktraceState*>(arg);
-    uintptr_t current_pc = _Unwind_GetIP(context);
-    if(current_pc == nullptr)
+    void* current_pc = reinterpret_cast<void*>(_Unwind_GetIP(context));
+    if (current_pc == nullptr)
         return _URC_NO_REASON;
 
     if (state->current == state->end) {
-            return _URC_END_OF_STACK;
+        return _URC_END_OF_STACK;
     } else {
-            *state->current++ = reinterpret_cast<void*>(current_pc);
+        *state->current++ = current_pc;
     }
 
     return _URC_NO_REASON;
 }
 
-size_t backtrace(void** buffer, size_t max) {
+size_t android_backtrace(void** buffer, size_t max) {
     AndroidBacktraceState state = {buffer, buffer + max};
     _Unwind_Backtrace(android_unwind_callback, &state);
     return state.current - buffer;
@@ -89,43 +107,20 @@ struct MemmapEntry {
     uintptr_t low, high;
     std::string file;
 
-    MemmapEntry(uint64_t low_, uint64_t high_, const char *file_):
-        low(low_), high(high_), file(file_)
-    {}
+    MemmapEntry(uint64_t low_, uint64_t high_, const char* file_)
+            : low(low_), high(high_), file(file_) {}
 };
 
-void get_mem_map(int pid, thin_function<void(
-            uintptr_t, uintptr_t, const char*, const char*)> callback) {
-    char fpath[64];
-    if (pid)
-        sprintf(fpath, "/proc/%d/maps", pid);
-    else
-        strcpy(fpath, "/proc/self/maps");
-    FILE *fin = fopen(fpath, "r");
-    mgb_assert(fin, "failed to open %s", fpath);
-    char linebuf[512];
-    while (fgets(linebuf, sizeof(linebuf), fin)) {
-        uintptr_t begin, end;
-        char perm[10], offset[20], dev[10], inode[20], path_mem[256], *path;
-        int nr = sscanf(linebuf, "%zx-%zx %s %s %s %s %s",
-                &begin, &end, perm, offset, dev, inode, path_mem);
-        if (nr == 6)
-            path = nullptr;
-        else {
-            mgb_assert(nr == 7, "failed to parse map line: %s", linebuf);
-            path = path_mem;
-        }
-        callback(begin, end, perm, path);
-    }
-    fclose(fin);
-}
-
+#ifndef WIN32
+// FIXME: imp SigHandlerInit backtrace for windows
 class SigHandlerInit {
     static void death_handler(int signum) {
-        char msg0[] = "megbrain is about to die abruptly; you can set "
-            "MGB_WAIT_TERMINATE and rerun to wait for gdb attach";
+        char msg0[] =
+                "megbrain is about to die abruptly; you can set "
+                "MGB_WAIT_TERMINATE and rerun to wait for gdb attach";
         if (MGB_GETENV("MGB_WAIT_TERMINATE")) {
-            fprintf(stderr, "megbrain is about to die abruptly; you can gdb "
+            fprintf(stderr,
+                    "megbrain is about to die abruptly; you can gdb "
                     "me at %d; wait for pressing enter\n",
                     static_cast<int>(getpid()));
             getchar();
@@ -133,9 +128,8 @@ class SigHandlerInit {
         if (signum == -1) {
             mgb_log_error("%s: std::terminate() called", msg0);
         } else {
-            mgb_log_error("%s: caught deadly signal %d(%s)",
-                    msg0,
-                    signum, strsignal(signum));
+            mgb_log_error("%s: caught deadly signal %d(%s)", msg0, signum,
+                          strsignal(signum));
         }
         std::string bp;
         debug::backtrace(2).fmt_to_str(bp);
@@ -143,15 +137,16 @@ class SigHandlerInit {
         exit(EXIT_FAILURE);
     }
 
-    public:
-        static void init_for_segv() {
-            struct sigaction action;
-            memset(&action, 0, sizeof(action));
-            action.sa_handler = &death_handler;
-            sigaction(SIGSEGV, &action, nullptr);
-            std::set_terminate([](){death_handler(-1);});
-        }
+public:
+    static void init_for_segv() {
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = &death_handler;
+        sigaction(SIGSEGV, &action, nullptr);
+        std::set_terminate([]() { death_handler(-1); });
+    }
 };
+#endif
 
 #if MGB_CUDA
 class CudaCheckOnFork {
@@ -164,7 +159,8 @@ class CudaCheckOnFork {
         if (flag() && !ScopedForkWarningSupress::supress()) {
             CUcontext ctx;
             if (cuCtxGetCurrent(&ctx) != CUDA_ERROR_NOT_INITIALIZED) {
-                mgb_log_debug("It is dangerous to call fork() after cuda "
+                mgb_log_debug(
+                        "It is dangerous to call fork() after cuda "
                         "context has been initialized; please ensure no cuda "
                         "methods is invoked in the child process. You can set "
                         "MGB_THROW_ON_FORK to find out where the fork() is "
@@ -177,20 +173,19 @@ class CudaCheckOnFork {
         }
     }
 
-    public:
-        static void set_flag(int f) {
-            flag() = f;
-        }
+public:
+    static void set_flag(int f) { flag() = f; }
 
-        static void init() {
-            int err = pthread_atfork(&CudaCheckOnFork::atfork_prepare,
-                    nullptr, nullptr);
-            if (err) {
-                mgb_throw(SystemError,
-                        "failed to setup atfork handler: %s",
-                        strerror(err));
-            }
+    static void init() {
+#if !defined(WIN32)
+        int err = pthread_atfork(&CudaCheckOnFork::atfork_prepare, nullptr,
+                                 nullptr);
+        if (err) {
+            mgb_throw(SystemError, "failed to setup atfork handler: %s",
+                      strerror(err));
         }
+#endif
+    }
 };
 #endif
 
@@ -198,7 +193,9 @@ class InitCaller {
     static InitCaller inst;
 
     InitCaller() {
+#ifndef WIN32
         SigHandlerInit::init_for_segv();
+#endif
 #if MGB_CUDA
         CudaCheckOnFork::init();
 #endif
@@ -206,7 +203,7 @@ class InitCaller {
 };
 InitCaller InitCaller::inst;
 
-} // anonymous namespace
+}  // anonymous namespace
 
 void (*ForkAfterCudaError::throw_)() = throw_fork_cuda_exc;
 
@@ -214,80 +211,105 @@ std::atomic_size_t ScopedForkWarningSupress::sm_depth{0};
 
 BacktraceResult mgb::debug::backtrace(int nr_exclude) {
     static bool thread_local recursive_call = false;
+    constexpr size_t MAX_DEPTH = 12;
+    void* stack_mem[MAX_DEPTH];
     if (recursive_call) {
         fprintf(stderr, "recursive call to backtrace()!\n");
         return {};
     }
     recursive_call = true;
-
-    constexpr size_t MAX_DEPTH = 6;
-    void *stack_mem[MAX_DEPTH];
-    int depth = ::backtrace(stack_mem, MAX_DEPTH);
-    auto stack = stack_mem;
-    if (depth > nr_exclude) {
-        depth -= nr_exclude;
-        stack += nr_exclude;
-    }
-
-    static std::vector<MemmapEntry> memmap;
-    if (memmap.empty()) {
-        static std::mutex mtx;
-        MGB_LOCK_GUARD(mtx);
-        if (memmap.empty()) {
-            get_mem_map(0, [&](uintptr_t lo, uintptr_t hi,
-                        const char * /*perm*/, const char *fname){
-                    if (fname && strlen(fname))
-                    memmap.emplace_back(lo, hi, fname);
-                    });
-        }
-    }
     BacktraceResult result;
 
-    for (int i = 0; i < depth; ++ i) {
-        const char* fname = nullptr;
-        auto addr = reinterpret_cast<uintptr_t>(stack[i]);
-        for (auto &&j: memmap)
-            if (j.low <= addr && j.high >= addr) {
-                // theoretically we should examine file content to find whether
-                // it is a shared library; but who would name an executable with
-                // .so ?
-                if (j.file.find(".so") != std::string::npos)
-                    addr -= j.low;
-
-                fname = j.file.c_str();
-                break;
-            }
-        result.stack.emplace_back(fname, addr);
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(__ANDROID__)
+    int i = 0;
+    int depth = ::backtrace(stack_mem, MAX_DEPTH);
+    char** strs = backtrace_symbols(stack_mem, depth);
+    if (depth > nr_exclude)
+        i = nr_exclude;
+    for (; i < depth; ++i) {
+        auto frame = std::string{strs[i]};
+        result.stack.emplace_back(frame);
     }
+    free(strs);
 
     recursive_call = false;
     return result;
+#elif defined(WIN32)
+    constexpr size_t MAX_NAME_LEN = 256;
+    WORD i = 0;
+    SYMBOL_INFO* pSymbol;
+    HANDLE p = GetCurrentProcess();
+    SymInitialize(p, NULL, TRUE);
+    if (!p) {
+        recursive_call = false;
+        return {};
+    }
+    pSymbol = (SYMBOL_INFO*)calloc(
+            sizeof(SYMBOL_INFO) + MAX_NAME_LEN * sizeof(char), 1);
+    WORD depth = CaptureStackBackTrace(0, MAX_DEPTH, stack_mem, NULL);
+    if (depth > nr_exclude)
+        i = nr_exclude;
+    for (; i < depth; ++i) {
+        std::ostringstream frame_info;
+        DWORD64 address = (DWORD64)(stack_mem[i]);
+        pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        pSymbol->MaxNameLen = MAX_NAME_LEN;
+
+        DWORD displacementLine = 0;
+        IMAGEHLP_LINE64 line;
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+
+        if (SymFromAddr(p, address, 0, pSymbol) &&
+            SymGetLineFromAddr64(p, address, &displacementLine, &line)) {
+            frame_info << i << " " << line.FileName << ":" << line.LineNumber
+                       << " " << pSymbol->Name << std::endl;
+        } else {
+            frame_info << i << " "
+                       << "null" << std::endl;
+        }
+        auto frame = std::string{frame_info.str().c_str()};
+        result.stack.emplace_back(frame);
+    }
+    free(pSymbol);
+
+    recursive_call = false;
+    return result;
+#elif defined(__ANDROID__)
+    size_t idx = 0;
+    size_t depth = android_backtrace(stack_mem, MAX_DEPTH);
+    if (depth > static_cast<size_t>(nr_exclude))
+        idx = nr_exclude;
+    for (; idx < depth; ++idx) {
+        std::ostringstream frame_info;
+        const void* addr = stack_mem[idx];
+        const char* symbol = "";
+
+        Dl_info info;
+        if (dladdr(addr, &info) && info.dli_sname) {
+            symbol = info.dli_sname;
+        }
+
+        frame_info << "  #" << std::setw(2) << idx << ": " << addr << "  "
+                   << symbol;
+        auto frame = std::string{frame_info.str().c_str()};
+        result.stack.emplace_back(frame);
+    }
+    recursive_call = false;
+    return result;
+#else
+    recursive_call = false;
+    return {};
+#endif
 }
 
-void BacktraceResult::fmt_to_str(std::string &dst) {
-    char addr[128];
-    bool first = true;
-    const char* prev_fname = nullptr;
-    dst.append("bt:");
-    for (auto &&i: stack) {
-        sprintf(addr, "%zx", i.second);
-        if (i.first != prev_fname || first) {
-            if (!first)
-                dst.append("}");
-            if (i.first)
-                dst.append(i.first);
-            else
-                dst.append("unknown");
-            prev_fname = i.first;
-            first = false;
-            dst.append("{");
-            dst.append(addr);
-        } else {
-            dst.append(",");
-            dst.append(addr);
+void BacktraceResult::fmt_to_str(std::string& dst) {
+    if (stack.size() > 0) {
+        dst.append("\nbacktrace:\n");
+        for (auto&& i : stack) {
+            dst.append(i);
+            dst.append("\n");
         }
     }
-    dst.append("}");
 }
 
 void debug::set_fork_cuda_warning_flag(int flag) {
@@ -296,85 +318,96 @@ void debug::set_fork_cuda_warning_flag(int flag) {
 #endif
 }
 
-#endif // MGB_ENABLE_DEBUG_UTIL
+#endif  // MGB_ENABLE_DEBUG_UTIL
 
 namespace {
 
-    bool good_float(float val) {
-        return std::isfinite(val);
-    }
+bool good_float(float val) {
+    return std::isfinite(val);
+}
 
-    bool good_float(int) {
-        return true;
-    }
+bool good_float(int) {
+    return true;
+}
 
 #if MGB_ENABLE_LOGGING
-    // if not in MGB_ENABLE_LOGGING, num2str would become defined but not used
-    template<typename T>
-    std::string num2str(T val) {
-        return std::to_string(val);
-    }
+// if not in MGB_ENABLE_LOGGING, num2str would become defined but not used
+template <typename T>
+std::string num2str(T val) {
+    return std::to_string(val);
+}
 
-    std::string num2str(float val) {
-        union V {
-            uint32_t i;
-            float f;
-        };
-        auto ret = std::to_string(val);
-        if (!good_float(val)) {
-            V v;
-            v.f = val;
-            ret.append(" (0x");
-            ret.append(ssprintf("%x", v.i));
-            ret.append(")");
-        }
-        return ret;
+std::string num2str(float val) {
+    union V {
+        uint32_t i;
+        float f;
+    };
+    auto ret = std::to_string(val);
+    if (!good_float(val)) {
+        V v;
+        v.f = val;
+        ret.append(" (0x");
+        ret.append(ssprintf("%x", v.i));
+        ret.append(")");
     }
+    return ret;
+}
 #endif
+template <typename dnn_ctype>
+struct RealCtype {
+    using ctype = dnn_ctype;
+    static dnn_ctype trans(dnn_ctype val) { return val; }
+};
+template <>
+struct RealCtype<dt_qint8> {
+    using ctype = int;
+    static int trans(dt_qint8 val) { return val.as_int8(); }
+};
 
-    template<typename ctype>
-    Maybe<std::string> do_compare_tensor_value(
-        const char *expr0, const char *expr1,
-        const HostTensorND &v0, const HostTensorND &v1, float maxerr) {
-
-        auto it0 = megdnn::tensor_iter<ctype>(v0.as_megdnn()).begin(),
-             it1 = megdnn::tensor_iter<ctype>(v1.as_megdnn()).begin();
-        for (size_t i = 0, it = v0.shape().total_nr_elems(); i < it; ++ i) {
-            ctype iv0 = *it0, iv1 = *it1;
-            double err = std::abs(iv0 - iv1) / std::max<double>(
-                    1, std::min(std::abs(static_cast<double>(iv0)),
-                        std::abs((static_cast<double>(iv1)))));
-            if (!good_float(iv0) || !good_float(iv1) || err >= maxerr) {
-                TensorShape idx_shp;
-                idx_shp.ndim = v0.shape().ndim;
-                std::copy(it0.idx(), it0.idx() + idx_shp.ndim, idx_shp.shape);
-                return mgb_ssprintf_log(
-                        "Unequal value\n"
-                        "Value of: %s\n"
-                        "  Actual: %s\n"
-                        "Expected: %s\n"
-                        "Which is: %s\n"
-                        "At index: %s/%s\n"
-                        "   error: %.6g",
-                        expr1, num2str(iv1).c_str(),
-                        expr0, num2str(iv0).c_str(),
-                        idx_shp.to_string().c_str(),
-                        v0.shape().to_string().c_str(),
-                        err);
-            }
-
-            ++ it0;
-            ++ it1;
+template <typename ctype>
+Maybe<std::string> do_compare_tensor_value(const char* expr0, const char* expr1,
+                                           const HostTensorND& v0,
+                                           const HostTensorND& v1,
+                                           float maxerr) {
+    auto it0 = megdnn::tensor_iter<ctype>(v0.as_megdnn()).begin(),
+         it1 = megdnn::tensor_iter<ctype>(v1.as_megdnn()).begin();
+    for (size_t i = 0, it = v0.shape().total_nr_elems(); i < it; ++i) {
+        typename RealCtype<ctype>::ctype iv0 = RealCtype<ctype>::trans(*it0),
+                                         iv1 = RealCtype<ctype>::trans(*it1);
+        double err = std::abs(iv0 - iv1) /
+                     std::max<double>(
+                             1, std::min(std::abs(static_cast<double>(iv0)),
+                                         std::abs((static_cast<double>(iv1)))));
+        if (!good_float(iv0) || !good_float(iv1) || err >= maxerr) {
+            TensorShape idx_shp;
+            idx_shp.ndim = v0.shape().ndim;
+            std::copy(it0.idx(), it0.idx() + idx_shp.ndim, idx_shp.shape);
+            return mgb_ssprintf_log(
+                    "Unequal value\n"
+                    "Value of: %s\n"
+                    "  Actual: %s\n"
+                    "Expected: %s\n"
+                    "Which is: %s\n"
+                    "At index: %s/%s\n"
+                    "   error: %.6g",
+                    expr1, num2str(iv1).c_str(), expr0, num2str(iv0).c_str(),
+                    idx_shp.to_string().c_str(), v0.shape().to_string().c_str(),
+                    err);
         }
-        return None;
+
+        ++it0;
+        ++it1;
     }
+    return None;
+}
 
-} // anonymous namespace
+}  // anonymous namespace
 
-Maybe<std::string> debug::compare_tensor_value(
-        const HostTensorND &v0, const char *expr0,
-        const HostTensorND &v1, const char *expr1,
-        float maxerr) {
+Maybe<std::string> debug::compare_tensor_value(const HostTensorND& v0,
+                                               const char* expr0,
+                                               const HostTensorND& v1,
+                                               const char* expr1,
+                                               float maxerr) {
     if (!v0.shape().eq_shape(v1.shape())) {
         return mgb_ssprintf_log(
                 "Shape mismatch\n"
@@ -382,8 +415,8 @@ Maybe<std::string> debug::compare_tensor_value(
                 "  Actual: %s\n"
                 "Expected: %s\n"
                 "Which is: %s",
-                expr1, v1.shape().to_string().c_str(),
-                expr0, v0.shape().to_string().c_str());
+                expr1, v1.shape().to_string().c_str(), expr0,
+                v0.shape().to_string().c_str());
     }
     auto dtype = v0.layout().dtype;
     if (dtype != v1.layout().dtype) {
@@ -393,22 +426,26 @@ Maybe<std::string> debug::compare_tensor_value(
                 "  Actual: %s\n"
                 "Expected: %s\n"
                 "Which is: %s",
-                expr1, v1.layout().dtype.name(),
-                expr0, v0.layout().dtype.name());
+                expr1, v1.layout().dtype.name(), expr0,
+                v0.layout().dtype.name());
     }
 
-    switch(dtype.enumv()) {
-#define cb(_dt) case DTypeTrait<_dt>::enumv: \
+    switch (dtype.enumv()) {
+#define cb(_dt)                                                 \
+    case DTypeTrait<_dt>::enumv:                                \
         return do_compare_tensor_value<DTypeTrait<_dt>::ctype>( \
                 expr0, expr1, v0, v1, maxerr);
         MEGDNN_FOREACH_COMPUTING_DTYPE(cb)
+        cb(::megdnn::dtype::QuantizedS8);
+        cb(::megdnn::dtype::Bool);
 #undef cb
         default:
             mgb_throw(MegBrainError, "unhandled dtype: %s", dtype.name());
     }
 }
 
-std::string debug::dump_tensor(const HostTensorND& value, const std::string &name) {
+std::string debug::dump_tensor(const HostTensorND& value,
+                               const std::string& name) {
     struct Header {
         uint32_t name_len;
         uint32_t dtype;
@@ -418,7 +455,7 @@ std::string debug::dump_tensor(const HostTensorND& value, const std::string &nam
     };
     mgb_assert(value.layout().is_contiguous());
     auto value_bytes = value.layout().span().dist_byte();
-    std::string ret(name.size() +  value_bytes + sizeof(Header), '\0');
+    std::string ret(name.size() + value_bytes + sizeof(Header), '\0');
     auto header = reinterpret_cast<Header*>(&ret[0]);
     memset(header, 0, sizeof(Header));
     header->name_len = name.length();
@@ -439,8 +476,8 @@ void debug::write_to_file(const char* filename, const std::string& content,
                  strerror(errno));
     auto nr = fwrite(content.data(), 1, content.size(), fout);
     mgb_throw_if(nr != content.size(), SystemError,
-                 "failed to write to %s: num=%zu size=%zu %s", filename,
-                 nr, content.size() ,strerror(errno));
+                 "failed to write to %s: num=%zu size=%zu %s", filename, nr,
+                 content.size(), strerror(errno));
     auto err = fclose(fout);
     mgb_throw_if(err, SystemError, "failed to close %s: %s", filename,
                  strerror(errno));

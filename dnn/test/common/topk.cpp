@@ -2,7 +2,7 @@
  * \file dnn/test/common/topk.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -45,7 +45,7 @@ public:
             switch (tensor.layout.dtype.enumv()) {
                 CASE(Float32, float);
                 CASE(Int32, int);
-                MEGDNN_INC_FLOAT16(CASE(Float16, half_float::half));
+                DNN_INC_FLOAT16(CASE(Float16, half_float::half));
                 default:
                     megdnn_throw("bad dtype");
             }
@@ -169,6 +169,12 @@ void test::run_topk_test(Handle* handle) {
         run(5, 123, 3, mode);         // equiv to sort
         run(-5, 123, 3, mode);        // equiv to rev sort
         run(5, 3, 1231, mode, 2000);  // non contig
+
+//! opencl on armv7's CI does not support large batch.
+//! but P30 and MI9 are ok. fix it in the future.
+#if !defined(MEGDNN_ARMV7) && defined(MGB_CUDA)
+        run(3, 70000, 5, mode, 10);  // non contig
+#endif
     }
 
     // special case to check if tie-break is correct
@@ -187,7 +193,7 @@ namespace test {
 
 INST(dtype::Float32);
 INST(dtype::Int32);
-MEGDNN_INC_FLOAT16(INST(dtype::Float16));
+DNN_INC_FLOAT16(INST(dtype::Float16));
 #undef INST
 }
 }  // namespace megdnn

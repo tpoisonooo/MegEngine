@@ -36,13 +36,24 @@ pdef('Axis').add_fields('int32', 'axis', 0)
  add_enum(Doc('Format', 'convolution data/filter/output format; see '
               ':class:`RelayoutFormat` for more details'),
           'NCHW', 'NHWC', 'NHWCD4', 'NCHW4', 'NCHW8', 'NCHW32', 'NCHW88',
-          Doc('NCHW_WINOGRAD', 'NCHW layout with weights tranformed by winograd'), 
-          Doc('NCHW88_WINOGRAD', 'NCHW88 layout with weights tranformed by winograd'), 
+          'NCHW44','NCHW44_DOT',
+          Doc('NCHW_WINOGRAD', 'NCHW layout with weights tranformed by winograd'),
+          Doc('NCHW88_WINOGRAD', 'NCHW88 layout with weights tranformed by winograd'),
+          Doc('NCHW44_WINOGRAD', 'NCHW44 layout with weights tranformed by winograd'),
+          Doc('NCHW4_NCHW32', 'NCHW4_NCHW32 means input tensors are nchw4 layout, output tensor is nchw32 layout'), 
+          Doc('NCHW32_NCHW4', 'NCHW32_NCHW4 means input tensors are nchw32 layout, output tensor is nchw4 layout'), 
+          Doc('NCHW4_NCHW', 'NCHW4_NCHW means input tensors are nchw4 layout, output tensor is nchw layout'), 
+          Doc('NHWC_NCHW', 'NHWC_NCHW means input tensors are nhwc layout, '
+              'output tensor is nchw layout'),
+          Doc('NHWC_NCHW4_IC_SMALL', 'NHWC_NCHW4_IC_SMALL means input tensors are nhwc(c < 4) layout, '
+              'output tensor is nchw4 layout, padding c=4'),
+          Doc('NCHW_NCHW4_IC_SMALL', 'NCHW_NCHW4_IC_SMALL means input tensors are nchw(c < 4) layout, '
+              'output tensor is nchw4 layout, padding c=4'),
           Doc('CHWN4', 'CHWN4 is currently only used on Nvidia platform for fast implementation '
               'of convolution using CUDA/SASS. The channels are splitted to groups of 4 channels.'))
  )
 
-(pdef('Convolution', version=1).
+(pdef('Convolution', version=1, is_legacy=True).
  add_enum_alias('Mode', 'ConvolutionV0').
  add_fields(
      'uint32',
@@ -66,6 +77,39 @@ pdef('Axis').add_fields('int32', 'axis', 0)
                          'Only supported when input and output is Float16.'),
           name_field='compute_mode')
  )
+
+(pdef('Convolution', version=2).
+ add_enum_alias('Mode', 'ConvolutionV0').
+ add_fields(
+     'uint32',
+     Doc('pad_h', 'padding on one side on the first dimension'), 0,
+     Doc('pad_w', 'padding on one side on the second dimension'), 0,
+     Doc('stride_h', 'kernel stride on the first dimension'), 1,
+     Doc('stride_w', 'kernel stride on the second dimension'), 1,
+     Doc('dilate_h', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+     Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1
+ ).
+ add_enum_alias('Sparse', 'ConvolutionV0').
+ add_enum(Doc('Format', 'convolution data/filter/output format; see '
+              ':class:`RelayoutFormat` for more details'),
+          'NCHW', 'NHWC', 'NHWCD4', 'NCHW4', 'NCHW8', 'NCHW32', 'NCHW88',
+          'NCHW44','NCHW44_DOT',
+          Doc('NCHW4_NCHW32', 'NCHW4_NCHW32 means input tensors are nchw4 layout, output tensor is nchw32 layout'), 
+          Doc('NCHW32_NCHW4', 'NCHW32_NCHW4 means input tensors are nchw32 layout, output tensor is nchw4 layout'), 
+          Doc('NCHW4_NCHW', 'NCHW4_NCHW means input tensors are nchw4 layout, output tensor is nchw layout'), 
+          Doc('NHWC_NCHW', 'NHWC_NCHW means input tensors are nhwc layout, '
+              'output tensor is nchw layout'),
+          Doc('NHWC_NCHW4_IC_SMALL', 'NHWC_NCHW4_IC_SMALL means input tensors are nhwc(c < 4) layout, '
+              'output tensor is nchw4 layout, padding c=4'),
+          Doc('NCHW_NCHW4_IC_SMALL', 'NCHW_NCHW4_IC_SMALL means input tensors are nchw(c < 4) layout, '
+              'output tensor is nchw4 layout, padding c=4'),
+          Doc('CHWN4', 'CHWN4 is currently only used on Nvidia platform for fast implementation '
+              'of convolution using CUDA/SASS. The channels are splitted to groups of 4 channels.')).
+ add_enum_alias('ComputeMode', 'ConvolutionV1',name_field='compute_mode')
+ )
+
 
 (pdef('MaskPropagate').
  add_fields(
@@ -126,10 +170,10 @@ pdef('Axis').add_fields('int32', 'axis', 0)
          'on the second dimension'), 1,
      Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
          'on the second dimension'), 1).
- add_enum_alias('ComputeMode', 'Convolution', name_field='compute_mode')
+ add_enum_alias('ComputeMode', 'ConvolutionV1', name_field='compute_mode')
  )
 
-(pdef('ConvBias', 'active(conv(x, w) + bias)', version=3).
+(pdef('ConvBias', 'active(conv(x, w) + bias)', version=3, is_legacy=True).
  add_enum_alias('NonlineMode', 'ConvBiasV0').
  add_enum_alias('Mode', 'ConvolutionV0').
  add_enum_alias('Sparse', 'ConvolutionV0').
@@ -145,9 +189,26 @@ pdef('Axis').add_fields('int32', 'axis', 0)
      Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
          'on the second dimension'), 1,
      Doc('output_block_size', 'detail meaning \see winograd in conv bias'), 0).
- add_enum_alias('ComputeMode', 'Convolution', name_field='compute_mode')
+ add_enum_alias('ComputeMode', 'ConvolutionV1', name_field='compute_mode')
  )
 
+(pdef('ConvBias', 'active(conv(x, w) + bias)', version=4).
+ add_enum_alias('NonlineMode', 'ConvBiasV0').
+ add_enum_alias('Mode', 'ConvolutionV0').
+ add_enum_alias('Sparse', 'ConvolutionV0').
+ add_enum_alias('Format', 'Convolution').
+ add_fields(
+     'uint32',
+     Doc('pad_h', 'padding on one side on the first dimension'), 0,
+     Doc('pad_w', 'padding on one side on the second dimension'), 0,
+     Doc('stride_h', 'kernel stride on the first dimension'), 1,
+     Doc('stride_w', 'kernel stride on the second dimension'), 1,
+     Doc('dilate_h', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+     Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1).
+ add_enum_alias('ComputeMode', 'ConvolutionV1', name_field='compute_mode')
+ )
 (pdef('SeparableConv').
  add_enum_alias('Mode', 'ConvolutionV0').
  add_enum('BorderMode', 'BORDER_REPLICATE', 'BORDER_REFLECT',
@@ -161,7 +222,7 @@ pdef('Axis').add_fields('int32', 'axis', 0)
  add_fields('uint32', 'pad_h', 0, 'pad_w', 0, 'stride_h', 1, 'stride_w', 1,
             'window_h', 3, 'window_w', 3))
 
-(pdef('Pooling').
+(pdef('Pooling', version=0, is_legacy=True).
  add_enum(
      'Mode',
      Doc('MAX', 'maximum value inside pooling window'),
@@ -175,6 +236,23 @@ pdef('Axis').add_fields('int32', 'axis', 0)
  add_fields('uint32', 'pad_h', 0, 'pad_w', 0, 'stride_h', 2, 'stride_w', 2,
             'window_h', 2, 'window_w', 2).
  add_enum_alias('Format', 'ConvolutionV0')
+ )
+
+(pdef('Pooling', version=1).
+ add_enum_alias('Mode','PoolingV0').
+ add_fields('uint32', 'pad_h', 0, 'pad_w', 0, 'stride_h', 2, 'stride_w', 2,
+            'window_h', 2, 'window_w', 2).
+ add_enum_alias('Format', 'Convolution')
+ )
+
+(pdef('AdaptivePooling', version=0,is_legacy=True).
+ add_enum_alias('Mode', 'PoolingV0').
+ add_enum_alias('Format', 'ConvolutionV0')
+ )
+
+(pdef('AdaptivePooling', version=1).
+ add_enum_alias('Mode', 'PoolingV0').
+ add_enum_alias('Format', 'Convolution')
  )
 
 (pdef('LRN',
@@ -223,7 +301,7 @@ BORDER_MODES = [Doc('REPLICATE', 'aaaaaa|abcdefgh|hhhhhhh'),
                 Doc('CONSTANT', 'iiiiii|abcdefgh|iiiiiii'),
                 Doc('TRANSPARENT', ''),
                 Doc('ISOLATED', '')]
-(pdef('WarpPerspective', version=1).
+(pdef('WarpPerspective', version=1, is_legacy=True).
  add_enum('InterpolationMode', *INTERP_MODES,
           name_field='imode', default=1,
           member_alias=[(i, 'INTER_{}'.format(i)) for i in INTERP_MODES]
@@ -234,6 +312,13 @@ BORDER_MODES = [Doc('REPLICATE', 'aaaaaa|abcdefgh|hhhhhhh'),
           ).
  add_enum_alias('Format', 'ConvolutionV0').
  add_fields('float32', Doc('border_val', 'used for CONSTANT bmode'), '.0f'))
+
+(pdef('WarpPerspective', version=2).
+ add_enum_alias('InterpolationMode','WarpPerspectiveV1',name_field="imode").
+ add_enum_alias('BorderMode','WarpPerspectiveV1',name_field="bmode").
+ add_enum_alias('Format', 'Convolution').
+ add_fields('float32', Doc('border_val', 'used for CONSTANT bmode'), '.0f'))
+
 
 pdef('SpatialTfGridGenerator').add_enum('Mode', 'AFFINE')
 pdef('SpatialTfSampler').add_enum('Mode', 'BILINEAR')
@@ -312,7 +397,12 @@ pdef('Elemwise').add_enum(
     Doc('ERFCINV', 'unary: inverse function of erfc(x)'),
     Doc('H_SWISH', 'unary: x * clip(x + 3, 0, 6) / 6'),
     Doc('H_SWISH_GRAD', 'binary: x < -3 ? 0 : (x > 3 ? y : (2 * x + 3) / 6 * y)'),
-    Doc('FUSE_ADD_H_SWISH', 'binary: hswish(x+y)')
+    Doc('FUSE_ADD_H_SWISH', 'binary: hswish(x+y)'),
+
+    Doc('NOT', 'unary: !x'),
+    Doc('AND', 'binary: x && y'),
+    Doc('OR', 'binary: x || y'),
+    Doc('XOR', 'binary: x ^ y')
 )
 
 pdef('ElemwiseMultiType').add_enum(
@@ -399,6 +489,12 @@ pdef('ElemwiseMultiType').add_enum(
 
 pdef('PowC', 'power with constant exponent').add_fields('float32', 'exp', 0)
 
+(pdef('DctChannelSelect', '2d discrete cosine transform', version=0, is_legacy=True).add_enum_alias('Format', 'ConvolutionV0').
+ add_enum('FastImpl', 'NONE', 'FIX_32_MASK').add_fields('int32', 'dct_block_size', 8))
+
+(pdef('DctChannelSelect', '2d discrete cosine transform', version=1).add_enum_alias('Format', 'Convolution').
+ add_enum_alias('FastImpl', 'DctChannelSelectV0').add_fields('int32', 'dct_block_size', 8))
+
 (pdef('MatrixMul', version=0, is_legacy=True).
  add_fields('bool', 'transposeA', 'false', 'transposeB', 'false').
  add_enum('DataType',
@@ -432,15 +528,10 @@ pdef('PowC', 'power with constant exponent').add_fields('float32', 'exp', 0)
               'layout is (K/4, M/4, 4(k), 4(m)) x (K/4, N, 4(k))'),
           Doc('MK8', 'Split 8 from M and K, better for neon compute:'
               '(M/8, K/8, 8(k), 8(m)) x (K/8, N, 8(k)). if transposeA the '
-              'layout is (K/8, M/8, 8(k), 8(m)) x (K/8, N, 8(k))'))
- )
-
-(pdef('Winograd', 'winograd param used in convbias').
-  add_fields(
-      'uint32',
-      Doc('output_block_size', 'output block size, detail meaning see winograd '
-          'in convbias, equals to the meaning of m in F(m, r)'), 0).
-  add_enum_alias('Format', 'MatrixMul')
+              'layout is (K/8, M/8, 8(k), 8(m)) x (K/8, N, 8(k))'),
+          Doc('MK4_DOT', 'Split 4 from M and K, better for neon dotprod:'
+              'M/4, K/4, 4(m), 4(k)) x (K/4, N, 4(k)). if transposeA the '
+              'layout is (K/4, M/4, 4(m), 4(k)) x (K/4, N, 4(k))'))
  )
 
 (pdef('SVD').
@@ -676,27 +767,50 @@ pdef('UniformRNG').add_fields('uint64', 'seed', 0)
     name_field = 'mode'))
 
 (pdef('WarpAffine', version=0, is_legacy=True)
- .add_enum_alias('InterpolationMode', 'WarpPerspective', name_field='imode')
- .add_enum_alias('BorderMode', 'WarpPerspective', name_field='border_mode')
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_mode')
  .add_fields('float32', Doc('border_val', 'used for CONSTANT bmode'), '.0f'))
 
-(pdef('WarpAffine', version=1)
- .add_enum_alias('InterpolationMode', 'WarpPerspective', name_field='imode')
- .add_enum_alias('BorderMode', 'WarpPerspective', name_field='border_mode')
+(pdef('WarpAffine', version=1, is_legacy=True)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_mode')
  .add_fields('float32', Doc('border_val', 'used for CONSTANT bmode'), '.0f')
  .add_enum_alias('Format', 'ConvolutionV0', default=1))
 
+(pdef('WarpAffine', version=2)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_mode')
+ .add_fields('float32', Doc('border_val', 'used for CONSTANT bmode'), '.0f')
+ .add_enum_alias('Format', 'Convolution', default=1))
+
+
 (pdef('GaussianBlur')
- .add_enum_alias('BorderMode', 'WarpPerspective', name_field='border_mode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_mode')
  .add_fields('uint32', 'kernel_height', 0, 'kernel_width', 0)
  .add_fields('float32','sigma_x', '0.f', 'sigma_y', '0.f'))
 
 (pdef('Resize', version=0, is_legacy=True)
- .add_enum_alias('InterpolationMode', 'WarpPerspective', name_field='imode'))
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode'))
 
-(pdef('Resize', version=1)
- .add_enum_alias('InterpolationMode', 'WarpPerspective', name_field='imode')
+(pdef('Resize', version=1, is_legacy=True)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
  .add_enum_alias('Format', 'ConvolutionV0', default=1))
+
+(pdef('Resize', version=2)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('Format', 'Convolution', default=1))
+
+(pdef('Remap', version=0,is_legacy=True)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_type')
+ .add_enum_alias('Format', 'ConvolutionV0', default=1)
+ .add_fields('float32', 'scalar', '0.f'))
+
+(pdef('Remap', version=1)
+ .add_enum_alias('InterpolationMode', 'WarpPerspectiveV1', name_field='imode')
+ .add_enum_alias('BorderMode', 'WarpPerspectiveV1', name_field='border_type')
+ .add_enum_alias('Format', 'Convolution', default=1)
+ .add_fields('float32', 'scalar', '0.f'))
 
 (pdef('Convolution3D').
  add_enum('Mode', 'CROSS_CORRELATION', 'CONVOLUTION').
@@ -821,8 +935,9 @@ Relayout mode.
 Note: the axis column means the corresponding ``align_axis`` for image format
 when the ``I`` suffix is present.
 
+Note: NCHW_NCHW4_WEIGHT will auto pad oc and ic, you should remove oc in later opr by seting group and oc param with NCHW4_NCHW
 """
-(pdef('RelayoutFormat', 'Change the tensor layout format').
+(pdef('RelayoutFormat', 'Change the tensor layout format', version=0, is_legacy=True).
  add_enum(
      Doc('Mode', RELAYOUT_FORMAT_MODE_DOC),
      'NHWC_NHWCD4',
@@ -839,24 +954,41 @@ when the ``I`` suffix is present.
      'INTER_WEIGHT_CHAN',
      'INTER_WEIGHT_CHANI',
      'INTER_WEIGHT_DENSEI_DOT',
-     'INTER_WEIGHT_GROUPI_DOT', 
-     'NCHW4_CHWN4', 
+     'INTER_WEIGHT_GROUPI_DOT',
+     'NCHW4_CHWN4',
      'CHWN4_NCHW4',
      'NCHW_NCHW88_CONV_DENSE_WEIGHT',
      'NCHW_NCHW88_CONV_CHAN_WEIGHT',
      'NCHW_NCHW88_CONV_GROUP_WEIGHT',
      'NCHW_NCHW88',
-     'NCHW88_NCHW')
+     'NCHW88_NCHW',
+     'NCHW_NCHW4_IC_SMALL',
+     'NCHW_NCHW4_IC_SMALL_CONV_DENSE_WEIGHT',
+     'NCHW_NCHW4',
+     'NCHW4_NCHW',
+     'NCHW_NCHW4_WEIGHT',
+     )
  )
- 
 
-(pdef('SeparableFilter').
+(pdef('RelayoutFormat', 'Change the tensor layout format', version=1).
+    add_enum_alias('Mode', 'RelayoutFormatV0').
+    add_fields('uint32', 'oc', '0').
+    add_fields('uint32', 'group', '1')
+)
+
+(pdef('SeparableFilter', version=0, is_legacy=True).
  add_enum_alias('Format', 'ConvolutionV0').
- add_enum_alias('BorderMode', 'WarpPerspective').
+ add_enum_alias('BorderMode', 'WarpPerspectiveV1').
  add_fields('bool', 'is_symm_kernel', 'true').
  add_fields('uint32', 'ksize_h', 3, 'ksize_w', 3, 'anchor_h', 1, 'anchor_w', 1))
 
-(pdef('LocalShare', 'Local share convolution').
+(pdef('SeparableFilter', version=1).
+ add_enum_alias('Format', 'Convolution').
+ add_enum_alias('BorderMode', 'WarpPerspectiveV1').
+ add_fields('bool', 'is_symm_kernel', 'true').
+ add_fields('uint32', 'ksize_h', 3, 'ksize_w', 3, 'anchor_h', 1, 'anchor_w', 1))
+
+(pdef('LocalShare', 'Local share convolution',version=0, is_legacy=True).
  add_enum_alias('Mode', 'ConvolutionV0').
  add_fields(
      'uint32',
@@ -873,20 +1005,54 @@ when the ``I`` suffix is present.
  ).
  add_enum_alias('Sparse', 'ConvolutionV0').
  add_enum_alias('Format', 'ConvolutionV0').
- add_enum_alias('ComputeMode', 'Convolution')
+ add_enum_alias('ComputeMode', 'ConvolutionV1')
  )
 
-(pdef('ROIAlign').
+(pdef('LocalShare', 'Local share convolution', version=1).
+ add_enum_alias('Mode', 'ConvolutionV0').
+ add_fields(
+     'uint32',
+     Doc('pad_h', 'padding on one side on the first dimension'), 0,
+     Doc('pad_w', 'padding on one side on the second dimension'), 0,
+     Doc('stride_h', 'kernel stride on the first dimension'), 1,
+     Doc('stride_w', 'kernel stride on the second dimension'), 1,
+     Doc('dilate_h', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+     Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+     Doc('spatial_groups_h', 'spatial groups on the first dimension'), 1,
+     Doc('spatial_groups_w', 'spatial groups on the second dimension'), 1
+ ).
+ add_enum_alias('Sparse', 'ConvolutionV0').
+ add_enum_alias('Format', 'Convolution').
+ add_enum_alias('ComputeMode', 'ConvolutionV1')
+ )
+
+
+(pdef('ROIAlign',version=0,is_legacy=True).
  add_enum('Mode', 'MAX', 'AVERAGE', name_field='mode').
  add_enum_alias('Format', 'ConvolutionV0').
  add_fields('float32', 'spatial_scale', '1.0').
  add_fields('float32', 'offset', '0.0').
- add_fields('uint32', 
-            'pooled_height', '1', 
+ add_fields('uint32',
+            'pooled_height', '1',
             'pooled_width', '1',
-            'sample_height', '2', 
+            'sample_height', '2',
             'sample_width', '2')
  )
+
+(pdef('ROIAlign', version=1).
+ add_enum_alias('Mode', 'ROIAlignV0', name_field='mode').
+ add_enum_alias('Format', 'Convolution').
+ add_fields('float32', 'spatial_scale', '1.0').
+ add_fields('float32', 'offset', '0.0').
+ add_fields('uint32',
+            'pooled_height', '1',
+            'pooled_width', '1',
+            'sample_height', '2',
+            'sample_width', '2')
+ )
+
 (pdef('DeformablePSROIPooling').
  add_fields('bool', 'no_trans', 'true').
  add_fields('float32', 'spatial_scale', 1,
@@ -897,7 +1063,7 @@ when the ``I`` suffix is present.
     Doc('part_size', 'size of each deformable part'), 1,
     Doc('sample_per_part', 'sample count of each bbox'), 1))
 
-(pdef('BatchConvBias', 'Batch convolution (unshare weights on the batch dimension)').
+(pdef('BatchConvBias', 'Batch convolution (unshare weights on the batch dimension)',version=0,is_legacy=True).
  add_enum_alias('NonlineMode', 'ConvBiasV0').
  add_enum_alias('Mode', 'ConvolutionV0').
  add_fields(
@@ -913,7 +1079,33 @@ when the ``I`` suffix is present.
  ).
  add_enum_alias('Sparse', 'ConvolutionV0').
  add_enum_alias('Format', 'ConvolutionV0').
- add_enum_alias('ComputeMode', 'Convolution', name_field="compute_mode")
+ add_enum_alias('ComputeMode', 'ConvolutionV1', name_field="compute_mode")
  )
 
+(pdef('BatchConvBias', 'Batch convolution (unshare weights on the batch dimension)',version=1).
+ add_enum_alias('NonlineMode', 'ConvBiasV0').
+ add_enum_alias('Mode', 'ConvolutionV0').
+ add_fields(
+     'uint32',
+     Doc('pad_h', 'padding on one side on the first dimension'), 0,
+     Doc('pad_w', 'padding on one side on the second dimension'), 0,
+     Doc('stride_h', 'kernel stride on the first dimension'), 1,
+     Doc('stride_w', 'kernel stride on the second dimension'), 1,
+     Doc('dilate_h', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+     Doc('dilate_w', 'dilation (i.e. size of each zero-padded kernel block) '
+         'on the second dimension'), 1,
+ ).
+ add_enum_alias('Sparse', 'ConvolutionV0').
+ add_enum_alias('Format', 'Convolution').
+ add_enum_alias('ComputeMode', 'ConvolutionV1', name_field="compute_mode")
+ )
 
+(pdef('FakeQuant').
+ add_fields('int32','qmin','-2147483648').
+ add_fields('int32','qmax','2147483647')
+ )
+(pdef('TQT').
+ add_fields('int32', 'qmin', '-2147483648').
+ add_fields('int32', 'qmax', '2147483647')
+ )

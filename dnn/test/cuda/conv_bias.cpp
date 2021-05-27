@@ -2,12 +2,13 @@
  * \file dnn/test/cuda/conv_bias.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  */
+#include "megdnn/dtype.h"
 #include "test/cuda/fixture.h"
 
 #include "megdnn/opr_param_defs.h"
@@ -108,6 +109,32 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_F32) {
     }
 }
 
+TEST_F(CUDA, CONV_BIAS_FORWARD_BF16) {
+    using namespace conv_bias;
+    std::vector<TestArg> args = get_args();
+    Checker<ConvBiasForward> checker(handle_cuda());
+
+    checker.set_before_exec_callback(
+            AlgoChecker<ConvBiasForward>(ExecutionPolicyAlgoName{
+                    "CONVBIAS_BFLOAT16", {{"MATMUL", {}}}}));
+    NormalRNG default_rng;
+    for (auto&& arg : args) {
+        arg.param.compute_mode = param::Convolution::ComputeMode::FLOAT32;
+        checker.set_dtype(0, dtype::BFloat16())
+                .set_dtype(1, dtype::BFloat16())
+                .set_dtype(2, dtype::BFloat16())
+                .set_dtype(3, dtype::BFloat16())
+                .set_dtype(4, dtype::BFloat16())
+                .set_rng(0, &default_rng)
+                .set_rng(1, &default_rng)
+                .set_rng(2, &default_rng)
+                .set_epsilon(2e-2)
+                .set_param(arg.param)
+                .execs({arg.src, arg.filter, arg.bias, {}, {}});
+    }
+}
+
+
 TEST_F(CUDA, CONV_BIAS_FORWARD_QS8) {
     require_compute_capability(6, 1);
 
@@ -189,6 +216,282 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_QS8) {
     }
 }
 
+TEST_F(CUDA, CONV_BIAS_NCHW_QS8) {
+    //! not support NonlineMode::SIGMOID and NonlineMode::H_SWISH
+    require_compute_capability(6, 1);
+    Checker<ConvBiasForward> checker(handle_cuda());
+    UniformIntRNG int_rng{-128, 127};
+    using NonlineMode = ConvBias::Param::NonlineMode;
+
+    ConvBias::Param param;
+    param.format = ConvBias::Param::Format::NCHW;
+
+    checker.set_dtype(0, dtype::QuantizedS8(2.5f))
+            .set_dtype(1, dtype::QuantizedS8(2.5f))
+            .set_dtype(2, dtype::QuantizedS32(6.25f))
+            .set_dtype(3, dtype::QuantizedS8(0.25f))
+            .set_dtype(4, dtype::QuantizedS8(0.25f))
+            .set_rng(0, &int_rng)
+            .set_rng(1, &int_rng)
+            .set_rng(2, &int_rng)
+            .set_rng(3, &int_rng);
+
+    for (NonlineMode mode : {NonlineMode::RELU,
+                             NonlineMode::IDENTITY, NonlineMode::H_SWISH}) {
+        for (size_t g : {1, 2}) {
+           for (size_t b : {2}) {
+               for (size_t ic : {6, 16}) {
+                   for (size_t oc : {4}) {
+                       for (size_t fh : {1, 3}) {
+                           for (int ph : {static_cast<int>(fh / 2)}) {
+                               for (int sh : {1, 2}) {
+                                    size_t ih = 16, iw = 16;
+                                    param.nonlineMode = mode;
+                                    param.stride_h = param.stride_w = sh;
+                                    param.pad_h = param.pad_w = ph;
+                                    param.sparse =
+                                        ConvBias::Param::Sparse::DENSE;
+                                    checker.set_param(param)
+                                            .execs({{b, ic / 2, ih, iw},
+                                                    {oc, ic / 2, fh, fh},
+                                                    {1, oc, 1, 1},
+                                                    {},
+                                                    {}});
+                                    param.sparse =
+                                        ConvBias::Param::Sparse::GROUP;
+                                    checker.set_param(param)
+                                            .execs({{b, ic, ih, iw},
+                                                    {g, oc/g, ic/g, fh, fh},
+                                                    {1, oc, 1, 1},
+                                                    {},
+                                                    {}});
+                               }
+                           }
+                       }
+                   }
+               }
+           }
+        }
+    }
+
+    for (NonlineMode mode : {NonlineMode::RELU,
+                             NonlineMode::IDENTITY, NonlineMode::H_SWISH}) {
+        for (size_t g : {13}) {
+           for (size_t b : {1, 2}) {
+               for (size_t ic : {13}) {
+                   for (size_t oc : {13}) {
+                       for (size_t fh : {1, 3}) {
+                           for (int ph : {static_cast<int>(fh / 2)}) {
+                               for (int sh : {1, 2}) {
+                                    size_t ih = 16, iw = 16;
+                                    param.nonlineMode = mode;
+                                    param.stride_h = param.stride_w = sh;
+                                    param.pad_h = param.pad_w = ph;
+                                    param.sparse =
+                                        ConvBias::Param::Sparse::GROUP;
+                                    checker.set_param(param)
+                                            .execs({{b, ic, ih, iw},
+                                                    {g, oc/g, ic/g, fh, fh},
+                                                    {1, oc, 1, 1},
+                                                    {},
+                                                    {}});
+                               }
+                           }
+                       }
+                   }
+               }
+           }
+        }
+    }
+    {
+        size_t ih = 16, iw = 16, b = 1, oc = 14, ic = 14;
+        size_t fh = 3, sh = 1, ph = 1;
+        param.nonlineMode = NonlineMode::IDENTITY;
+        param.stride_h = param.stride_w = sh;
+        param.pad_h = param.pad_w = ph;
+        param.sparse = ConvBias::Param::Sparse::DENSE;
+        checker.set_param(param).execs(
+                {{b, ic, ih, iw}, {oc, ic, fh, fh}, {}, {}, {}});
+    }
+}
+
+TEST_F(CUDA, CONV_BIAS_NCHW_QS8_FUSE_Z) {
+    require_compute_capability(6, 1);
+    Checker<ConvBiasForward> checker(handle_cuda());
+    UniformIntRNG int_rng{-128, 127};
+    using NonlineMode = ConvBias::Param::NonlineMode;
+
+    ConvBias::Param param;
+    param.format = ConvBias::Param::Format::NCHW;
+
+    checker.set_dtype(0, dtype::QuantizedS8(2.5f))
+            .set_dtype(1, dtype::QuantizedS8(2.5f))
+            .set_dtype(2, dtype::QuantizedS32(6.25f))
+            .set_dtype(3, dtype::QuantizedS8(0.25f))
+            .set_dtype(4, dtype::QuantizedS8(0.25f))
+            .set_rng(0, &int_rng)
+            .set_rng(1, &int_rng)
+            .set_rng(2, &int_rng)
+            .set_rng(3, &int_rng);
+
+    for (NonlineMode mode :
+         {NonlineMode::RELU, NonlineMode::IDENTITY, NonlineMode::H_SWISH}) {
+        for (size_t b : {2}) {
+            for (size_t ic : {6, 16}) {
+                for (size_t oc : {4}) {
+                    for (size_t fh : {1, 3}) {
+                        for (int ph : {static_cast<int>(fh / 2)}) {
+                            for (int sh : {1, 2}) {
+                                size_t ih = 16, iw = 16;
+                                param.nonlineMode = mode;
+                                param.stride_h = param.stride_w = sh;
+                                param.pad_h = param.pad_w = ph;
+                                param.sparse = ConvBias::Param::Sparse::DENSE;
+                                const size_t oh = (ih - fh + 2 * ph) / sh + 1;
+                                const size_t ow = (iw - fh + 2 * ph) / sh + 1;
+                                checker.set_param(param).execs(
+                                        {{b, ic, ih, iw},
+                                         {oc, ic, fh, fh},
+                                         {1, oc, 1, 1},
+                                         {b, oc, oh, ow},
+                                         {}});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#if MEGDNN_WITH_BENCHMARK
+TEST_F(CUDA, BENCHMARK_CONV_BIAS_NCHW4_INT8) {
+    require_compute_capability(6, 1);
+    Benchmarker<ConvBiasForward> bencher(handle_cuda());
+    bencher.set_display(false);
+    ConvBias::Param param_nchw;
+    param_nchw.format = ConvBias::Param::Format::NCHW;
+    ConvBias::Param param_nchw4;
+    param_nchw4.format = ConvBias::Param::Format::NCHW4;
+
+    auto i8_min = std::numeric_limits<int8_t>().min();
+    auto i8_max = std::numeric_limits<int8_t>().max();
+    UniformIntRNG int_rng{i8_min, i8_max};
+
+    param_nchw.nonlineMode = ConvBias::Param::NonlineMode::IDENTITY;
+    auto run_bench = [&](size_t b, size_t ci, size_t hi, size_t wi,
+                         size_t co, size_t fh, size_t fw, size_t sh,
+                         size_t sw, size_t nr_times) {
+        param_nchw.pad_h = fh / 2;
+        param_nchw.pad_w = fw / 2;
+        param_nchw.stride_h = sh;
+        param_nchw.stride_w = sw;
+        param_nchw4.pad_h = fh / 2;
+        param_nchw4.pad_w = fh / 2;
+        param_nchw4.stride_h = sh;
+        param_nchw4.stride_w = sw;
+        bencher.set_times(nr_times)
+                .set_dtype(0, dtype::QuantizedS8(2.5f))
+                .set_dtype(1, dtype::QuantizedS8(2.5f))
+                .set_dtype(2, dtype::QuantizedS32(6.25f))
+                .set_dtype(4, dtype::QuantizedS8(0.35f))
+                .set_rng(0, &int_rng)
+                .set_rng(1, &int_rng)
+                .set_rng(2, &int_rng);
+        bencher.set_param(param_nchw);
+        size_t ho = infer_conv_shape(hi, fh, sh, param_nchw.pad_h);
+        size_t wo = infer_conv_shape(wi, fw, sw, param_nchw.pad_w);
+        TensorShape inp{b, ci, hi, wi}, kern{co, ci, fh, fw},
+                    out{b, co, ho, wo};
+        auto time_in_ms = bencher.execs(
+                {inp, kern, {1, co, 1, 1}, {}, out}) / nr_times;
+        auto ops_nchw = 2.0 * b * co * ho * wo * ci * fh * fw /
+                    (time_in_ms * 1e-3) * 1e-12;
+        printf("inp=%s, kern=%s, out=%s, time: %.2fms, perf: %.2f Tops "
+               "(NCHW)\n",
+                inp.to_string().c_str(), kern.to_string().c_str(),
+                out.to_string().c_str(), time_in_ms, ops_nchw);
+        bencher.set_param(param_nchw4);
+        decltype(ops_nchw) ops_nchw4;
+        {
+            TensorShape inp{b, ci / 4, hi, wi, 4},
+                kern{co, ci / 4, fh, fw, 4}, out{b, co / 4, ho, wo, 4};
+            auto time_in_ms = bencher.execs(
+                    {inp, kern, {1, co / 4, 1, 1, 4}, {}, out}) / nr_times;
+            ops_nchw4 = 2.0 * b * co * ho * wo * ci * fh * fw /
+                        (time_in_ms * 1e-3) * 1e-12;
+            printf("inp=%s, kern=%s, out=%s, time: %.2fms, perf: %.2f Tops "
+                   "(NCHW4)\n",
+                    inp.to_string().c_str(), kern.to_string().c_str(),
+                    out.to_string().c_str(), time_in_ms, ops_nchw4);
+        }
+        printf("speedup: %.2fx\n", ops_nchw4 / ops_nchw);
+    };
+    // resnet-50
+    // bottleneck-1
+    // proj
+    run_bench(1, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+    run_bench(1, 64, 56, 56, 64, 1, 1, 1, 1, 1000);
+    run_bench(1, 64, 56, 56, 64, 3, 3, 1, 1, 1000);
+    run_bench(1, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+
+    // bottleneck-2
+    // proj
+    run_bench(1, 256, 56, 56, 512, 1, 1, 2, 2, 1000);
+    run_bench(1, 256, 56, 56, 128, 1, 1, 2, 2, 1000);
+    run_bench(1, 128, 28, 28, 128, 3, 3, 1, 1, 1000);
+    run_bench(1, 128, 28, 28, 512, 1, 1, 1, 1, 1000);
+
+    // bottleneck-3
+    // proj
+    run_bench(1, 512, 28, 28, 1024, 1, 1, 2, 2, 1000);
+    run_bench(1, 512, 28, 28, 256, 1, 1, 2, 2, 1000);
+    run_bench(1, 256, 14, 14, 256, 3, 3, 1, 1, 1000);
+    run_bench(1, 256, 14, 14, 1024, 1, 1, 1, 1, 1000);
+
+    // bottleneck-4
+    // proj
+    run_bench(1, 1024, 14, 14, 2048, 1, 1, 2, 2, 1000);
+    run_bench(1, 1024, 14, 14, 512, 1, 1, 2, 2, 1000);
+    run_bench(1, 512, 7, 7, 512, 3, 3, 1, 1, 1000);
+    run_bench(1, 512, 7, 7, 2048, 1, 1, 1, 1, 1000);
+
+    run_bench(32, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+    run_bench(32, 64, 56, 56, 64, 1, 1, 1, 1, 1000);
+    run_bench(32, 64, 56, 56, 64, 3, 3, 1, 1, 1000);
+    run_bench(32, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+    run_bench(32, 256, 56, 56, 512, 1, 1, 2, 2, 1000);
+    run_bench(32, 256, 56, 56, 128, 1, 1, 2, 2, 1000);
+    run_bench(32, 128, 28, 28, 128, 3, 3, 1, 1, 1000);
+    run_bench(32, 128, 28, 28, 512, 1, 1, 1, 1, 1000);
+    run_bench(32, 512, 28, 28, 1024, 1, 1, 2, 2, 1000);
+    run_bench(32, 512, 28, 28, 256, 1, 1, 2, 2, 1000);
+    run_bench(32, 256, 14, 14, 256, 3, 3, 1, 1, 1000);
+    run_bench(32, 256, 14, 14, 1024, 1, 1, 1, 1, 1000);
+    run_bench(32, 1024, 14, 14, 2048, 1, 1, 2, 2, 1000);
+    run_bench(32, 1024, 14, 14, 512, 1, 1, 2, 2, 1000);
+    run_bench(32, 512, 7, 7, 512, 3, 3, 1, 1, 1000);
+    run_bench(32, 512, 7, 7, 2048, 1, 1, 1, 1, 1000);
+
+    run_bench(256, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+    run_bench(256, 64, 56, 56, 64, 1, 1, 1, 1, 1000);
+    run_bench(256, 64, 56, 56, 64, 3, 3, 1, 1, 1000);
+    run_bench(256, 64, 56, 56, 256, 1, 1, 1, 1, 1000);
+    run_bench(256, 256, 56, 56, 512, 1, 1, 2, 2, 1000);
+    run_bench(256, 256, 56, 56, 128, 1, 1, 2, 2, 1000);
+    run_bench(256, 128, 28, 28, 128, 3, 3, 1, 1, 1000);
+    run_bench(256, 128, 28, 28, 512, 1, 1, 1, 1, 1000);
+    run_bench(256, 512, 28, 28, 1024, 1, 1, 2, 2, 1000);
+    run_bench(256, 512, 28, 28, 256, 1, 1, 2, 2, 1000);
+    run_bench(256, 256, 14, 14, 256, 3, 3, 1, 1, 1000);
+    run_bench(256, 256, 14, 14, 1024, 1, 1, 1, 1, 1000);
+    run_bench(256, 1024, 14, 14, 2048, 1, 1, 2, 2, 1000);
+    run_bench(256, 1024, 14, 14, 512, 1, 1, 2, 2, 1000);
+    run_bench(256, 512, 7, 7, 512, 3, 3, 1, 1, 1000);
+    run_bench(256, 512, 7, 7, 2048, 1, 1, 1, 1, 1000);
+}
+#endif
+
 TEST_F(CUDA, CONV_BIAS_FORWARD_NCHW4) {
     require_compute_capability(6, 1);
     using namespace conv_bias;
@@ -241,6 +544,66 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_NCHW4) {
     checker.set_param(param);
     checker.exec({{1, 4, 2, 2, 4}, {16, 4, 3, 3, 4}, {1, 4, 1, 1, 4}, {}, {}});
 }
+
+//! FIXME: conv kernel of cudnn for NCHW4_NCHW tensor format causes illegal
+//! memory access errors, so we have to disable this test here.
+#if 0
+TEST_F(CUDA, CONV_BIAS_FORWARD_NCHW4_NCHW) {
+    require_compute_capability(6, 1);
+    using namespace conv_bias;
+    Checker<ConvBiasForward> checker(handle_cuda());
+    UniformIntRNG int_rng{-3, 3};
+    UniformFloatRNG float_rng{-50, 50};
+    ConvBias::Param param;
+    param.format = ConvBias::Param::Format::NCHW4_NCHW;
+    param.nonlineMode = ConvBias::Param::NonlineMode::IDENTITY;
+
+    checker.set_dtype(0, dtype::QuantizedS8(1.9980618f))
+            .set_dtype(1, dtype::QuantizedS8(1.9980927f))
+            .set_dtype(2, dtype::Float32())
+            .set_dtype(3, dtype::Float32())
+            .set_dtype(4, dtype::Float32())
+            .set_rng(0, &int_rng)
+            .set_rng(1, &int_rng)
+            .set_rng(2, &float_rng)
+            .set_rng(3, &float_rng)
+            .set_param(param);
+
+    auto opr = handle_cuda()->create_operator<ConvBias>();
+
+    auto run = [&](const TensorShapeArray& shapes) {
+        opr->param() = param;
+        TensorLayout dst_layout;
+        opr->deduce_layout({shapes[0], dtype::Float32()},
+                           {shapes[1], dtype::Float32()}, {}, {}, dst_layout);
+        checker.execs({shapes[0], shapes[1], shapes[2], dst_layout, {}});
+    };
+
+    run({{1, 4, 4, 4, 4}, {4, 4, 3, 3, 4}, {1, 4, 1, 1}});
+    run({{20, 1, 24, 24, 4}, {24, 1, 2, 2, 4}, {1, 24, 1, 1}});
+    run({{20, 2, 24, 24, 4}, {24, 2, 3, 3, 4}, {1, 24, 1, 1}});
+
+    param.sparse = ConvBias::Param::Sparse::GROUP;
+    param.nonlineMode = ConvBias::Param::NonlineMode::RELU;
+    checker.set_param(param);
+    run({{1, 4, 24, 24, 4}, {4, 4, 1, 1, 1, 4}, {1, 16, 1, 1}});
+    run({{20, 8, 24, 24, 4}, {4, 24, 2, 2, 2, 4}, {1, 96, 1, 1}});
+    run({{1, 3, 24, 24, 4}, {3, 8, 1, 3, 3, 4}, {1, 24, 1, 1}});
+
+    param.pad_h = param.pad_w = 1;
+    param.stride_h = param.stride_w = 2;
+    checker.set_param(param);
+    run({{10, 16, 28, 28, 4}, {8, 8, 2, 3, 3, 4}, {1, 64, 1, 1}});
+
+    // case which cudnn not supported
+    param.sparse = ConvBias::Param::Sparse::DENSE;
+    param.pad_h = param.pad_w = 1;
+    param.stride_h = param.stride_w = 1;
+    param.nonlineMode = ConvBias::Param::NonlineMode::H_SWISH;
+    checker.set_param(param);
+    checker.exec({{1, 4, 2, 2, 4}, {16, 4, 3, 3, 4}, {1, 16, 1, 1}, {}, {}});
+}
+#endif
 
 #endif
 
@@ -325,7 +688,7 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_CHANWISE_SMALL) {
 }
 
 TEST_F(CUDA, CONV_BIAS_FORWARD_CHANWISE_8x8x32) {
-    require_compute_capability(6, 0);
+    require_compute_capability(6, 1);
     Checker<ConvBiasForward> checker(handle_cuda());
     checker.set_before_exec_callback(conv_bias::ConvBiasAlgoChecker<ConvBias>(
             ConvBiasForward::algo_name<ConvBias::DirectParam>(
@@ -434,10 +797,12 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL) {
     std::vector<TestArg> args = get_args();
     Checker<ConvBiasForward> checker(handle_cuda());
 
-    checker.set_before_exec_callback(conv_bias::ConvBiasAlgoChecker<ConvBias>(
-            ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>("MATMUL",
-                                                                     {})
-                    .c_str()));
+    checker.set_before_exec_callback(
+            AlgoChecker<ConvBiasForward>(ExecutionPolicyAlgoName{
+                    ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
+                            "MATMUL", {})
+                            .c_str(),
+                    {{"CUBLAS", {}}}}));
     param::ConvBias cur_param;
     using NLMode = param::ConvBias::NonlineMode;
     cur_param.mode = param::ConvBias::Mode::CROSS_CORRELATION;
@@ -472,7 +837,7 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL) {
 }
 
 TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_8x8x32) {
-    require_compute_capability(6, 0);
+    require_compute_capability(6, 1);
     Checker<ConvBiasForward> checker(handle_cuda());
     checker.set_before_exec_callback(conv_bias::ConvBiasAlgoChecker<ConvBias>(
             ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
@@ -517,7 +882,7 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_8x8x32) {
 }
 
 TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_NCHW4) {
-    require_compute_capability(6, 0);
+    require_compute_capability(6, 1);
     Checker<ConvBiasForward> checker(handle_cuda());
     checker.set_before_exec_callback(conv_bias::ConvBiasAlgoChecker<ConvBias>(
             ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
@@ -549,7 +914,7 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_NCHW4) {
             {{8, 64, 12, 12, 4}, {256, 64, 3, 3, 4}, {1, 64, 1, 1, 4}, {}, {}});
 }
 
-TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_1x1) {
+TEST_F(CUDA, CONV_BIAS_FORWARD_BATCHED_MATMUL) {
     using namespace conv_bias;
     std::vector<TestArg> args = get_args_1x1();
     Checker<ConvBiasForward> checker(handle_cuda());
@@ -562,19 +927,15 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_1x1) {
             .set_rng(1, &default_rng)
             .set_rng(2, &default_rng)
             .set_epsilon(1e-3);
+    checker.set_before_exec_callback(
+            AlgoChecker<ConvBiasForward>(ExecutionPolicyAlgoName{
+                    ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
+                            "BATCHED_MATMUL", {})
+                            .c_str(),
+                    {{"CUBLAS", {}}}}));
+
     for (auto&& arg : args) {
         checker.set_param(arg.param);
-        checker.set_before_exec_callback(
-                conv_bias::ConvBiasAlgoChecker<ConvBias>(
-                        ConvBiasForward::algo_name<
-                                ConvBiasForward::MatmulParam>("MATMUL1X1", {})
-                                .c_str()));
-        checker.execs({arg.src, arg.filter, arg.bias, {}, {}});
-        checker.set_before_exec_callback(conv_bias::ConvBiasAlgoChecker<
-                                         ConvBias>(
-                ConvBiasForward::algo_name<ConvBiasForward::MatmulParam>(
-                        "BATCHEDMATMUL", {})
-                        .c_str()));
         checker.execs({arg.src, arg.filter, arg.bias, {}, {}});
     }
 }
@@ -582,7 +943,7 @@ TEST_F(CUDA, CONV_BIAS_FORWARD_MATMUL_1x1) {
 TEST_F(CUDA, CONV_BIAS_FORWARD_GROUP) {
     using NLMode = ConvBias::Param::NonlineMode;
     bool is_int_available = false;
-    if (megdnn::test::check_compute_capability((6), (0))) {
+    if (megdnn::test::check_compute_capability(6, 1)) {
         is_int_available = true;
     } else {
         is_int_available = false;

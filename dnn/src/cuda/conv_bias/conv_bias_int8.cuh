@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/conv_bias/conv_bias_int8.cuh
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -140,6 +140,14 @@ void do_conv_bias_int8_implicit_gemm_imma8x32x16_cdiv4hwn4_unroll_width(
     size_t ci = (_src)[0] * 4, hi = (_src)[1], wi = (_src)[2], n = (_src)[3]; \
     size_t co = (_dst)[0] * 4, ho = (_dst)[1], wo = (_dst)[2];                \
     UNPACK_CONV_PARAMETER(_filter_meta, _param);                              \
+    MARK_USED_VAR
+
+#define UNPACK_CONV_BIAS_NCHW32_PARAM(_src, _filter_meta, _dst, _param)        \
+    using Format = param::ConvBias::Format;                                    \
+    megdnn_assert(_param.format == Format::NCHW32);                            \
+    size_t n = (_src)[0], ci = (_src)[1] * 32, hi = (_src)[2], wi = (_src)[3]; \
+    size_t co = (_dst)[1] * 32, ho = (_dst)[2], wo = (_dst)[3];                \
+    UNPACK_CONV_PARAMETER(_filter_meta, _param);                               \
     MARK_USED_VAR
 
 // vim: syntax=cuda.doxygen

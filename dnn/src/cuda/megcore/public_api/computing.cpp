@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/megcore/public_api/computing.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -38,9 +38,10 @@ megcoreStatus_t megcore::getCUDAContext(megcoreComputingHandle_t handle,
     megcoreDeviceHandle_t dev_handle = H->content->dev_handle();
     megcorePlatform_t platform;
     megcoreGetPlatform(dev_handle, &platform);
-    megdnn_assert(platform == megcorePlatformCUDA);
-    auto context = static_cast<megcore::cuda::CUDAComputingContext *>(
-            H->content.get());
+    megdnn_throw_if(platform != megcorePlatformCUDA, megdnn_error,
+                    "platform should be CUDA Platform");
+    auto context =
+            static_cast<megcore::cuda::CUDAComputingContext*>(H->content.get());
     *ctx = context->context();
     return megcoreSuccess;
 }

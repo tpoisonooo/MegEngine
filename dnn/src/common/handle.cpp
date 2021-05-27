@@ -2,7 +2,7 @@
  * \file dnn/src/common/handle.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,11 +22,28 @@
 #include "src/x86/handle.h"
 #endif
 
+#if MEGDNN_ARMV7
+#include "src/armv7/handle.h"
+#endif
+
+#if MEGDNN_AARCH64
+#include "src/aarch64/handle.h"
+#endif
+
+
 
 #if MEGDNN_WITH_CUDA
 #include "src/cuda/handle.h"
 #endif
 
+
+#if MEGDNN_WITH_CAMBRICON
+#include "src/cambricon/handle.h"
+#endif
+
+#ifdef MEGDNN_WITH_ATLAS
+#include "src/atlas/handle.h"
+#endif
 
 using namespace megdnn;
 
@@ -59,6 +76,10 @@ std::unique_ptr<Handle> Handle::make(megcoreComputingHandle_t computing_handle,
                 return std::unique_ptr<x86::HandleImpl>(
                         new x86::HandleImpl(computing_handle));
                 // return make_unique<x86::HandleImpl>(computing_handle);
+#elif MEGDNN_ARMV7
+                return make_unique<armv7::HandleImpl>(computing_handle);
+#elif MEGDNN_AARCH64
+                return make_unique<aarch64::HandleImpl>(computing_handle);
 #else
                 return make_unique<fallback::HandleImpl>(computing_handle);
 #endif
@@ -67,21 +88,44 @@ std::unique_ptr<Handle> Handle::make(megcoreComputingHandle_t computing_handle,
             } else if (debug_level == 2) {
                 return make_unique<naive::HandleImpl>(computing_handle);
             } else {
-                megdnn_throw(megdnn_mangle("Debug level must be 0/1/2."));
+                megdnn_throw("Debug level must be 0/1/2.");
             }
         }
         MIDOUT_END();
 #endif
         }
+        else if (platform == megcorePlatformROCM) {
+#if MEGDNN_WITH_ROCM
+            return make_rocm_handle(computing_handle);
+#else
+            return nullptr;
+#endif
+        }
+        else if (platform == megcorePlatformCambricon) {
+#if MEGDNN_WITH_CAMBRICON
+            return make_unique<cambricon::HandleImpl>(computing_handle);
+#else
+            return nullptr;
+#endif
+        }
+        else if (platform == megcorePlatformAtlas) {
+#if MEGDNN_WITH_ATLAS
+            return make_unique<atlas::HandleImpl>(computing_handle);
+#else
+            return nullptr;
+#endif
+        }
         else {
             // CUDA
-            megdnn_assert_internal(platform == megcorePlatformCUDA);
+            megdnn_throw_if(platform != megcorePlatformCUDA, megdnn_error,
+                            "platform should be CUDA Platform");
 #if MEGDNN_WITH_CUDA
             return make_unique<cuda::HandleImpl>(computing_handle);
 #else
             return nullptr;
 #endif
         }
+        return nullptr;
     }
 
 
@@ -103,6 +147,10 @@ std::unique_ptr<Handle> Handle::make(megcoreComputingHandle_t computing_handle,
 
     size_t Handle::image2d_pitch_alignment() const {
         megdnn_throw("image2d tensor format not supported on this handle");
+    }
+
+    megdnn::HandleImplHelper::HandleVendorType Handle::vendor_type() const {
+        return HandleVendorType::NOT_SPEC;
     }
 
     bool Handle::check_cross_dev_copy_constraint(const TensorLayout& src) {
@@ -142,12 +190,35 @@ std::unique_ptr<Handle> Handle::make(megcoreComputingHandle_t computing_handle,
 #if MEGDNN_X86
             CASE(X86, x86);
 #endif
+#if MEGDNN_ARMV7
+            CASE(ARMV7, armv7);
+#endif
+#if MEGDNN_AARCH64
+            CASE(AARCH64, aarch64);
+#endif
+#if MEGDNN_ARMV7 || MEGDNN_AARCH64
+            CASE(ARM_COMMON, arm_common);
+#endif
 #endif  // !MEGDNN_NAIVE
 #if MEGDNN_WITH_CUDA
             CASE(CUDA,cuda);
 #endif
+#if MEGDNN_WITH_ATLAS
+            CASE(ATLAS, atlas);
+#endif
+#if MEGDNN_WITH_ROCM
+            case HandleType::ROCM: {
+                MIDOUT_BEGIN(HandleOpr, Opr, midout_iv(HandleType::ROCM)) {
+                    return create_rocm_operator<Opr>();
+                }
+                MIDOUT_END();
+            }
+#endif
+#if MEGDNN_WITH_CAMBRICON
+            CASE(CAMBRICON, cambricon);
+#endif
             default:
-                megdnn_throw(megdnn_mangle("bad handle type"));
+                megdnn_throw("bad handle type");
         }
 #undef CASE
     }

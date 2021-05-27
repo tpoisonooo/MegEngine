@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/convolution3d.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -24,7 +24,7 @@ namespace test {
 
 #if 0
 TEST_F(CUDA, CONVOLUTION3D_8X8X32) {
-    if (cuda::current_device_prop().major < 6) {
+    if (!cuda::is_compute_capability_required(6, 1)) {
         printf("Skip CUDA.CONVOLUTION_8X8X32 test as current device"
                "doesn't support\n");
         return;

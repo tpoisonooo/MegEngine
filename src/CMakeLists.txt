@@ -1,67 +1,81 @@
-
-
-file(GLOB_RECURSE SOURCES core/impl/*.cpp gopt/impl/*.cpp opr/impl/*.cpp plugin/impl/*.cpp serialization/impl/*.cpp core/impl/*.inl gopt/impl/*.inl opr/impl/*.inl plugin/impl/*.inl serialization/impl/*.inl)
-
-set(MGB_DEF)
-if(MGE_WITH_JIT)
-    list(APPEND MGB_DEF -DMGB_JIT=1)
-    file(GLOB_RECURSE SOURCES_ jit/impl/*.cpp jit/impl/*.inl)
-    list(APPEND SOURCES ${SOURCES_})
-else()
-    list(APPEND MGB_DEF -DMGB_JIT=0)
+if(MGE_WITH_JIT_MLIR)
+    add_subdirectory(jit/include/megbrain/jit/mlir/ir)
 endif()
 
-if(MGE_INFERENCE_ONLY)
-    list(APPEND MGB_DEF -DMGB_ENABLE_GRAD=0 -DMGB_BUILD_SLIM_SERVING=1)
-else()
-    list(APPEND MGB_DEF -DMGB_ENABLE_GRAD=1 -DMGB_BUILD_SLIM_SERVING=0)
+file(GLOB_RECURSE SOURCES core/impl/*.cpp gopt/impl/*.cpp opr/impl/*.cpp opr/impl/nvof/*.cpp plugin/impl/*.cpp serialization/impl/*.cpp core/impl/*.inl gopt/impl/*.inl opr/impl/*.inl plugin/impl/*.inl serialization/impl/*.inl)
+
+if(MGE_WITH_JIT)
+    file(GLOB_RECURSE SOURCES_ jit/impl/*.cpp jit/impl/*.inl)
+    if(MGE_WITH_JIT_MLIR)
+        file(GLOB_RECURSE MLIR_SOURCES_ jit/impl/mlir/ir/*.cpp jit/impl/mlir/*.cpp)
+        list(APPEND SOURCES_ ${MLIR_SOURCES_})
+    endif()
+    list(APPEND SOURCES ${SOURCES_})
 endif()
 
 if(MGE_WITH_DISTRIBUTED)
     file(GLOB_RECURSE SOURCES_ opr-mm/impl/*.cpp opr-mm/impl/*.inl)
     list(APPEND SOURCES ${SOURCES_})
+    file(GLOB_RECURSE PROTO_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "../src/opr-mm/proto/*.proto")
+    PROTOBUF_GENERATE_CPP_WITH_ROOT(GRPC_SRCS GRPC_HDRS ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_FILES})
+    add_custom_target(mgb_proto_target DEPENDS ${GRPC_SRCS} ${GRPC_HDRS} ${PROTOBUF_PROTOC_EXECUTABLE})
+    list(APPEND SOURCES ${GRPC_SRCS})
 endif()
 
-set(MGB_INC core/include gopt/include opr/include plugin/include serialization/include)
+set(MGB_INC ${PROJECT_BINARY_DIR}/genfiles ${CMAKE_CURRENT_LIST_DIR}/core/include ${CMAKE_CURRENT_LIST_DIR}/gopt/include ${CMAKE_CURRENT_LIST_DIR}/opr/include ${CMAKE_CURRENT_LIST_DIR}/plugin/include ${CMAKE_CURRENT_LIST_DIR}/serialization/include)
 
 if(MGE_WITH_JIT)
-    list(APPEND MGB_INC jit/include)
+    list(APPEND MGB_INC ${CMAKE_CURRENT_LIST_DIR}/jit/include)
     if(MGE_WITH_CUDA)
-        list(APPEND MGB_INC jit/impl/cuda)
+        list(APPEND MGB_INC ${CMAKE_CURRENT_LIST_DIR}/jit/impl/cuda)
     endif()
 endif()
 
 if(MGE_WITH_DISTRIBUTED)
-    list(APPEND MGB_DEF -DMGB_ENABLE_OPR_MM=1)
-    list(APPEND MGB_INC opr-mm/include)
-else()
-    list(APPEND MGB_DEF -DMGB_ENABLE_OPR_MM=0)
-endif()
-
-if(MGE_WITH_CUDA)
-list(APPEND MGB_DEF -DMGB_CUDA=1)
-else()
-list(APPEND MGB_DEF -DMGB_CUDA=0)
+    list(APPEND MGB_INC ${CMAKE_CURRENT_LIST_DIR}/opr-mm/include)
 endif()
 
 if(MGE_WITH_CUDA AND MGE_WITH_TRT)
-    list(APPEND MGB_DEF -DMGB_ENABLE_TENSOR_RT=1)
-    list(APPEND MGB_INC tensorrt/include)
+    list(APPEND MGB_INC ${CMAKE_CURRENT_LIST_DIR}/tensorrt/include)
     file(GLOB_RECURSE SOURCES_ tensorrt/impl/*.cpp tensorrt/impl/*.inl)
     list(APPEND SOURCES ${SOURCES_})
-else()
-    list(APPEND MGB_DEF -DMGB_ENABLE_TENSOR_RT=0)
 endif()
 
-set(MGB_DEF ${MGB_DEF} PARENT_SCOPE)
-add_library(megbrain STATIC EXCLUDE_FROM_ALL ${SOURCES})
-target_link_libraries(megbrain mgb_opr_param_defs)
-target_compile_definitions(megbrain PUBLIC ${MGB_DEF})
-target_include_directories(megbrain PUBLIC ${MGB_INC})
+if(MGE_WITH_CAMBRICON)
+    list(APPEND MGB_INC ${CMAKE_CURRENT_LIST_DIR}/cambricon/include)
+    file(GLOB_RECURSE SOURCES_ cambricon/impl/*.cpp cambricon/impl/*.inl)
+    list(APPEND SOURCES ${SOURCES_})
+endif()
+set(MGB_CAMBRICON ${MGE_WITH_CAMBRICON})
+
+set(MGB_ATLAS ${MGE_WITH_ATLAS})
 
 if(MGE_WITH_CUDA)
-    target_compile_options(megbrain PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-parameter>"
-        "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:-Wno-unused-parameter>")
+    file(GLOB_RECURSE SOURCES_ opr/impl/standalone/*.cu)
+    list(APPEND SOURCES ${SOURCES_})
+endif()
+
+add_library(megbrain OBJECT ${SOURCES})
+target_link_libraries(megbrain PUBLIC mgb_opr_param_defs)
+if(MGE_WITH_CUDA)
+    target_include_directories(megbrain PUBLIC ${TRT_INCLUDE_DIR})
+endif()
+target_include_directories(megbrain
+    PUBLIC $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE ${PROJECT_SOURCE_DIR}/third_party/midout/src
+)
+
+foreach (INCPATH IN LISTS MGB_INC)
+    target_include_directories(megbrain
+        PUBLIC $<BUILD_INTERFACE:${INCPATH}>
+    )
+endforeach()
+
+if(MGE_WITH_CUDA)
+    if(NOT WIN32 AND NOT MSVC)
+        target_compile_options(megbrain PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-parameter>"
+            "$<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:-Wno-unused-parameter>")
+    endif()
 else()
     target_compile_options(megbrain PRIVATE "-Wno-unused-parameter")
 endif()
@@ -73,14 +87,26 @@ if(CXX_SUPPORT_WCLASS_MEMACCESS)
         target_compile_options(megbrain PRIVATE "-Wno-class-memaccess")
     endif()
 endif()
-target_link_libraries(megbrain megdnn)
+target_link_libraries(megbrain PUBLIC megdnn)
 if(MGE_WITH_DISTRIBUTED)
-    target_link_libraries (megbrain megray)
+    add_dependencies(megbrain mgb_proto_target)
+    target_link_libraries (megbrain PRIVATE libprotobuf libzmq)
+    set(CPPZMQ_INC ${PROJECT_SOURCE_DIR}/third_party/cppzmq)
+    # FIXME: add CMAKE_CURRENT_BINARY_DIR for including mm_handler.pb.h
+    target_include_directories(megbrain PRIVATE ${CPPZMQ_INC} ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries (megbrain PRIVATE megray)
 endif()
-target_link_libraries(megbrain ${MGE_CUDA_LIBS})
+target_link_libraries(megbrain PUBLIC ${MGE_CAMBRICON_LIBS})
+target_link_libraries(megbrain PUBLIC ${MGE_ATLAS_LIBS})
 if(MGE_WITH_JIT AND MGE_WITH_HALIDE)
-    target_link_libraries(megbrain libhalide)
-    target_link_libraries(megbrain ${HALIDE_LLVM_LIBS})
+    target_link_libraries(megbrain PRIVATE libhalide)
+    target_link_libraries(megbrain PRIVATE ${HALIDE_LLVM_LIBS})
+endif()
+if(MGE_WITH_JIT_MLIR)
+    target_include_directories(megbrain PRIVATE ${MLIR_LLVM_INCLUDE_DIR})
+    target_link_libraries(megbrain PRIVATE ${MLIR_LLVM_LIBS})
+    add_dependencies(megbrain mgb_dialect)
+    target_include_directories(megbrain PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/jit/include)
 endif()
 if (MGB_WITH_FLATBUFFERS)
     set (GEN_FLATBUFFERS_SCHEMA_PY ${PROJECT_SOURCE_DIR}/dnn/scripts/gen_flatbuffers_schema.py)
@@ -92,7 +118,7 @@ if (MGB_WITH_FLATBUFFERS)
             ${CMAKE_CURRENT_BINARY_DIR}/serialization/impl/opr_param_defs.fbs
         COMMAND
             ${PYTHON_EXECUTABLE} ${GEN_FLATBUFFERS_SCHEMA_PY} ${OPR_PARAM_DEFS_PY} ${CMAKE_CURRENT_BINARY_DIR}/serialization/impl/opr_param_defs.fbs
-        DEPENDS ${GEN_FLATBUFFERS_SCHEMA_PY} ${OPR_PARAM_DEFS_PY} 
+        DEPENDS ${GEN_FLATBUFFERS_SCHEMA_PY} ${OPR_PARAM_DEFS_PY}
         VERBATIM
     )
     add_custom_command(
@@ -127,9 +153,8 @@ if (MGB_WITH_FLATBUFFERS)
     add_dependencies(megbrain mgb_serialization_schema_fbs)
     target_include_directories(megbrain PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/serialization/include)
     target_compile_definitions(megbrain PUBLIC MGB_ENABLE_FBS_SERIALIZATION=1)
-    target_link_libraries(megbrain flatbuffers)
-    
-    set (GENERATED_FLATBUFFERS_CONVERTER_PATH ${CMAKE_CURRENT_BINARY_DIR}/genfiles/this/should/be/added/to/sereg_caller/target/only/but/hey/yolo/there/are/no/fine/grained/targets/let/us/just/make/this/path/unreasonably/long/to/avoid/collision)
+    target_link_libraries(megbrain PUBLIC flatbuffers)
+    set (GENERATED_FLATBUFFERS_CONVERTER_PATH ${CMAKE_CURRENT_BINARY_DIR}/genfiles)
     set (GEN_FLATBUFFERS_CONVERTER_PY ${PROJECT_SOURCE_DIR}/dnn/scripts/gen_flatbuffers_converter.py)
     file (MAKE_DIRECTORY ${GENERATED_FLATBUFFERS_CONVERTER_PATH})
     add_custom_command(
@@ -152,24 +177,50 @@ if (MGB_WITH_FLATBUFFERS)
     target_sources(megbrain PRIVATE ${GENERATED_FLATBUFFERS_CONVERTER_PATH}/mgb_opr_param_defs_converter.inl)
     target_include_directories(megbrain PRIVATE ${GENERATED_FLATBUFFERS_CONVERTER_PATH})
 endif()
-if(UNIX)
-    target_link_libraries(megbrain dl rt)
-    find_library(libatomic atomic)
-    if(NOT libatomic STREQUAL "libatomic-NOTFOUND")
-        target_link_libraries(megbrain libatomic)
-    endif()
+if(UNIX AND NOT ANDROID AND NOT APPLE)
+    target_link_libraries(megbrain PUBLIC dl rt atomic)
 endif()
 
-add_library(megengine SHARED $<TARGET_PROPERTY:megbrain,SOURCES>)
-if(MGB_WITH_FLATBUFFERS)
-    add_dependencies(megengine mgb_serialization_schema_fbs)
+if(ANDROID)
+    target_link_libraries(megbrain PUBLIC log)
 endif()
-target_include_directories(megengine PRIVATE $<TARGET_PROPERTY:megbrain,INCLUDE_DIRECTORIES>)
-target_compile_definitions(megengine PUBLIC $<TARGET_PROPERTY:megbrain,COMPILE_DEFINITIONS>)
-target_compile_options(megengine PUBLIC $<TARGET_PROPERTY:megbrain,COMPILE_OPTIONS>)
-target_link_libraries(megengine PRIVATE $<TARGET_PROPERTY:megbrain,LINK_LIBRARIES> -Wl,--no-undefined -Wl,--version-script=${PROJECT_SOURCE_DIR}/python_module/src/version.ld)
+
+set (_VER_FILE ${PROJECT_SOURCE_DIR}/src/version.ld)
+
+if(MGE_BUILD_IMPERATIVE_RT
+        )
+    message(VERBOSE "create a export SHARED lib for python use")
+    add_library(megengine_export SHARED)
+    target_link_libraries(megengine_export PUBLIC megbrain megdnn)
+    target_link_libraries(megengine_export PRIVATE ${MGE_CUDA_LIBS})
+    if (MGE_WITH_DISTRIBUTED)
+        message(VERBOSE "megengine_export configured to link megray")
+        target_link_libraries(megengine_export PUBLIC megray)
+    endif()
+endif()
+# Build as SHARED or STATIC depending on BUILD_SHARED_LIBS=ON/OFF
+add_library(megengine)
+target_link_libraries(megengine PRIVATE ${MGE_CUDA_LIBS})
+target_link_libraries(megengine PUBLIC megbrain megdnn)
+if (UNIX AND NOT APPLE)
+    target_link_options(megengine PRIVATE -Wl,--no-undefined -Wl,--version-script=${_VER_FILE})
+    set_target_properties(megengine PROPERTIES LINK_DEPENDS ${_VER_FILE})
+endif()
 set_target_properties(megengine PROPERTIES CXX_VISIBILITY_PRESET default)
-install(TARGETS megengine LIBRARY DESTINATION lib64)
+set_target_properties(megengine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+# Do not export targets if MGE_WITH_DISTRIBUTED is on. MegRay is not ready
+# for this.
+install(TARGETS megengine
+        EXPORT ${MGE_EXPORT_TARGETS}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if (NOT MGE_WITH_DISTRIBUTED)
+    install(TARGETS megbrain
+            EXPORT ${MGE_EXPORT_TARGETS}
+            )
+endif()
+
 foreach(_PATH ${MGB_INC})
-    install(DIRECTORY ${_PATH}/megbrain DESTINATION include FILES_MATCHING PATTERN "*.h")
+    install(DIRECTORY ${_PATH}/megbrain DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} FILES_MATCHING PATTERN "*.h")
 endforeach()

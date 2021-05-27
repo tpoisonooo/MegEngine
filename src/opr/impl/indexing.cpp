@@ -2,7 +2,7 @@
  * \file src/opr/impl/indexing.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,6 +32,27 @@ namespace {
             index = opr::TypeCvt::make(index, dtype::Int32());
         }
     }
+
+    enum IndexingModifyType {
+        SET, INCR
+    };
+
+    template<typename Opr>
+    struct IndexingModifyTypeGetter {};
+
+#define REG(op, type) \
+    template<> \
+    struct IndexingModifyTypeGetter<megdnn::op> { \
+        static constexpr IndexingModifyType value = IndexingModifyType::type; \
+    };
+REG(IndexingIncrMultiAxisVec, INCR)
+REG(IncrMeshIndexing, INCR)
+REG(BatchedIncrMeshIndexing, INCR)
+REG(IndexingSetMultiAxisVec, SET)
+REG(SetMeshIndexing, SET)
+REG(BatchedSetMeshIndexing, SET)
+#undef REG
+
 }
 
 namespace mgb {
@@ -62,6 +83,7 @@ void IndexingOneHot::init_output_dtype() {
     output(0)->dtype(input(0)->dtype());
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingOneHot) {
     if (wrt_idx == 0) {
         return IndexingSetOneHot::make(
@@ -70,6 +92,7 @@ MGB_IMPL_OPR_GRAD(IndexingOneHot) {
     }
     return InvalidGrad::make(opr, wrt_idx);
 }
+#endif
 
 /* ==================== IndexingSetOneHot ==================== */
 
@@ -112,6 +135,7 @@ void IndexingSetOneHot::scn_do_execute() {
             intl::get_megdnn_workspace_from_var(output(1)));
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingSetOneHot) {
     SymbolVar index{opr.input(1)}, sub{opr.input(2)}, og{out_grad.at(0)};
     if (wrt_idx == 0) {
@@ -123,6 +147,7 @@ MGB_IMPL_OPR_GRAD(IndexingSetOneHot) {
     }
     return InvalidGrad::make(opr, wrt_idx);
 }
+#endif
 
 size_t IndexingSetOneHot::get_workspace_size_bytes(
         const TensorShapeArray &input_shapes,
@@ -144,6 +169,7 @@ void IndexingRemap::init_output_dtype() {
     output(0)->dtype(input(0)->dtype());
 }
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingRemap) {
     if (wrt_idx == 1)
         return InvalidGrad::make(opr, wrt_idx);
@@ -151,6 +177,7 @@ MGB_IMPL_OPR_GRAD(IndexingRemap) {
     return IndexingRemapBackward::make(
             out_grad[0], opr.input(1), opr.input(0), opr.param()).node();
 }
+#endif
 
 MGB_DYN_TYPE_OBJ_FINAL_IMPL(IndexingRemapBackward);
 MEGDNN_OPR_INIT3(IndexingRemapBackward, "indexing_remap_bwd", 2, false);
@@ -205,21 +232,24 @@ void mixin::IndexingMultiAxisVecMegDNNOprHolder<Opr>::record_megdnn_opr(
 }
 
 /* ==================== MultiAxisVecFancyIndexingHelper ==================== */
-const megdnn::IndexingMultiAxisVec::IndexDesc&
+std::pair<const megdnn::IndexingMultiAxisVec::IndexDesc&, bool>
 intl::MultiAxisVecFancyIndexingHelper::make_megdnn_index_desc(
         size_t inp_ndim, bool warn_all_scalar) {
 
     auto &&index = m_megdnn_index_cache;
     index.clear();
+    bool is_empty_shape = false;
     for (auto i: reverse_adaptor(m_input2idxonly_axis_indexer)) {
         if (i) {
             index.push_back({
                     i->axis.get(inp_ndim),
                     i->idx.node()->dev_tensor().as_megdnn()});
+            is_empty_shape |= index.back().vec.layout.is_empty();
         }
     }
 
-    if (!m_scalar_idx_warn_printed && warn_all_scalar) {
+    if (!m_scalar_idx_warn_printed && warn_all_scalar &&
+        !this->owner_graph()->options().imperative_proxy_graph) {
         bool all_scalar = true;
         for (auto &&i: index) {
             if (!i.vec.layout.is_scalar()) {
@@ -243,7 +273,7 @@ intl::MultiAxisVecFancyIndexingHelper::make_megdnn_index_desc(
         m_scalar_idx_warn_printed = true;
     }
 
-    return index;
+    return {index, is_empty_shape};
 }
 
 /* ==================== IndexingMultiAxisVecBase ==================== */
@@ -251,6 +281,8 @@ template<class Opr>
 cg::OperatorNodeBase::NodeProp*
 IndexingMultiAxisVecBase<Opr>::do_make_node_prop() const {
     auto prop = Super::do_make_node_prop();
+    // TODO: should also allow input shape is empty if any
+    // indexer's shape is empty
     for (auto i: m_input2idxonly_axis_indexer) {
         if (i) {
             prop->add_dep_type_existing_var(
@@ -334,18 +366,21 @@ WARN(IndexingIncrMultiAxisVec);
 
 template <class Opr>
 void IndexingMultiAxisVecBase<Opr>::scn_do_execute() {
+    if (output(0)->layout().is_empty()) {
+        return;
+    }
     auto inp = input(0)->dev_tensor();
     inp = inp.sub(fancy_indexing_make_sub_spec(inp.layout()));
     auto &&index_desc = make_megdnn_index_desc(
             inp.layout().ndim, ShouldWarnOnScalarIndexer<Opr>::val);
     auto &&odev = output(0)->dev_tensor();
-    if (index_desc.empty()) {
+    if (index_desc.first.empty()) {
         odev.copy_from_fixlayout(inp);
     } else {
-        if (index_desc[0].vec.layout[0]) {
+        if (!index_desc.second) {
             // only call megdnn exec if result is not empty
             this->megdnn_opr(*this).exec(
-                    inp.as_megdnn(), index_desc, odev.as_megdnn(),
+                    inp.as_megdnn(), index_desc.first, odev.as_megdnn(),
                     intl::get_megdnn_workspace_from_var(output(1)));
         } else {
             mgb_assert(odev.empty());
@@ -370,23 +405,49 @@ void intl::IndexingModifyMultiAxisVecHelper<Opr>::scn_do_execute() {
     auto inp = this->fancy_indexing_get_tensors_for_modify_in_scn_do_execute();
     auto index_desc = this->make_megdnn_index_desc(
             inp.first.layout().ndim, ShouldWarnOnScalarIndexer<Opr>::val);
-    if (index_desc.empty()) {
-        if (std::is_same<Opr, megdnn::IndexingSetMultiAxisVec>::value) {
-            inp.first.copy_from_fixlayout(inp.second);
-        } else {
-            static constexpr bool is_incr = std::is_same<
-                Opr, megdnn::IndexingIncrMultiAxisVec>::value;
-            mgb_assert(is_incr);
-            megdnn::AddUpdate* add_update = intl::get_megdnn_global_opr<
-                megdnn::AddUpdate>(comp_node());
-            add_update->exec(inp.first.as_megdnn(), inp.second.as_megdnn());
+    if (index_desc.second){
+        mgb_assert(inp.second.shape().is_empty());
+        return;
+    }
+    if (index_desc.first.empty()) {
+        using IMT = IndexingModifyType;
+        static constexpr auto modify_type =
+                IndexingModifyTypeGetter<Opr>::value;
+        switch (modify_type) {
+            case IMT::SET: {
+                inp.first.copy_from_fixlayout(inp.second);
+                break;
+            } case IMT::INCR: {
+                megdnn::AddUpdate* add_update = intl::get_megdnn_global_opr<
+                    megdnn::AddUpdate>(comp_node());
+                add_update->exec(inp.first.as_megdnn(), inp.second.as_megdnn());
+                break;
+            } default:
+                mgb_throw(MegBrainError, "bad modify type");
         }
     } else {
         this->megdnn_opr(*this).exec(
                 inp.first.as_megdnn(), inp.second.as_megdnn(),
-                index_desc,
+                index_desc.first,
                 intl::get_megdnn_workspace_from_var(output(1)));
     }
+}
+
+template<class Opr>
+cg::OperatorNodeBase::NodeProp*
+intl::IndexingModifyMultiAxisVecHelper<Opr>::do_make_node_prop() const {
+    auto prop = Super::do_make_node_prop();
+    using DT = NodeProp::DepType;
+    // TODO: should also allow input shape is empty if any
+    // indexer's shape is empty
+    prop->add_dep_type_existing_var(input(1), DT::VALUE_ALLOW_EMPTY);
+    for (auto i: m_input2idxonly_axis_indexer) {
+        if (i) {
+            prop->add_dep_type_existing_var(
+                    i->idx.node(), DT::VALUE_ALLOW_EMPTY);
+        }
+    }
+    return prop;
 }
 
 template<class Opr>
@@ -403,13 +464,13 @@ add_input_layout_constraint() {
 MGB_IMPL_FANCY_INDEXING_OPR_GET(
         IndexingMultiAxisVec, "indexing_multi_axis_vec", false,
         output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
-        output(1)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
         );
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(
         IndexingSetMultiAxisVec, "indexing_set_multi_axis_vec", false);
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(
         IndexingIncrMultiAxisVec, "indexing_incr_multi_axis_vec", false);
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingMultiAxisVec) {
     if (wrt_idx)
         return InvalidGrad::make(opr, wrt_idx);
@@ -418,7 +479,9 @@ MGB_IMPL_OPR_GRAD(IndexingMultiAxisVec) {
             SymbolVar{opr.input(0)}.fill_retain_dtype(0),
             out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingSetMultiAxisVec) {
     if (wrt_idx >= 2)
         return InvalidGrad::make(opr, wrt_idx);
@@ -429,7 +492,9 @@ MGB_IMPL_OPR_GRAD(IndexingSetMultiAxisVec) {
     }
     return IndexingMultiAxisVec::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IndexingIncrMultiAxisVec) {
     if (wrt_idx >= 2)
         return InvalidGrad::make(opr, wrt_idx);
@@ -438,18 +503,18 @@ MGB_IMPL_OPR_GRAD(IndexingIncrMultiAxisVec) {
     }
     return IndexingMultiAxisVec::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 /* ============================= Mesh Indexing ============================ */
 
 MGB_IMPL_FANCY_INDEXING_OPR_GET(
         MeshIndexing, "mesh_indexing", false,
-        output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
-        output(1)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE););
+        output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE););
 MGB_IMPL_FANCY_INDEXING_OPR_GET(
         BatchedMeshIndexing, "batched_mesh_indexing", false,
-        output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE);
-        output(1)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE););
+        output(0)->add_flag(VarNode::Flag::ALLOW_EMPTY_SHAPE););
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(MeshIndexing) {
     if (wrt_idx != 0) {
         return InvalidGrad::make(opr, wrt_idx);
@@ -459,6 +524,9 @@ MGB_IMPL_OPR_GRAD(MeshIndexing) {
                    opr.index_desc())
             .node();
 }
+#endif
+
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(BatchedMeshIndexing) {
     if (wrt_idx != 0) {
         return InvalidGrad::make(opr, wrt_idx);
@@ -468,11 +536,14 @@ MGB_IMPL_OPR_GRAD(BatchedMeshIndexing) {
                    opr.index_desc())
             .node();
 }
+#endif
 
 /* ========================= IncrMeshIndexing ========================= */
 
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(IncrMeshIndexing, "incr_mesh_indexing",
                                    false);
+
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(IncrMeshIndexing) {
     if (wrt_idx > 2) {
         return opr::InvalidGrad::make(opr, wrt_idx);
@@ -482,9 +553,11 @@ MGB_IMPL_OPR_GRAD(IncrMeshIndexing) {
     }
     return MeshIndexing::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(BatchedIncrMeshIndexing,
                                    "batched_incr_mesh_indexing", false);
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(BatchedIncrMeshIndexing) {
     if (wrt_idx > 2) {
         return opr::InvalidGrad::make(opr, wrt_idx);
@@ -494,10 +567,12 @@ MGB_IMPL_OPR_GRAD(BatchedIncrMeshIndexing) {
     }
     return BatchedMeshIndexing::make(out_grad.at(0), opr.index_desc()).node();
 }
+#endif
 
 /* ======================== SetMeshIndexing =========================== */
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(SetMeshIndexing, "set_mesh_indexing", false);
 
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(SetMeshIndexing) {
     if (wrt_idx >= 2) {
         return opr::InvalidGrad::make(opr, wrt_idx);
@@ -512,9 +587,11 @@ MGB_IMPL_OPR_GRAD(SetMeshIndexing) {
         return MeshIndexing::make(out_grad.at(0), opr.index_desc()).node();
     }
 }
+#endif
 
 MGB_IMPL_FANCY_INDEXING_OPR_MODIFY(BatchedSetMeshIndexing,
                                    "batched_set_mesh_indexing", false);
+#if MGB_ENABLE_GRAD
 MGB_IMPL_OPR_GRAD(BatchedSetMeshIndexing) {
     if (wrt_idx > 2) {
         return opr::InvalidGrad::make(opr, wrt_idx);
@@ -530,5 +607,6 @@ MGB_IMPL_OPR_GRAD(BatchedSetMeshIndexing) {
                 .node();
     }
 }
+#endif
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

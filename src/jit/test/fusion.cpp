@@ -2,7 +2,7 @@
  * \file src/jit/test/fusion.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -137,6 +137,12 @@ void run<basic>(Backend backend, CompNode cn) {
     // only one broadcast is allowed in JIT fusion
     ASSERT_EQ(1u, jits[0]->input().size());
     ASSERT_EQ(4u, jits[1]->input().size());
+
+    //! check memfwd
+    ASSERT_EQ(prev_dev_ptr(jits[0]->input(0)),
+              prev_dev_ptr(jits[0]->output(0)));
+    ASSERT_EQ(prev_dev_ptr(jits[1]->input(0)),
+              prev_dev_ptr(jits[1]->output(0)));
 }
 
 template <>
@@ -540,7 +546,7 @@ void run<expand_jit_executor>(Backend backend, CompNode cn) {
 
     auto make_jit = [](SymbolVar target, const SymbolVarArray& inputs) {
         auto y = target.node();
-        auto ig_gen = std::make_unique<InternalGraphGenrator>(y->owner_opr());
+        auto ig_gen = std::make_unique<InternalGraphGenerator>(y->owner_opr());
         auto inputs_vptr = cg::to_var_node_array(inputs);
         for (auto i : get_rev_topo_order(
                      target, {inputs_vptr.begin(), inputs_vptr.end()})) {
@@ -830,9 +836,9 @@ TEST(TestJITFusionHalide, JITExecutor) {
          y = opr::reduce_sum(a + b, shape_of_b),
          z = opr::reduce_sum(a * b, shape_of_a);
     auto ig_gen_1 =
-            std::make_unique<InternalGraphGenrator>(y.node()->owner_opr());
+            std::make_unique<InternalGraphGenerator>(y.node()->owner_opr());
     auto ig_gen_2 =
-            std::make_unique<InternalGraphGenrator>(z.node()->owner_opr());
+            std::make_unique<InternalGraphGenerator>(z.node()->owner_opr());
     {
         ThinHashSet<VarNode*> nd_set;
         nd_set.insert(a.node());
@@ -1435,7 +1441,165 @@ TEST(TestJITNvrtc, DimshuffleGrad) {
         funcs.second->execute();
         MGB_ASSERT_TENSOR_NEAR(host_y1, host_y2, 1e-3);
     }
+    {
+        FusionChecker checker{2,
+            [](const SymbolVarArray& inp) -> SymbolVar {
+                auto var = opr::Dimshuffle::make(inp[0], {1, 2, 3, 0});
+                return inp[1] * var;
+            },
+            CompNode::load("gpu0")};
+        checker.set_jit_level(1)
+               .run({TensorShape{1, 2, 3, 4}, {2, 3, 4, 1}})
+               .run({TensorShape{3, 4, 1, 2}, {4, 1, 2, 3}})
+               .run({TensorShape{4, 6, 3, 5}, {6, 3, 5, 4}});
+    }
 }
+
+TEST(TestJITExecutor, GradBehavior) {
+    REQUIRE_GPU(1);
+    auto cn = CompNode::load("gpu0");
+    HostTensorGenerator<> gen;
+    {
+        set_backend(Backend::NVRTC);
+        auto graph = ComputingGraph::make();
+        auto host_a = gen({2, 3, 4}, cn);
+        auto a = opr::Host2DeviceCopy::make(*graph, host_a),
+            x = opr::exp(a + 1);
+
+        gopt::GraphOptimizer gopt;
+        gopt.add_pass<gopt::JITFusionPass>();
+        VarNodeArray dest_vars{x.node()};
+        gopt.apply_inplace(dest_vars);
+        x = opr::reduce_sum(dest_vars[0], a.make_scalar_dt(1));
+        SmallVector<jit::JITExecutor*> jits;
+        auto on_opr = [&jits](cg::OperatorNodeBase* op) {
+            if (auto jit = op->try_cast_final<jit::JITExecutor>()) {
+                jits.push_back(jit);
+            }
+        };
+        auto grad_a = cg::grad(x, a);
+        cg::DepOprIter{on_opr}.add(grad_a);
+        ASSERT_EQ(jits.size(), 2);
+        // input of forward jit executor: host_a
+        ASSERT_EQ(jits[0]->input().size(), 1);
+        // input of grad jit executor:
+        //      output of forward jit executor, output grad
+        ASSERT_EQ(jits[1]->input().size(), 2);
+        // internal graph is (input: og, out | output: og * out)
+        size_t nr_ph = 0, nr_mul = 0;
+        cg::DepOprIter{
+            [&nr_ph, &nr_mul](cg::OperatorNodeBase* op) {
+                if (op->same_type<jit::JITPlaceholder>()) {
+                    ++ nr_ph;
+                    return;
+                }
+                if(auto mul = op->try_cast_final<opr::Elemwise>()) {
+                    using Mode = opr::Elemwise::Mode;
+                    if (mul->param().mode == Mode::MUL) {
+                        ++ nr_mul;
+                        return;
+                    }
+                }
+                mgb_throw(MegBrainError, "unexpected op %s", op->cname());
+            }}
+            .add(jits[1]->internal_graph_ptr()->output());
+        ASSERT_EQ(nr_ph, 2);
+        ASSERT_EQ(nr_mul, 1);
+    }
+#if MGB_JIT_HALIDE
+    {
+        set_backend(Backend::HALIDE);
+        auto graph = ComputingGraph::make();
+        auto host_a = gen({2, 3, 4}, cn);
+        auto a = opr::Host2DeviceCopy::make(*graph, host_a),
+            x = opr::exp(a + 1);
+
+        gopt::GraphOptimizer gopt;
+        gopt.add_pass<gopt::JITFusionPass>();
+        VarNodeArray dest_vars{x.node()};
+        gopt.apply_inplace(dest_vars);
+        x = opr::reduce_sum(dest_vars[0], a.make_scalar_dt(1));
+        size_t nr_ops = 0, nr_jits = 0;
+        auto on_opr = [&nr_jits, &nr_ops](cg::OperatorNodeBase* op) {
+            if (op->same_type<jit::JITExecutor>()) {
+                ++ nr_jits;
+            }
+            ++ nr_ops;
+        };
+        auto grad_a = cg::grad(x, a);
+        cg::DepOprIter{on_opr}.add(grad_a);
+        // in Halide backend, grad internal graph would be expanded into
+        // original graph, so there was only one JITExecutor
+        ASSERT_EQ(nr_jits, 1);
+        // the grad of a is broadcast(JITExecutor.output(0), a.shape()),
+        // so the oprs depended by grad_a are H2D(a), JITExecutor,
+        // GetVarShape(a) and broadcast
+        ASSERT_EQ(nr_ops, 4);
+    }
+#endif // MGB_JIT_HALIDE
+    {
+        set_backend(Backend::NVRTC);
+        auto graph = ComputingGraph::make();
+        auto host_a = gen({2, 3, 4}, cn);
+        auto a = opr::SharedDeviceTensor::make(*graph, *host_a),
+            x = a * 2 + 1;
+
+        gopt::GraphOptimizer gopt;
+        gopt.add_pass<gopt::JITFusionPass>();
+        VarNodeArray dest_vars{x.node()};
+        gopt.apply_inplace(dest_vars);
+        x = opr::reduce_sum(dest_vars[0], a.make_scalar_dt(1));
+        auto grad_a = cg::grad(x, a);
+        // all inputs of grad jit executor are const, its internal graph
+        // would be expanded into original graph for more optimizations,
+        // so no JITExecutor can be found
+        cg::DepOprIter{[](cg::OperatorNodeBase* op) {
+            ASSERT_FALSE(op->same_type<jit::JITExecutor>());}
+        }.add(grad_a);
+    }
+}
+
+#if MGB_JIT_MLIR
+
+void run_mlir(CompNode cn) {
+    set_backend(Backend::MLIR);
+
+    HostTensorGenerator<> gen;
+    auto host_x0 = gen({23, 42}, cn), host_x1 = gen({23, 1}, cn),
+         host_x2 = gen({1, 42}, cn), host_x3 = gen({23, 42}, cn),
+         host_x4 = gen({1, 42}, cn), host_x5 = gen({23, 1}, cn);
+
+    auto make_dst = [&](ComputingGraph& graph) {
+        auto a = opr::Host2DeviceCopy::make(graph, host_x0),
+         b = opr::Host2DeviceCopy::make(graph, host_x1),
+         c = opr::Host2DeviceCopy::make(graph, host_x2),
+         d = opr::Host2DeviceCopy::make(graph, host_x3),
+         e = opr::Host2DeviceCopy::make(graph, host_x4);
+        return a + opr::max(b, c) + opr::max(d, e);
+    };
+    HostTensorND host_y1, host_y2;
+    auto funcs = make_func_pair(host_y1, host_y2, make_dst, 2);
+
+    funcs.first->execute();
+    funcs.second->execute();
+    MGB_ASSERT_TENSOR_EQ(host_y1, host_y2);
+
+    JITExecutor* jit;
+    unpack_vector(find_oprs<JITExecutor>(*funcs.second), jit);
+    ASSERT_EQ(0u, find_oprs<opr::Elemwise>(*funcs.second).size());
+    ASSERT_EQ(5u, jit->input().size());
+}
+
+TEST(TestJITExecutor, TestJITMlirFusion) {
+    run_mlir(CompNode::load("cpu0"));
+}
+
+TEST(TestJITExecutor, TestJITMlirFusionGpu) {
+    REQUIRE_GPU(1);
+    run_mlir(CompNode::load("gpu0"));
+}
+
+#endif // MGB_JIT_MLIR
 
 #endif  // MGB_JIT
 

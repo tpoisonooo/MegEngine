@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/matrix_mul/cublas.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -25,6 +25,10 @@ using namespace cuda;
 #define SE_CUDA_DATA_HALF CUBLAS_DATA_HALF
 #endif
 
+#if CUDA_VERSION < 11000
+#define CUBLAS_COMPUTE_32I CUDA_R_32I
+#endif
+
 bool MatrixMulForwardImpl::AlgoCuBlas::is_available(
         const SizeArgs& args) const {
     if (args.opr->param().format != param::MatrixMul::Format::DEFAULT)
@@ -42,7 +46,7 @@ bool MatrixMulForwardImpl::AlgoCuBlas::is_available(
          */
         return args.layout_a.stride[0] % 4 == 0 &&
                args.layout_b.stride[0] % 4 == 0 &&
-               current_device_prop().major > 5;
+               is_compute_capability_required(6, 1);
     }
     return false;
 }
@@ -117,7 +121,7 @@ void MatrixMulForwardImpl::AlgoCuBlas::exec(const ExecArgs& args) const {
                 args.tensor_b.layout.stride[0], args.tensor_a.raw_ptr,
                 CUDA_R_8I, args.tensor_a.layout.stride[0], zero,
                 args.tensor_c.raw_ptr, CUDA_R_32I,
-                args.tensor_c.layout.stride[0], CUDA_R_32I, CUBLAS_GEMM_DFALT));
+                args.tensor_c.layout.stride[0], CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DFALT));
     };
 
     // Note that cublas takes column-major matrices as inputs,

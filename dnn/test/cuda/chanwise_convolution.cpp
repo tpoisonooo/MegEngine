@@ -2,7 +2,7 @@
  * \file dnn/test/cuda/chanwise_convolution.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -176,6 +176,46 @@ public:
         }
     }
 
+    //! special for weight preprocess
+    void exec_convolution(ConvolutionForward* opr0, ConvolutionForward* opr1) {
+        opr0->param().pad_h = pad_h;
+        opr0->param().pad_w = pad_w;
+        opr1->param() = opr0->param();
+        opr1->param().sparse = param::Convolution::Sparse::GROUP;
+
+        TensorND a0, b0, c0, a1, b1, c1;
+        std::tie(a0, b0, c0) = shuffle(std::make_tuple(
+                    src0->tensornd(), flt0->tensornd(), dst0->tensornd()));
+        std::tie(a1, b1, c1) = shuffle(std::make_tuple(
+                    src1->tensornd(), flt1->tensornd(), dst1->tensornd()));
+        WorkspaceWrapper wk(
+                handle,
+                std::max(opr0->get_workspace_in_bytes(a0.layout, b0.layout,
+                                                      c0.layout, nullptr),
+                         opr1->get_workspace_in_bytes(a1.layout, b1.layout,
+                                                      c1.layout, nullptr)));
+        cudaProfilerStart();
+        cudaEventRecord(cuda_ev[0], cuda_stream);
+        opr0->exec(a0, b0, c0, nullptr, wk.workspace());
+        cudaEventRecord(cuda_ev[1], cuda_stream);
+        opr1->exec(a1, b1, c1, nullptr, wk.workspace());
+        cudaEventRecord(cuda_ev[2], cuda_stream);
+        cudaProfilerStop();
+
+        if (getenv("MEGDNN_CHANWISE_CONV_VERBOSE") ||
+                getenv("MEGDNN_CHANWISE_CONV_FULLBENCH")) {
+            cudaStreamSynchronize(cuda_stream);
+            float t0 = -1, t1 = -1;
+            cudaEventElapsedTime(&t0, cuda_ev[0], cuda_ev[1]);
+            cudaEventElapsedTime(&t1, cuda_ev[1], cuda_ev[2]);
+            printf("%s;%s;%s: cudnn/megdnn: %.3fms/%.3fms=%.3f\n",
+                    lsrc.TensorShape::to_string().c_str(),
+                    lflt1.TensorShape::to_string().c_str(),
+                    ldst.TensorShape::to_string().c_str(),
+                    t0, t1, t0 / t1);
+        }
+    }
+
     void cmp_dst() {
         Tensor<> dst0_cpu(handle_cpu, ldst), dst1_cpu(handle_cpu, ldst);
         megdnn_memcpy_D2H(handle,
@@ -233,10 +273,14 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_FORWARD) {
     Checker<Convolution> checker(handle_cuda());
     bool require_algo = false;
     checker.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-            ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
-                    "CHANNEL_WISE", {})
-                    .c_str(),
+            ExecutionPolicyAlgoName{
+                    "DEFAULT",
+                    {{ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
+                              "CHANNEL_WISE", {})
+                              .c_str(),
+                      {}}}},
             &require_algo));
+
     for (auto dtype : std::vector<DType>{dtype::Float32(), dtype::Float16()}) {
         checker.set_dtype(0, dtype).set_dtype(1, dtype).set_dtype(2, dtype);
         if (dtype.enumv() == DTypeEnum::Float16)
@@ -266,8 +310,12 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_FORWARD_SMALL) {
     Checker<Convolution> checker(handle_cuda());
     bool require_algo = false;
     checker.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-            ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
-                    "CHANNEL_WISE_SMALL", {}).c_str(),
+            ExecutionPolicyAlgoName{
+                    "DEFAULT",
+                    {{ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
+                              "CHANNEL_WISE_SMALL", {})
+                              .c_str(),
+                      {}}}},
             &require_algo));
     for (auto dtype : std::vector<DType> {
              dtype::Float32(),
@@ -298,6 +346,7 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BACKWARD_DATA) {
     bool require_algo = false;
     checker.set_before_exec_callback(AlgoChecker<ConvolutionBackwardData>(
             "CHANNEL_WISE", &require_algo));
+
     for (auto dtype : std::vector<DType>{dtype::Float32(), dtype::Float16()}) {
         checker.set_dtype(0, dtype).set_dtype(1, dtype).set_dtype(2, dtype);
         if (dtype.enumv() == DTypeEnum::Float16)
@@ -328,9 +377,8 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BACKWARD_DATA) {
 TEST_F(CUDA, CHANWISE_CONVOLUTION_BACKWARD_DATA_SMALL) {
     Checker<ConvolutionBackwardData> checker(handle_cuda());
     bool require_algo = false;
-    checker.set_before_exec_callback(
-            AlgoChecker<ConvolutionBackwardData>(
-                "CHANNEL_WISE_SMALL", &require_algo));
+    checker.set_before_exec_callback(AlgoChecker<ConvolutionBackwardData>(
+            "CHANNEL_WISE_SMALL", &require_algo));
     for (auto dtype : std::vector<DType> {
             dtype::Float32(),
 #if CUDA_VERSION >= 9000
@@ -356,10 +404,14 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BACKWARD_FILTER) {
     Checker<ConvolutionBackwardFilter> checker(handle_cuda());
     bool require_algo = false;
     checker.set_before_exec_callback(AlgoChecker<ConvolutionBackwardFilter>(
-                "CHANNEL_WISE", &require_algo));
+            "CHANNEL_WISE", &require_algo));
     UniformFloatRNG rng(-0.1, 0.1);
     for (auto dtype : std::vector<DType>{dtype::Float32(), dtype::Float16()}) {
-        checker.set_dtype(0, dtype).set_dtype(1, dtype).set_dtype(2, dtype).set_rng(0, &rng).set_rng(1, &rng);
+        checker.set_dtype(0, dtype)
+                .set_dtype(1, dtype)
+                .set_dtype(2, dtype)
+                .set_rng(0, &rng)
+                .set_rng(1, &rng);
         if (dtype.enumv() == DTypeEnum::Float16)
             checker.set_epsilon(2e-1);
         // simple case
@@ -399,7 +451,7 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_FORWARD_BENCH_CHECK) {
         benv.alloc(N, IC, IH, IW, CHL_MUL, FH, FW, PH, PW);
         benv.fill_src();
         benv.fill_flt();
-        benv.exec(conv0.get(), conv1.get());
+        benv.exec_convolution(conv0.get(), conv1.get());
         benv.cmp_dst();
     };
 
@@ -474,7 +526,7 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BENCH_ALL_ALGO_FWD) {
 
     auto run = [&](size_t N, size_t C, size_t IH, size_t IW, size_t FH,
                    size_t FW) {
-        checker.proxy()->target_algo = nullptr;
+        checker.proxy()->target_execution_policy = {};
         checker.execs({{N, C, IH, IW}, {C, 1, 1, FH, FW}, {}});
     };
 
@@ -498,7 +550,7 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BENCH_ALL_ALGO_BWD_DATA) {
 
     auto run = [&](size_t N, size_t C, size_t IH, size_t IW, size_t FH,
                    size_t FW) {
-        checker.proxy()->target_algo = nullptr;
+        checker.proxy()->target_execution_policy.algo.reset();
         checker.execs({{C, 1, 1, FH, FW},
                        {N, C, IH - FH + 1, IW - FW + 1},
                        {N, C, IH, IW}});
@@ -524,7 +576,7 @@ TEST_F(CUDA, CHANWISE_CONVOLUTION_BENCH_ALL_ALGO_BWD_FILTER) {
 
     auto run = [&](size_t N, size_t C, size_t IH, size_t IW, size_t FH,
                    size_t FW) {
-        checker.proxy()->target_algo = nullptr;
+        checker.proxy()->target_execution_policy.algo.reset();
         checker.execs({{N, C, IH, IW},
                        {N, C, IH - FH + 1, IW - FW + 1},
                        {C, 1, 1, FH, FW}});
@@ -574,7 +626,7 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_ALL_ALGO_FORWARD) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy = {};
         auto time_in_ms_fp32 = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher.set_param(param)
@@ -583,10 +635,10 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_ALL_ALGO_FORWARD) {
                 .set_dtype(2, dtype::Float16())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng);
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy = {};
         auto time_in_ms_fp16 = bencher.execs({src, filter, {}}) / RUNS;
 
-        bencher.proxy()->target_algo = nullptr;
+        bencher.proxy()->target_execution_policy.algo.reset();
         param.compute_mode = param::Convolution::ComputeMode::FLOAT32;
         bencher.set_param(param);
         auto time_in_ms_pseudo_fp16 = bencher.execs({src, filter, {}}) / RUNS;
@@ -637,10 +689,13 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_FORWARD_FLOAT) {
     CUBenchmarker<ConvolutionForward> bencher(handle_cuda());
     size_t RUNS = 1;
     bencher.set_display(false).set_times(RUNS);
-    bencher.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-            ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
-                    "CHANNEL_WISE", {})
-                    .c_str()));
+    bencher.set_before_exec_callback(
+            AlgoChecker<ConvolutionForward>(ExecutionPolicyAlgoName{
+                    "DEFAULT",
+                    {{ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
+                              "CHANNEL_WISE", {})
+                              .c_str(),
+                      {}}}}));
 
     Convolution::Param param;
     param.format = ConvBias::Param::Format::NCHW;
@@ -743,17 +798,24 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_FORWARD_FLOAT_SMALL) {
                 .set_dtype(2, dtype::Float32())
                 .set_rng(0, &rng)
                 .set_rng(1, &rng)
-                .set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-                        ConvBiasForward::algo_name<
-                                ConvBiasForward::DirectParam>("CHANNEL_WISE",
-                                                              {})
-                                .c_str()));
+                .set_before_exec_callback(
+                        AlgoChecker<ConvolutionForward>(ExecutionPolicyAlgoName{
+                                "DEFAULT",
+                                {{ConvBiasForward::algo_name<
+                                          ConvBiasForward::DirectParam>(
+                                          "CHANNEL_WISE", {})
+                                          .c_str(),
+                                  {}}}}));
         auto time_in_ms_fp32_normal = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher.set_before_exec_callback(AlgoChecker<ConvolutionForward>(
-                ConvBiasForward::algo_name<ConvBiasForward::DirectParam>(
-                        "CHANNEL_WISE", {})
-                        .c_str()));
+                ExecutionPolicyAlgoName{"DEFAULT",
+                                        {{ConvBiasForward::algo_name<
+                                                  ConvBiasForward::DirectParam>(
+                                                  "CHANNEL_WISE", {})
+                                                  .c_str(),
+                                          {}}}}));
+
         auto time_in_ms_fp32_small = bencher.execs({src, filter, {}}) / RUNS;
 
         bencher.set_param(param)
@@ -797,6 +859,88 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_FORWARD_FLOAT_SMALL) {
     run(128, 192, 28, 28, 3, 1);
     run(128, 576, 14, 14, 3, 1);
 
+}
+
+TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_FORWARD_CUDNN_DNN) {
+    CUBenchmarker<ConvBiasForward> bencher(handle_cuda());
+    size_t RUNS = 1;
+    bencher.set_display(false).set_times(RUNS);
+
+    ConvBias::Param param;
+    param.format = ConvBias::Param::Format::NCHW;
+    param.sparse = ConvBias::Param::Sparse::GROUP;
+    NormalRNG rng;
+
+    auto run = [&](size_t batch, size_t c, size_t ih, size_t iw, size_t f,
+                   size_t s) {
+        param.pad_h = f / 2;
+        param.pad_w = f / 2;
+        param.stride_h = s;
+        param.stride_w = s;
+        param.compute_mode = param::ConvBias::ComputeMode::DEFAULT;
+
+        TensorShape src = {batch, c, ih, iw}, filter = {c, 1, 1, f, f},
+                    bias = {1, c, 1, 1};
+
+        TensorLayout dst_layout;
+        auto opr = handle_cuda()->create_operator<ConvBias>();
+        opr->param() = param;
+        opr->deduce_layout({src, dtype::Float32()}, {filter, dtype::Float32()},
+                           {bias, dtype::Float32()}, {}, dst_layout);
+        float computation_mops =
+                static_cast<float>(dst_layout.total_nr_elems() * f * f * 2) *
+                1e-6;
+
+        bencher.set_param(param)
+                .set_dtype(0, dtype::Float32())
+                .set_dtype(1, dtype::Float32())
+                .set_dtype(2, dtype::Float32())
+                .set_rng(0, &rng)
+                .set_rng(1, &rng);
+        bencher.set_before_exec_callback(
+                AlgoChecker<ConvBiasForward>(".+CHANNEL_WISE.+"));
+        auto time_in_ms_dnn = bencher.execs({src, filter, bias, {}, {}}) / RUNS;
+
+        bencher.set_param(param)
+                .set_dtype(0, dtype::Float32())
+                .set_dtype(1, dtype::Float32())
+                .set_dtype(2, dtype::Float32())
+                .set_rng(0, &rng)
+                .set_rng(1, &rng);
+        bencher.set_before_exec_callback(AlgoChecker<ConvBiasForward>(
+                ".+CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM.+"));
+        auto time_in_ms_cudnn =
+                bencher.execs({src, filter, bias, {}, {}}) / RUNS;
+
+        printf("stride=%zu src=%s, filter=%s, dst=%s, dnn: %.2fms %.2fGB/s "
+               "cudnn: %.2fms %.2fGB/s "
+               "speedup: "
+               "%0.2f (dnn/cudnn)\n",
+               s, src.to_string().c_str(), filter.to_string().c_str(),
+               dst_layout.to_string().c_str(), time_in_ms_dnn,
+               computation_mops / time_in_ms_dnn, time_in_ms_cudnn,
+               computation_mops / time_in_ms_cudnn,
+               time_in_ms_cudnn / time_in_ms_dnn);
+    };
+
+    // clang-format off
+    for(size_t batch:{1, 16, 32, 64, 128}){
+        run(batch, 32, 112, 112, 3, 1);
+        run(batch, 96, 112, 112, 3, 2);
+        run(batch, 96, 112, 112, 3, 1);
+        run(batch, 144, 56, 56, 3, 2);
+        run(batch, 144, 56, 56, 3, 1);
+        run(batch, 192, 28, 28, 3, 1);
+        run(batch, 384, 14, 14, 3, 1);
+        run(batch, 576, 14, 14, 3, 1);
+        run(batch, 960, 7, 7, 3, 1);
+        //! calibrate heu algo policy hw_size param
+        run(batch, 144, 24, 24, 3, 1);
+        run(batch, 144, 22, 22, 3, 1);
+        run(batch, 144, 20, 20, 3, 1);
+        run(batch, 144, 18, 18, 3, 1);
+    }
+    // clang-format on
 }
 
 TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_BACKWARD_DATA_FLOAT_SMALL) {
@@ -982,7 +1126,7 @@ TEST_F(CUDA, BENCHMARK_CHANWISE_CONV_BWD_FILTER) {
         opr->param() = param;
         float bandwith = static_cast<float>(flt_grad.total_nr_elems() +
                                             dst_grad.total_nr_elems() +
-                                            src.total_nr_elems()) / 
+                                            src.total_nr_elems()) /
                          (1024 * 1024 * 1024) * 1e3;
         bencher.set_param(param)
                 .set_dtype(0, dtype::Float32())

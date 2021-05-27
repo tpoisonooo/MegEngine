@@ -2,7 +2,7 @@
  * \file src/serialization/include/megbrain/serialization/sereg.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -135,7 +135,7 @@ MGB_OPR_REGISTRY_CALLER_SPECIALIZE
  */
 #define MGB_SEREG_OPR_INTL_CALL_ENTRY(_cls, _impl) \
 namespace {  \
-    ::mgb::serialization::OprRegistryCaller<_cls, _impl> \
+    [[gnu::unused]] ::mgb::serialization::OprRegistryCaller<_cls, _impl> \
             __caller_OprReg##_cls##_ins; \
 }
 
@@ -179,9 +179,18 @@ namespace {  \
     } \
     MGB_SEREG_OPR_INTL_CALL_ENTRY(_cls, _OprReg##_cls)
 
+//! use to check type is complete or not, midout need a complete type
+template <class T, class = void>
+struct IsComplete : std::false_type {};
+
+template <class T>
+struct IsComplete<T, decltype(void(sizeof(T)))> : std::true_type {};
+
 //! call OprRegistry::add with only loader, used for backward compatibility
 #define MGB_SEREG_OPR_COMPAT(_name, _load)                                  \
     namespace {                                                             \
+    static_assert(IsComplete<_name>(),                                      \
+                  "need a complete type for MGB_SEREG_OPR_COMPAT");         \
     struct _OprReg##_name {                                                 \
         static cg::OperatorNodeBase* compat_loader(                         \
                 serialization::OprLoadContext& ctx,                         \
@@ -235,7 +244,7 @@ namespace {  \
                 MGB_REG_OPR_SHALLOW_COPY_IMPL(_cls, _copy); \
             } \
         };  \
-        ::mgb::serialization::OprRegistryCaller< \
+        [[gnu::unused]] ::mgb::serialization::OprRegistryCaller< \
             _cls, _OprRegShallowCopy##_cls> \
         __caller_OprRegShallowCopy##_cls##_ins; \
     }

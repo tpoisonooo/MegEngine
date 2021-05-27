@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/batch_conv_bias/algo.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -11,12 +11,16 @@
 
 #pragma once
 
-#include <csetjmp>
+#include <unordered_map>
 #include "megdnn/oprs.h"
 
+#include "megdnn/oprs/base.h"
 #include "src/common/utils.h"
 #include "src/cuda/batch_conv_bias/opr_impl.h"
 #include "src/cuda/handle.h"
+
+#include "src/common/algo_base.h"
+#include "src/common/metahelper.h"
 
 namespace megdnn {
 namespace cuda {
@@ -26,6 +30,13 @@ protected:
     ~AlgoBase() = default;
 
 public:
+    enum class AlgoType : uint32_t {
+        CUDA_GEMM_NCHW4_DOTPROD_INT8,
+        CUDA_IMPLICIT_GEMM_PRECOMP_NCHW4_DOTPROD_INT8,
+    };
+    using Mapper = std::unordered_map<AlgorithmDesc, AlgoBase*>;
+
+    AlgoBase() : Algorithm() { m_handle_type = Handle::HandleType::CUDA; }
     struct SizeArgs {
         BatchConvBiasForwardImpl* opr;
         TensorLayout src_layout, filter_layout, bias_layout, z_layout,
@@ -54,10 +65,13 @@ public:
         return is_available(args) && get_workspace_in_bytes(args) <= limit;
     }
 
-    bool is_available_reproducible(
-            const SizeArgs& args, bool reproducible = true,
+    bool is_available_attribute(
+            const SizeArgs& args,
+            const AlgoAttribute& positive_attr = AlgoAttribute::REPRODUCIBLE,
+            const AlgoAttribute& negative_attr = AlgoAttribute::DEFAULT,
             size_t limit = std::numeric_limits<size_t>::max()) {
-        return (!reproducible || is_reproducible()) &&
+        return contain_attribute_all(positive_attr) &&
+               !contain_attribute_any(negative_attr) &&
                is_available_wk(args, limit);
     }
 
@@ -79,11 +93,14 @@ public:
     size_t get_workspace_in_bytes(const SizeArgs& args) const override;
     void exec(const ExecArgs& args) const override;
 
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
 
     const char* name() const override {
         return "BATCH_CONV_BIAS_INT8_NCHW4_GEMM_DOTPROD";
     }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_GEMM_NCHW4_DOTPROD_INT8)
 };
 
 class BatchConvBiasForwardImpl::AlgoInt8NCHW4DotProdImplicitGemmPrecomp final
@@ -93,20 +110,23 @@ public:
     size_t get_workspace_in_bytes(const SizeArgs& args) const override;
     void exec(const ExecArgs& args) const override;
 
-    bool is_reproducible() const override { return true; }
+    AlgoAttribute attribute() const override {
+        return AlgoAttribute::REPRODUCIBLE;
+    }
 
     const char* name() const override {
         return "BATCH_CONV_BIAS_INT8_NCHW4_IMPLICIT_GEMM_PRECOMP_DOTPROD";
     }
+    MEGDNN_DECL_ALGO_TYPE(CUDA_IMPLICIT_GEMM_PRECOMP_NCHW4_DOTPROD_INT8)
 
 private:
     WorkspaceBundle get_workspace_bundle(dt_byte* raw_ptr,
                                          const SizeArgs& args) const;
 };
 
-class BatchConvBiasForwardImpl::AlgoPack {
-    AlgoPack(const AlgoPack&) = delete;
-    AlgoPack& operator=(const AlgoPack&) = delete;
+class BatchConvBiasForwardImpl::AlgoPack : NonCopyableObj {
+private:
+    AlgoBase::Mapper m_all_algos_map;
 
 public:
     AlgoPack();
@@ -115,6 +135,8 @@ public:
     AlgoInt8NCHW4DotProdImplicitGemmPrecomp int8_nchw4_implicit_gemm_dotprod;
 
     std::vector<AlgoBase*> all_algos;
+
+    const AlgoBase::Mapper& all_algos_map() const { return m_all_algos_map; }
 };
 
 }  // namespace cuda

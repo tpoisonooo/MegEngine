@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/cumsum/kern_impl.cu
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -62,7 +62,7 @@ uint32_t cumsum::get_workspace_bytes_for_cub_1d(uint32_t nr_item,
         CASE(8, uint64_t);
 #undef CASE
         default:
-            report_error(megdnn_mangle("unsupported item size in cumsum"));
+            report_error("unsupported item size in cumsum");
     }
 }
 

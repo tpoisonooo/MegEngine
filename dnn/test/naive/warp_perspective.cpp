@@ -2,7 +2,7 @@
  * \file dnn/test/naive/warp_perspective.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -15,6 +15,7 @@
 #include "test/common/warp_perspective.h"
 #include "megdnn/tensor_format.h"
 #include "test/common/benchmarker.h"
+#include "test/common/extra_impl_helper.h"
 
 using namespace megdnn;
 using namespace test;
@@ -149,7 +150,6 @@ TEST_F(NAIVE, WARP_PERSPECTIVE_NCHW4) {
         break;
     }
 }
-
 
 TEST_F(NAIVE, WARP_PERSPECTIVE) {
     Checker<WarpPerspective> checker(handle(), false);
@@ -352,6 +352,9 @@ TEST_F(NAIVE_MULTI_THREADS, WARP_PERSPECTIVE_FORWARD_HWCD4) {
             checker.execs({{22, 10, 1, 11, 4}, {22, 3, 3}, {22, 11, 1, 12, 4}});
         }
     }
+#if MEGDNN_TEST_ASAN
+//! asan detect nan will make test failed
+#else
     // nan case
     NanMatRNG rng_nan;
     UniformFloatRNG rng_zero(0, 0);
@@ -369,6 +372,7 @@ TEST_F(NAIVE_MULTI_THREADS, WARP_PERSPECTIVE_FORWARD_HWCD4) {
         checker.set_param(param);
         checker.exec({{10, 10, 1, 11, 4}, {10, 3, 3}, {10, 12, 1, 13, 4}});
     }
+#endif
 }
 
 #if MEGDNN_WITH_BENCHMARK
@@ -455,5 +459,63 @@ TEST_F(NAIVE_BENCHMARK_MULTI_THREADS, BENCHMARK_WARP_PERSPECTIVE) {
 }
 #endif
 
+TEST_F(NAIVE, WARP_PERSPECTIVE_BFLOAT16) {
+    Checker<WarpPerspective> checker(handle(), false);
+    WarpPerspective::Param p;
+    p.bmode = WarpPerspective::Param::BorderMode::BORDER_REFLECT;
+    p.imode = WarpPerspective::Param::InterpolationMode::LINEAR;
+    p.format = WarpPerspective::Param::Format::NCHW;
+
+    auto extra_impl = extra_impl_helper<WarpPerspective>(handle(), p);
+    checker.set_param(p)
+            .set_epsilon(1e-1)
+            .set_dtype(0, dtype::BFloat16())
+            .set_dtype(1, dtype::Float32())
+            .set_dtype(2, dtype::BFloat16())
+            .set_extra_opr_impl(extra_impl)
+            .execs({{1, 1, 3, 3}, {1, 3, 3}, {1, 1, 2, 2}})
+            .execs({{1000, 2, 10, 11}, {1000, 3, 3}, {1000, 2, 12, 13}});
+}
+
+TEST_F(NAIVE, WARP_PERSPECTIVE_BACKWARD_DATA_BFLOAT16) {
+    Checker<WarpPerspectiveBackwardData> checker(handle(), false);
+    WarpPerspectiveBackwardData::Param p;
+    p.bmode = WarpPerspectiveBackwardData::Param::BorderMode::BORDER_REFLECT;
+    p.imode = WarpPerspectiveBackwardData::Param::InterpolationMode::LINEAR;
+    p.format = WarpPerspectiveBackwardData::Param::Format::NCHW;
+
+    auto extra_impl =
+            extra_impl_helper<WarpPerspectiveBackwardData>(handle(), p);
+    checker.set_param(p)
+            .set_dtype(0, dtype::Float32())
+            .set_dtype(1, dtype::BFloat16())
+            .set_dtype(2, dtype::BFloat16())
+            .set_extra_opr_impl(extra_impl)
+            .set_epsilon(1e-1)
+            .execs({{1, 3, 3}, {1, 1, 2, 2}, {1, 1, 3, 3}});
+}
+
+TEST_F(NAIVE, WARP_PERSPECTIVE_BACKWARD_MAT_BFLOAT16) {
+    Checker<WarpPerspectiveBackwardMat> checker(handle(), false);
+    WarpPerspectiveBackwardMat::Param p;
+    p.bmode = WarpPerspectiveBackwardMat::Param::BorderMode::BORDER_REFLECT;
+    p.imode = WarpPerspectiveBackwardMat::Param::InterpolationMode::LINEAR;
+    p.format = WarpPerspectiveBackwardMat::Param::Format::NCHW;
+    p.border_val = 0.3f;
+
+    auto extra_impl =
+            extra_impl_helper<WarpPerspectiveBackwardMat>(handle(), p);
+    checker.set_param(p)
+            .set_dtype(0, dtype::BFloat16())
+            .set_dtype(1, dtype::Float32())
+            .set_dtype(2, dtype::BFloat16())
+            .set_dtype(3, dtype::Float32())
+            .set_extra_opr_impl(extra_impl)
+            .set_epsilon(1e-1)
+            .execs({{1000, 3, 11, 12},
+                    {1000, 3, 3},
+                    {1000, 3, 10, 11},
+                    {1000, 3, 3}});
+}
 
 // vim: syntax=cpp.doxygen

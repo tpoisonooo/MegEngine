@@ -2,7 +2,7 @@
  * \file dnn/src/common/indexing_one_hot.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -32,10 +32,11 @@ void IndexingOneHotBase::check_layout_fwd(
         const TensorLayout &src, const TensorLayout &index,
         const TensorLayout &dst) {
     auto errmsg = [&]() -> std::string {
-        return megdnn_mangle(ssprintf("bad layout for IndexingOneHot: "
-                    "src=%s index=%s dst=%s axis=%d",
-                    src.to_string().c_str(), index.to_string().c_str(),
-                    dst.to_string().c_str(), m_param.axis));
+        return ssprintf(
+                "bad layout for IndexingOneHot: "
+                "src=%s index=%s dst=%s axis=%d",
+                src.to_string().c_str(), index.to_string().c_str(),
+                dst.to_string().c_str(), m_param.axis);
     };
     MEGDNN_MARK_USED_VAR(errmsg);
     megdnn_assert_eq_dtype(src, dst);

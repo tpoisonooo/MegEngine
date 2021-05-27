@@ -2,7 +2,7 @@
  * \file src/opr/include/megbrain/opr/misc.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -13,6 +13,10 @@
 
 #include "megbrain/opr/internal/megdnn_opr_wrapper.h"
 #include "megbrain/opr/internal/out_shape_by_sym_var.h"
+#if MGB_CUDA
+#include "../../../impl/nvof/denseflownvidia.h"
+#include "megbrain/opr/param_defs.h"
+#endif
 #include "megdnn/oprs.h"
 
 #include <array>
@@ -82,6 +86,7 @@ public:
 //! cumulative sum along given axis
 MGB_DEFINE_OPR_CLASS(Cumsum, cg::SingleCNOperatorNodeBaseT<
         mixin::MegDNNOprHolderImpl<megdnn::Cumsum>>) // {
+    void add_input_layout_constraint() override;
 
     public:
         Cumsum(VarNode *src, const Param &param, const OperatorNodeConfig &config);
@@ -93,6 +98,41 @@ MGB_DEFINE_OPR_CLASS(Cumsum, cg::SingleCNOperatorNodeBaseT<
         void scn_do_execute() override;
         void init_output_static_infer_desc() override;
 };
+
+#if MGB_CUDA
+MGB_DEFINE_OPR_CLASS(NvOf, cg::SingleCNOperatorNodeBase) // {
+
+    public:
+        using Param = megdnn::param::NvOf;
+        NvOf(VarNode* src, const Param& param,
+             const OperatorNodeConfig& config);
+
+        // for serialization
+        static SymbolVar make(SymbolVar opr, const Param& param,
+                              const OperatorNodeConfig& config = {});
+
+        static SymbolVar make(SymbolVar opr,
+                              const OperatorNodeConfig& config = {}) {
+            return make(opr, {}, config);
+        }
+
+        Param param() const {
+            return m_param;
+        }
+
+    protected:
+        void init_output_dtype() override;
+        void scn_do_execute() override;
+        void init_output_static_infer_desc() override;
+
+    private:
+        std::shared_ptr<NVFlowExtractor> nv_flow_extractor;
+        std::vector<size_t> vshape;
+        Param m_param;
+        std::mutex m_lock;
+        bool init_flag = false;
+};
+#endif
 
 namespace intl {
 using CondTakeBase =

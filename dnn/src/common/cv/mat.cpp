@@ -2,7 +2,7 @@
  * \file dnn/src/common/cv/mat.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -117,23 +117,21 @@ bool Mat<T>::equals(const Mat<T>& rhs) const {
         return false;
     if (this->m_channels != rhs.m_channels)
         return false;
-    T* row1 = new T[m_cols * m_channels];
-    T* row2 = new T[m_cols * m_channels];
+    std::unique_ptr<T[]> row1(new T[m_cols * m_channels]);
+    std::unique_ptr<T[]> row2(new T[m_cols * m_channels]);
     megdnn_assert(row1);
     megdnn_assert(row2);
     for (size_t r = 0; r < m_rows; ++r) {
-        cuda_check(cudaMemcpy(row1, this->ptr(r),
+        cuda_check(cudaMemcpy(row1.get(), this->ptr(r),
                               sizeof(T) * m_cols * m_channels,
                               cudaMemcpyDeviceToHost));
-        cuda_check(cudaMemcpy(row2, rhs.ptr(r), sizeof(T) * m_cols * m_channels,
+        cuda_check(cudaMemcpy(row2.get(), rhs.ptr(r), sizeof(T) * m_cols * m_channels,
                               cudaMemcpyDeviceToHost));
         for (size_t i = 0; i < m_cols * m_channels; ++i) {
             if (row1[i] != row2[i])
                 return false;
         }
     }
-    delete[] row1;
-    delete[] row2;
     return true;
 }
 

@@ -2,7 +2,7 @@
  * \file dnn/test/common/local.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -65,6 +65,26 @@ static inline std::vector<TestArg> get_args_for_intel_gpu() {
                 N, IC, 7, 7, OC, 5, 5, 3, 3);
     }
     // clang-format on
+    return test_args;
+}
+
+static inline std::vector<TestArg> get_args_for_opencl() {
+    std::vector<TestArg> test_args;
+
+    for (size_t N : {32, 64})
+        for (size_t IC : {1, 3, 32})
+            for (size_t OC : {1, 3, 32}) {
+                test_args.emplace_back(
+                        param::Convolution{
+                                param::Convolution::Mode::CROSS_CORRELATION, 0,
+                                0, 1, 1},
+                        N, IC, 7, 7, OC, 5, 5, 3, 3);
+                test_args.emplace_back(
+                        param::Convolution{
+                                param::Convolution::Mode::CROSS_CORRELATION, 1,
+                                1, 1, 1},
+                        N, IC, 7, 7, OC, 7, 7, 3, 3);
+            }
     return test_args;
 }
 

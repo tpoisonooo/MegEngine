@@ -1,0 +1,8 @@
+numpy>=1.18
+opencv-python
+pyarrow
+requests
+tabulate
+tqdm
+redispy
+deprecated

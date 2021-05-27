@@ -2,7 +2,7 @@
  * \file dnn/src/fallback/matrix_mul/gemm_impl.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -70,9 +70,9 @@ class GemmInterleaved<Strategy, true> {
 
 public:
     size_t get_workspace_size() const {
-        return get_a_workspace_size() + get_b_workspace_size() +
-               get_c_workspace_size();
+        return get_bundle().total_size_in_bytes();
     }
+
     WorkspaceBundle get_bundle() const {
         return {nullptr,
                 {get_a_workspace_size(), get_b_workspace_size(),

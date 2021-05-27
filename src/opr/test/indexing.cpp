@@ -2,7 +2,7 @@
  * \file src/opr/test/indexing.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -14,6 +14,7 @@
 #include "megbrain/opr/basic_arith.h"
 #include "megbrain/opr/io.h"
 #include "megbrain/opr/misc.h"
+#include "megbrain/opr/utility.h"
 #include "megbrain/test/autocheck.h"
 #include "megbrain/test/helper.h"
 #include "megbrain/test/megdnn_helper.h"
@@ -335,6 +336,23 @@ TEST(TestOprIndexing, MultiAxisVec) {
     checker.run({TensorShape{12, 1, 2, 9}, {23}}, opt);
 }
 
+TEST(TestOprIndexing, MultiAxisVecWithEmptyIndexDesc) {
+    auto graph = ComputingGraph::make();
+    auto host_x = HostTensorGenerator<>{}({2, 3});
+    auto run_check = [&](SymbolVar y) {
+        HostTensorND host_y;
+        auto func = graph->compile({make_callback_copy(y, host_y)});
+        func->execute();
+        ASSERT_EQ(TensorShape({2, 3}), host_y.shape());
+        func->execute();
+        MGB_ASSERT_TENSOR_EQ(*host_x, host_y);
+    };
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x);
+
+    run_check(opr::IndexingMultiAxisVec::make(x, {}));
+}
+
 TEST(TestOprIndexing, IncrMultiAxisVec) {
     using Checker = AutoOprChecker<3, 1>;
     using AIdx = opr::indexing::AxisIndexer;
@@ -426,6 +444,26 @@ TEST(TestOprIndexing, SetMultiAxisVec) {
     checker.run({TensorShape{7, 2, 23}, {15}, {3, 2, 15}}, opt);
     cur_axis_size = 18;
     checker.run({TensorShape{12, 1, 2, 18}, {1}, {5, 1, 2, 1}}, opt);
+}
+
+TEST(TestOprIndexing, SetMultiAxisVecWithEmptyIndexDesc) {
+    auto graph = ComputingGraph::make();
+    auto host_x = HostTensorGenerator<>{}({2, 3}),
+        host_y = HostTensorGenerator<>{}({2, 3});
+    auto run_check = [&](SymbolVar z) {
+        HostTensorND host_z;
+        auto func = graph->compile({make_callback_copy(z, host_z)});
+        // warning should be printed on the first execution
+        func->execute();
+        ASSERT_EQ(TensorShape({2, 3}), host_z.shape());
+        func->execute();
+        MGB_ASSERT_TENSOR_EQ(host_z, *host_y);
+    };
+
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+         y = opr::Host2DeviceCopy::make(*graph, host_y);
+
+    run_check(opr::IndexingSetMultiAxisVec::make(x, y, {}));
 }
 
 TEST(TestOprIndexing, MultiAxisVecDegenerate) {
@@ -1165,6 +1203,120 @@ TEST(TestOprIndexing, SetMeshIndexing) {
         checker.run({TensorShape{8, 20, 10, 7, 7}, {1}, {9}, {3, 9, 1, 7, 7}},
                     opt);
     }
+    { // only interval AxisIndexer given
+        using Checker = AutoOprChecker<2, 1>;
+        auto make_graph =
+                [&](const Checker::SymInpArray& inputs) -> Checker::SymOutArray {
+            SymbolVar x = inputs[0], val = inputs[1];
+            return {opr::SetMeshIndexing::make(
+                    x, val,
+                    {AIdx::make_interval(0, x.make_scalar(1),
+                        None, x.make_scalar(2))})};
+        };
+        auto fwd = [&](Checker::NumOutArray& dest, Checker::NumInpArray inp) {
+            dest[0].copy_from(*inp[0]);
+            auto value = *inp[1];
+            auto value_iter = megdnn::tensor_iter<float>(value.as_megdnn()).begin();
+            size_t n = dest[0].layout().stride[0];
+            float* raw_ptr = dest[0].ptr<float>();
+            for (size_t i = 0; i < value.shape().total_nr_elems(); ++i) {
+                ptrdiff_t offset = (i / n * 2 + 1) * n + i % n;
+                *(raw_ptr + offset) = *value_iter;
+                ++ value_iter;
+            }
+        };
+        Checker checker{make_graph, fwd};
+        checker.run({TensorShape{11}, {5}});
+        checker.run({TensorShape{6, 7}, {3, 7}});
+        checker.run({TensorShape{4, 7, 1}, {2, 7, 1}});
+        checker.run({TensorShape{7, 1, 1, 2}, {3, 1, 1, 2}});
+    }
+}
+
+namespace {
+
+template<class Opr>
+void run_multi_axis_vec_empty_shape(
+        const TensorShape& ishp, const TensorShape& idx0,
+        const TensorShape& idx1, const TensorShape& tshp) {
+    mgb_assert(ishp.ndim >= 4);
+    mgb_assert(idx0.is_empty() || idx1.is_empty());
+    using AI = opr::indexing::AxisIndexer;
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<> gen;
+    HostTensorGenerator<dtype::Int32> gen_idx;
+    auto host_x = gen(ishp);
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+        idx_dynamic_shape = opr::MarkDynamicVar::make(
+            opr::ImmutableTensor::make(*graph, *gen_idx(idx0))),
+        idx_static_shape =
+            opr::ImmutableTensor::make(*graph, *gen_idx(idx1)),
+        y = Opr::make(x, {
+                    AI::make_interval(-1, None, None, x.make_scalar(2)),
+                    AI::make_index(1, idx_dynamic_shape),
+                    AI::make_index(2, idx_static_shape)});
+    HostTensorND host_y;
+    auto func = graph->compile({make_callback_copy(y, host_y)});
+    func->execute();
+    ASSERT_TRUE(host_y.shape().is_empty());
+    MGB_ASSERT_SHAPE_EQ(host_y.shape(), tshp);
+}
+
+template<class Opr>
+void run_modify_multi_axis_vec_empty_shape(
+        const TensorShape& ishp, const TensorShape& vshp,
+        const TensorShape& idx0, const TensorShape& idx1) {
+    mgb_assert(ishp.ndim >= 4);
+    mgb_assert(vshp.is_empty() && (idx0.is_empty() || idx1.is_empty()));
+    using AI = opr::indexing::AxisIndexer;
+    auto graph = ComputingGraph::make();
+    HostTensorGenerator<> gen;
+    HostTensorGenerator<dtype::Int32> gen_idx;
+    auto host_x = gen(ishp), host_v = gen(vshp);
+    auto x = opr::Host2DeviceCopy::make(*graph, host_x),
+        v = opr::Host2DeviceCopy::make(*graph, host_v),
+        idx_dynamic_shape = opr::MarkDynamicVar::make(
+            opr::ImmutableTensor::make(*graph, *gen_idx(idx0))),
+        idx_static_shape =
+            opr::ImmutableTensor::make(*graph, *gen_idx(idx1)),
+        y = Opr::make(x, v, {
+                    AI::make_interval(-1, None, None, x.make_scalar(2)),
+                    AI::make_index(1, idx_dynamic_shape),
+                    AI::make_index(2, idx_static_shape)});
+    HostTensorND host_y;
+    auto func = graph->compile({make_callback_copy(y, host_y)});
+    func->execute();
+    MGB_ASSERT_TENSOR_EQ(*host_x, host_y);
+}
+
+}
+
+TEST(TestOprIndexing, MultiAxisVecEmptyShape) {
+    TensorShape ishp{8, 2, 3, 4};
+    size_t n = ishp[0], last_ndim = ishp[ishp.ndim - 1] / 2;
+    run_multi_axis_vec_empty_shape<opr::IndexingMultiAxisVec>(
+            ishp, {0}, {0}, {n, 0, last_ndim});
+    run_multi_axis_vec_empty_shape<opr::MeshIndexing>(
+            ishp, {0}, {2}, {n, 0, 2, last_ndim});
+    run_multi_axis_vec_empty_shape<opr::MeshIndexing>(
+            ishp, {3}, {0}, {n, 3, 0, last_ndim});
+    run_multi_axis_vec_empty_shape<opr::BatchedMeshIndexing>(
+            ishp, {n, 0}, {n, 2}, {n, 0, 2, last_ndim});
+    run_multi_axis_vec_empty_shape<opr::BatchedMeshIndexing>(
+            ishp, {n, 4}, {n, 0}, {n, 4, 0, last_ndim});
+
+    run_modify_multi_axis_vec_empty_shape<opr::IndexingIncrMultiAxisVec>(
+            ishp, {n, 0, last_ndim}, {0}, {0});
+    run_modify_multi_axis_vec_empty_shape<opr::IndexingSetMultiAxisVec>(
+            ishp, {n, 0, last_ndim}, {0}, {0});
+    run_modify_multi_axis_vec_empty_shape<opr::IncrMeshIndexing>(
+            ishp, {n, 0, 2, last_ndim}, {0}, {2});
+    run_modify_multi_axis_vec_empty_shape<opr::SetMeshIndexing>(
+            ishp, {n, 3, 0, last_ndim}, {3}, {0});
+    run_modify_multi_axis_vec_empty_shape<opr::BatchedIncrMeshIndexing>(
+            ishp, {n, 4, 0, last_ndim}, {n, 4}, {n, 0});
+    run_modify_multi_axis_vec_empty_shape<opr::BatchedSetMeshIndexing>(
+            ishp, {n, 0, 5, last_ndim}, {n, 0}, {n, 5});
 }
 
 #endif  // MGB_ENABLE_EXCEPTION

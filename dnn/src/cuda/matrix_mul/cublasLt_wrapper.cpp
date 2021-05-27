@@ -2,16 +2,18 @@
  * \file dnn/src/cuda/matrix_mul/cublasLt_wrapper.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
-#include "src/cuda/matrix_mul/cublasLt_wrapper.h"
 #include "src/common/utils.h"
+#include "src/cuda/matrix_mul/cublasLt_wrapper.h"
 #include "src/cuda/utils.h"
 #if CUDA_VERSION >= 10010
+
 namespace megdnn {
 namespace cuda {
 static cudaDataType_t to_cuda_dtype(DType tp) {
@@ -27,10 +29,26 @@ static cudaDataType_t to_cuda_dtype(DType tp) {
         case DTypeEnum::QuantizedS32:
             return CUDA_R_32I;
         default:
-            megdnn_throw(megdnn_mangle(
-                    "dtype must be float16/float32/int8/qs8/int32"));
+            megdnn_throw("dtype must be float16/float32/int8/qs8/int32");
     }
 }
+
+#if CUDA_VERSION >= 11000
+static cublasComputeType_t to_cublas_compute_type(DType tp) {
+    switch (tp.enumv()) {
+        case DTypeEnum::Float16:
+            return CUBLAS_COMPUTE_16F;
+        case DTypeEnum::Float32:
+            return CUBLAS_COMPUTE_32F;
+        case DTypeEnum::Int32:
+        case DTypeEnum::QuantizedS32:
+            return CUBLAS_COMPUTE_32I;
+        default:
+            megdnn_throw("dtype must be float16/float32/int32/Qs32");
+    }
+}
+#endif
+
 static const char* cuda_type_to_str(cudaDataType_t tp) {
     switch (tp) {
         case CUDA_R_16F:
@@ -42,10 +60,10 @@ static const char* cuda_type_to_str(cudaDataType_t tp) {
         case CUDA_R_32I:
             return "CUDA_R_32I";
         default:
-            megdnn_throw(
-                    megdnn_mangle("dtype must be float16/float32/int8/int32"));
+            megdnn_throw("dtype must be float16/float32/int8/int32");
     }
 }
+
 static size_t cuda_dtype_size(cudaDataType_t dt) {
     switch (dt) {
         case CUDA_R_8I:
@@ -56,10 +74,10 @@ static size_t cuda_dtype_size(cudaDataType_t dt) {
         case CUDA_R_32I:
             return 4_z;
         default:
-            megdnn_throw(
-                    megdnn_mangle("dtype must be float16/float32/int8/int32"));
+            megdnn_throw("dtype must be float16/float32/int8/int32");
     }
 }
+
 CUBLASLTMatmulDesc::~CUBLASLTMatmulDesc() {
     if (matmul_desc)
         cublas_check(cublasLtMatmulDescDestroy(matmul_desc));
@@ -86,9 +104,16 @@ void CUBLASLTMatmulDesc::set(const SizeArgs& args, bool batched) {
     uint32_t pm = CUBLAS_POINTER_MODE_DEVICE;
     dt_b = to_cuda_dtype(args.layout_b.dtype);
     dt_a = to_cuda_dtype(args.layout_a.dtype);
-    dt_compute = dt_c = to_cuda_dtype(args.layout_c.dtype);
+    dt_c = to_cuda_dtype(args.layout_c.dtype);
+
     megdnn_assert(dt_a == dt_b, "matrix A and B should have same precision");
+#if CUDA_VERSION >= 11000
+    dt_compute = to_cublas_compute_type(args.layout_c.dtype);
+    cublas_check(cublasLtMatmulDescCreate(&matmul_desc, dt_compute, dt_c));
+#else
+    dt_compute = dt_c;
     cublas_check(cublasLtMatmulDescCreate(&matmul_desc, dt_compute));
+#endif
     cublas_check(cublasLtMatmulDescSetAttribute(
             matmul_desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pm, sizeof(pm)));
 
@@ -100,7 +125,7 @@ void CUBLASLTMatmulDesc::set(const SizeArgs& args, bool batched) {
      * So we calculate C^t = B^t * A^t by cublas. Here the transpose symbol
      * implies row-major to column-major conversion
      */
-    if (dt_compute == CUDA_R_32I) {
+    if (dt_c == CUDA_R_32I) {
         /**
          *  \NOTE: To use IMMA kernels, use computeType = CUDA_R_32I and
          *  CUBLASLT_ORDER_COL32 for matrices A,C,D and
@@ -209,7 +234,7 @@ void CUBLASLTMatmulDesc::set(const SizeArgs& args, bool batched) {
 bool CUBLASLTMatmulDesc::is_available(const SizeArgs& args, size_t ws_limit) {
     bool support;
     cublasLtMatmulAlgo_t algo;
-    switch (dt_compute) {
+    switch (dt_c) {
         case CUDA_R_16F:
             support = (dt_a == CUDA_R_16F);
             break;
@@ -239,17 +264,16 @@ WorkspaceBundle CUBLASLTMatmulDesc::get_workspace_bundle(
     cublasLtMatmulHeuristicResult_t result{};
     status = cublasLtMatmulAlgoCheck(
             cublasLt_handle, matmul_desc,
-            dt_compute == CUDA_R_32I ? layout_trans_b : layout_b,
-            dt_compute == CUDA_R_32I ? layout_trans_a : layout_a,
-            dt_compute == CUDA_R_32I ? layout_trans_c : layout_c,
-            dt_compute == CUDA_R_32I ? layout_trans_c : layout_c, &algo,
-            &result);
+            dt_c == CUDA_R_32I ? layout_trans_b : layout_b,
+            dt_c == CUDA_R_32I ? layout_trans_a : layout_a,
+            dt_c == CUDA_R_32I ? layout_trans_c : layout_c,
+            dt_c == CUDA_R_32I ? layout_trans_c : layout_c, &algo, &result);
     // return empty WorkspaceBundle if cublasLtMatmulAlgoCheck() failed
     if (status != CUBLAS_STATUS_SUCCESS)
         return {nullptr, {}};
     algo_workspace_size = result.workspaceSize;
     return {nullptr,
-            (dt_compute == CUDA_R_32I)
+            (dt_c == CUDA_R_32I)
                     ? SmallVector<size_t>{algo_workspace_size, workspace_b,
                                           workspace_a, workspace_c}
                     : SmallVector<size_t>{algo_workspace_size}};
@@ -273,7 +297,7 @@ bool CUBLASLTMatmulDesc::get_algorithm_heuristic(const SizeArgs& args,
      *  \Note: algo_ws_limit must be zero if cublasLtGetVersion() <= 10100
      */
     // algo_ws_limit = 0;
-    if (dt_compute == CUDA_R_32I) {
+    if (dt_c == CUDA_R_32I) {
         //[FIXME]: cublasLt(Version 10020) produce wrong result when k in
         //[64*n+1 , 64*n+32] for small matrix
 
@@ -291,10 +315,10 @@ bool CUBLASLTMatmulDesc::get_algorithm_heuristic(const SizeArgs& args,
             sizeof(algo_ws_limit)));
     status = cublasLtMatmulAlgoGetHeuristic(
             cublasLt_handle, matmul_desc,
-            dt_compute == CUDA_R_32I ? layout_trans_b : layout_b,
-            dt_compute == CUDA_R_32I ? layout_trans_a : layout_a,
-            dt_compute == CUDA_R_32I ? layout_trans_c : layout_c,
-            dt_compute == CUDA_R_32I ? layout_trans_c : layout_c, algo_pref, 1,
+            dt_c == CUDA_R_32I ? layout_trans_b : layout_b,
+            dt_c == CUDA_R_32I ? layout_trans_a : layout_a,
+            dt_c == CUDA_R_32I ? layout_trans_c : layout_c,
+            dt_c == CUDA_R_32I ? layout_trans_c : layout_c, algo_pref, 1,
             &algo_result, &return_algo_count);
     if (status == CUBLAS_STATUS_SUCCESS && return_algo_count > 0 &&
         // perform cublasLtAlgoCheck() to make sure the algo is correct

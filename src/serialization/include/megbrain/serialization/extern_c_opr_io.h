@@ -2,7 +2,7 @@
  * \file src/serialization/include/megbrain/serialization/extern_c_opr_io.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -16,31 +16,36 @@
 #include "megbrain/serialization/opr_registry.h"
 
 namespace mgb {
-namespace serialization {
+namespace opr {
 
 //! an operator to run extern C oprs
 MGB_DEFINE_OPR_CLASS(ExternCOprRunner,
                            cg::SingleCNOutshapePureByInshapeOprBase) // {
     std::shared_ptr<MGBOprDesc> m_desc;
+    //! store ExternCOprRunner opr full dump name
+    std::string m_dump_name;
+    //! store dynamic store param
+    std::shared_ptr<ExternCOprParam> m_param;
 
     void get_output_var_shape(const TensorShapeArray& inp_shape,
                               TensorShapeArray& out_shape) const override;
     void scn_do_execute() override;
     void add_input_layout_constraint() override;
     void init_output_dtype() override;
+    void check_param();
 
     static cg::OperatorNodeBase* make_from_desc_shared(
-            const VarNodeArray& inputs, std::shared_ptr<MGBOprDesc> desc,
-            const OperatorNodeConfig& config);
+            std::string& name, const VarNodeArray& inputs,
+            std::shared_ptr<MGBOprDesc> desc, const OperatorNodeConfig& config);
 
 public:
-    ExternCOprRunner(const VarNodeArray& inputs,
+    ExternCOprRunner(std::string& name, const VarNodeArray& inputs,
                      std::shared_ptr<MGBOprDesc> desc,
                      const OperatorNodeConfig& config);
 
     //! create from MGBOprDesc and steal its reference
     static cg::OperatorNodeBase* make_from_desc(
-            const VarNodeArray& inputs, MGBOprDesc* desc,
+            std::string& name, const VarNodeArray& inputs, MGBOprDesc* desc,
             const OperatorNodeConfig& config = {});
 
     /*!
@@ -68,10 +73,11 @@ public:
     static bool unregister_loader(const char* name);
 
     //! impl for serialization dump
-    static void dump(OprDumpContext& ctx, const cg::OperatorNodeBase& opr);
+    static void dump(serialization::OprDumpContext& ctx,
+                     const cg::OperatorNodeBase& opr);
 
     //! impl for serialization load
-    static cg::OperatorNodeBase* load(OprLoadContext& ctx,
+    static cg::OperatorNodeBase* load(serialization::OprLoadContext& ctx,
                                       const cg::VarNodeArray& inputs,
                                       const OperatorNodeConfig& config);
 
@@ -86,9 +92,18 @@ public:
 
     //! helper for converting MGBTensorShape to TensorShape
     static TensorShape tensor_shape_from_c(const MGBTensorShape& shape);
+
+    const std::string& get_dump_name() {
+        return m_dump_name;
+    }
+
+    void set_param(const std::shared_ptr<ExternCOprParam>& param) {
+        m_param = param;
+        m_desc->dynamic_param = m_param.get();
+    }
 };
 
-}  // namespace serialization
+}  // namespace opr
 }  // namespace mgb
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

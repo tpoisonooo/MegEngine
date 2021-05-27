@@ -2,7 +2,7 @@
  * \file dnn/src/cuda/batched_matrix_mul/algo.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -27,11 +27,11 @@ std::string BatchedMatrixMulForwardImpl::AlgoBase::SizeArgs::to_string() const {
     MEGDNN_MARK_USED_VAR(m);
     MEGDNN_MARK_USED_VAR(n);
     MEGDNN_MARK_USED_VAR(k);
-    return megdnn_mangle(ssprintf(
+    return ssprintf(
             "A={%zux%zu},B={%zux%zu},C={%zux%zu},Transpose A=%d,Transpose "
             "B=%d,ldA=%zu,ldB=%zu,ldC=%zu",
             m, k, k, n, m, n, param.transposeA, param.transposeB,
-            layout_a.stride[0], layout_b.stride[0], layout_c.stride[0]));
+            layout_a.stride[0], layout_b.stride[0], layout_c.stride[0]);
 }
 
 BatchedMatrixMulForwardImpl::AlgoBase::SizeArgs::SizeArgs(
@@ -54,10 +54,13 @@ BatchedMatrixMulForwardImpl::AlgoPack::AlgoPack() {
     all_algos.push_back(&cublasLt);
 #endif
     all_algos.push_back(&int8x8x32);
-    for (auto& algo : mm_pack.all_algos) {
-        brute_force_algos.emplace_back(AlgoBruteForce(algo));
-    }
-    for (auto& algo : brute_force_algos) {
-        all_algos.push_back(&algo);
+    all_algos.push_back(&brute_force);
+
+    for (auto&& algo : all_algos) {
+        m_all_algos_map.emplace(algo->info().desc, algo);
     }
 }
+
+MEGDNN_DEF_GET_ALGO_FROM_DESC(BatchedMatrixMulForwardImpl)
+
+// vim: syntax=cpp.doxygen

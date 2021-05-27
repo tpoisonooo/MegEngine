@@ -1,0 +1,8 @@
+set(ARM_CROSS_BUILD_ARCH armv7)
+set(CMAKE_C_COMPILER "arm-linux-gnueabi-gcc")
+set(CMAKE_CXX_COMPILER "arm-linux-gnueabi-g++")
+set(CMAKE_C_FLAGS "-mfloat-abi=softfp -mfpu=neon-vfpv4 -Werror=unused-parameter -Wno-psabi")
+set(CMAKE_CXX_FLAGS "-mfloat-abi=softfp -mfpu=neon-vfpv4 -Werror=unused-parameter -Wno-psabi")
+set(CMAKE_STRIP "arm-linux-gnueabi-strip")
+set(CMAKE_SYSTEM_PROCESSOR armv7)
+set(CMAKE_SYSTEM_NAME Linux)

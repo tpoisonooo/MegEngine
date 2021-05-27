@@ -2,17 +2,19 @@
  * \file dnn/src/naive/handle.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.
  */
 
 #include "src/naive/handle.h"
 
 #include "src/common/handle_impl.h"
 
+#include "src/naive/adaptive_pooling/opr_impl.h"
 #include "src/naive/add_update/opr_impl.h"
 #include "src/naive/argmxx/opr_impl.h"
 #include "src/naive/argsort/opr_impl.h"
@@ -28,6 +30,7 @@
 #include "src/naive/convpooling/opr_impl.h"
 #include "src/naive/cumsum/opr_impl.h"
 #include "src/naive/cvt_color/opr_impl.h"
+#include "src/naive/dct/opr_impl.h"
 #include "src/naive/deformable_conv/opr_impl.h"
 #include "src/naive/deformable_ps_roi_pooling/opr_impl.h"
 #include "src/naive/dot/opr_impl.h"
@@ -55,6 +58,7 @@
 #include "src/naive/reduce/opr_impl.h"
 #include "src/naive/relayout/opr_impl.h"
 #include "src/naive/relayout_format/opr_impl.h"
+#include "src/naive/remap/opr_impl.h"
 #include "src/naive/repeat/opr_impl.h"
 #include "src/naive/resize/opr_impl.h"
 #include "src/naive/rng/opr_impl.h"
@@ -74,7 +78,9 @@
 #include "src/naive/type_cvt/opr_impl.h"
 #include "src/naive/warp_affine/opr_impl.h"
 #include "src/naive/warp_perspective/opr_impl.h"
-#include "src/naive/winograd_filter_preprocess/opr_impl.h"
+#include "src/naive/remap/opr_impl.h"
+#include "src/naive/fake_quant/opr_impl.h"
+#include "src/naive/tqt/opr_impl.h"
 
 static size_t g_image2d_pitch_alignment = 1;
 
@@ -94,6 +100,14 @@ DefaultConvolution3DBackwardFilterAlgorithm
         HandleImpl::m_default_conv3d_bwd_filter_algo;
 DefaultBatchConvBiasForwardAlgorithm
         HandleImpl::m_default_batch_conv_bias_fwd_algo;
+DefaultLocalShareForwardAlgorithm HandleImpl::m_default_local_share_fwd_algo;
+DefaultLocalShareBackwardDataAlgorithm
+        HandleImpl::m_default_local_share_bwd_data_algo;
+DefaultLocalShareBackwardFilterAlgorithm
+        HandleImpl::m_default_local_share_bwd_filter_algo;
+
+DefaultMatrixMulAlgorithm HandleImpl::m_default_matmul_fwd_algo;
+DefaultBatchedMatrixMulAlgorithm HandleImpl::m_default_batched_matmul_fwd_algo;
 
 HandleImpl::HandleImpl(megcoreComputingHandle_t computing_handle,
                        HandleType type)
@@ -101,11 +115,11 @@ HandleImpl::HandleImpl(megcoreComputingHandle_t computing_handle,
           m_dispatcher{megcoreGetCPUDispatcher(computing_handle)} {}
 
 size_t HandleImpl::image2d_pitch_alignment() const {
-    if (type() == Handle::HandleType::NAIVE) {
-        // only naive CPU handle supports this format
-        return g_image2d_pitch_alignment;
-    }
-    megdnn_throw("Image2DTensorFormat is not supported on this handle");
+    return g_image2d_pitch_alignment;
+}
+
+HandleImpl::HandleVendorType HandleImpl::vendor_type() const {
+    return HandleVendorType::NOT_SPEC;
 }
 
 size_t HandleImpl::exchange_image2d_pitch_alignment(size_t alignment) {

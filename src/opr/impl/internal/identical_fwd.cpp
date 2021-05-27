@@ -2,7 +2,7 @@
  * \file src/opr/impl/internal/identical_fwd.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -33,6 +33,37 @@ void mixin::init_rt_force_dynamic_mem_alloc_imply_chain_for_dyn_pass_i2o(
     valid_out->add_rt_force_dynamic_mem_alloc_imply_chain(opr.input(0));
 }
 
+/* ===================== FwdIn2OutWritableHelper  ===================== */
+void FwdIn2OutWritableHelper::mixin_mem_plan_fwd_in2out_writable(
+        OperatorNodeBase& opr) {
+    auto&& inp = opr.input();
+    auto isize = inp.size();
+    std::vector<bool> have_conflict(isize, false);
+    for (size_t i = 0; i < isize; ++i) {
+        for (size_t j = i + 1; j < isize; ++j) {
+            auto type = cg::get_mem_plan_intersection_type(inp[i], inp[j]);
+            using Type = cg::MemPlanIntersectionType;
+            bool overlap = type == Type::OVERLAP;
+            bool self_fwd = type == Type::IDENTICAL &&
+                            (!inp[i]->layout().is_contiguous() ||
+                             !inp[j]->layout().is_contiguous());
+            if (overlap || self_fwd) {
+                have_conflict[i] = true;
+                have_conflict[j] = true;
+            }
+        }
+    }
+    auto o = opr.output(0);
+    for (size_t idx = 0; idx < isize; ++ idx) {
+        auto i = inp[idx];
+        // equal shape means no broadcast
+        if (!have_conflict[idx] && o->shape().eq_shape(i->shape()) &&
+            o->dtype().enumv() == i->dtype().enumv() &&
+            i->layout().is_contiguous())
+            o->set_fwd_in2out_writable(i);
+    }
+}
+
 /* ===================== ReadonlyFwdHelper ===================== */
 
 void ReadonlyFwdHelper::mixin_rofwd_init_mem_plan(OperatorNodeBase &opr) {
@@ -49,6 +80,11 @@ void ReadonlyFwdHelper::mixin_rofwd_init_mem_plan(OperatorNodeBase &opr) {
 
 void ReadonlyFwdHelper::mixin_rofwd_execute(OperatorNodeBase &opr) {
     mgb_assert(m_rofwd_subspec.layout().ndim, "rofwd uninitialized");
+
+    if (m_rofwd_subspec.layout().is_empty()) {
+        mgb_assert(opr.output(0)->shape().is_empty(), "output layout mismatch");
+        return;
+    }
 
     auto &&out = opr.output(0)->dev_tensor(),
          &&inp = opr.input(0)->dev_tensor();
@@ -79,6 +115,22 @@ public:
 };
 
 MGB_TYPEINFO_OBJ_IMPL(ForwardInputToOutput::MutableSrc);
+
+void ForwardInputToOutput::mixin_init_rt_force_dynamic_mem_alloc_imply_chain(
+        OperatorNodeBase &opr) {
+    VarNode *valid_out = nullptr;
+    for (auto i: opr.output()) {
+        if (!i->contain_flag(VarNode::Flag::VOLATILE_CONTENT)) {
+            mgb_assert(!valid_out);
+            valid_out = i;
+        }
+    }
+    mgb_assert(valid_out);
+
+    // There may be many inputs such as in opr::VirtualDep, but we only forward first one
+    opr.input(0)->add_rt_force_dynamic_mem_alloc_imply_chain(valid_out);
+    valid_out->add_rt_force_dynamic_mem_alloc_imply_chain(opr.input(0));
+}
 
 void ForwardInputToOutput::mixin_mem_plan_fwd_in2out_readonly(
         OperatorNodeBase& opr) {
@@ -167,5 +219,15 @@ void ForwardInputToOutput::mixin_scn_do_execute(OperatorNodeBase &opr) {
 }
 
 void ForwardInputToOutput::scn_do_execute_finish(const DeviceTensorND&) {}
+
+void ForwardInputToOutput::register_stream_propagate_in2out(OperatorNodeBase &opr) {
+    auto &&ovar = opr.output(0);
+    auto&& mgr = ovar->owner_graph()->seq_comp_node_optimizer();
+    using PropType = cg::SeqCompNodeOptimizer::StreamPropType;
+    auto func = [](PropType& dst, const SmallVector<PropType>& inp) {
+        dst = inp[0];
+    };
+    mgr.register_propagate_function(ovar, func);
+}
 
 // vim: syntax=cpp.doxygen foldmethod=marker foldmarker=f{{{,f}}}

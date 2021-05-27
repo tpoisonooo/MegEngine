@@ -2,7 +2,7 @@
  * \file src/jit/impl/placeholder_opr.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -26,7 +26,6 @@ JITPlaceholder::JITPlaceholder(VarNode* src_var, size_t id, InpType inp_type)
                 {}),
           m_inp_type{inp_type},
           m_id{id} {
-    add_equivalence_component<ScalarHash<size_t>>(m_id);
     mgb_assert(src_var->dtype().category() == DTypeCategory::FLOAT ||
                        src_var->dtype().category() == DTypeCategory::INT,
                "JIT can only be applied to float/int operators, got %s",

@@ -2,7 +2,7 @@
  * \file src/core/impl/graph/cg_impl_seq.h
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -100,8 +100,9 @@ class ComputingGraphImpl::ComputingSequence final : public AsyncExecutable {
 public:
     ComputingSequence(const std::shared_ptr<ComputingGraph>& graph)
             : m_owner_graph_refkeep{graph},
-              m_owner_graph{static_cast<ComputingGraphImpl*>(graph.get())},
-              m_have_parent_graph{m_owner_graph->m_parent_graph} {}
+              m_owner_graph{ComputingGraphImpl::downcast(graph.get())},
+              m_have_parent_graph{
+                      static_cast<bool>(m_owner_graph->m_parent_graph)} {}
 
     GraphExecutable::ExecEnv& exec_env() { return m_exec_env; }
 

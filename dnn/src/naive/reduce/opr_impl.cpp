@@ -2,7 +2,7 @@
  * \file dnn/src/naive/reduce/opr_impl.cpp
  * MegEngine is Licensed under the Apache License, Version 2.0 (the "License")
  *
- * Copyright (c) 2014-2020 Megvii Inc. All rights reserved.
+ * Copyright (c) 2014-2021 Megvii Inc. All rights reserved.
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -117,64 +117,64 @@ template <>
 void reduce_fwd<Mode::SUM>(const dt_quint8* __restrict, dt_quint8* __restrict,
                            size_t, size_t, size_t) {
     megdnn_throw(
-            megdnn_mangle("Reduce (SUM) with DEFAULT DataType is not supported "
-                          "on Quantized8Asymm"));
+            "Reduce (SUM) with DEFAULT DataType is not supported "
+            "on Quantized8Asymm");
 }
 
 template <>
 void reduce_fwd<Mode::MEAN>(const dt_quint8* __restrict, dt_quint8* __restrict,
                            size_t, size_t, size_t) {
     megdnn_throw(
-            megdnn_mangle("Reduce (MEAN) with DEFAULT DataType is not supported "
-                          "on Quantized8Asymm"));
+            "Reduce (MEAN) with DEFAULT DataType is not supported "
+            "on Quantized8Asymm");
 }
 
 template <>
 void reduce_fwd<Mode::SUM_SQR>(const dt_quint8* __restrict,
                                dt_quint8* __restrict, size_t, size_t, size_t) {
-    megdnn_throw(megdnn_mangle(
+    megdnn_throw(
             "Reduce (SUM_SQR) with DEFAULT DataType is not supported "
-            "on Quantized8Asymm"));
+            "on Quantized8Asymm");
 }
 
 template <>
 void reduce_fwd<Mode::PRODUCT>(const dt_quint8* __restrict,
                                dt_quint8* __restrict, size_t, size_t, size_t) {
-    megdnn_throw(megdnn_mangle(
+    megdnn_throw(
             "Reduce (PRODUCT) with DEFAULT DataType is not supported "
-            "on Quantized8Asymm"));
+            "on Quantized8Asymm");
 }
 
 template <>
 void reduce_fwd<Mode::SUM>(const dt_qint8* __restrict, dt_qint8* __restrict,
                            size_t, size_t, size_t) {
     megdnn_throw(
-            megdnn_mangle("Reduce (SUM) with DEFAULT DataType is not supported "
-                          "on QuantizedS8"));
+            "Reduce (SUM) with DEFAULT DataType is not supported "
+            "on QuantizedS8");
 }
 
 template <>
 void reduce_fwd<Mode::MEAN>(const dt_qint8* __restrict, dt_qint8* __restrict,
                             size_t, size_t, size_t) {
     megdnn_throw(
-            megdnn_mangle("Reduce (MEAN) with DEFAULT DataType is not supported "
-                          "on QuantizedS8"));
+            "Reduce (MEAN) with DEFAULT DataType is not supported "
+            "on QuantizedS8");
 }
 
 template <>
 void reduce_fwd<Mode::SUM_SQR>(const dt_qint8* __restrict, dt_qint8* __restrict,
                                size_t, size_t, size_t) {
-    megdnn_throw(megdnn_mangle(
+    megdnn_throw(
             "Reduce (SUM_SQR) with DEFAULT DataType is not supported "
-            "on QuantizedS8"));
+            "on QuantizedS8");
 }
 
 template <>
 void reduce_fwd<Mode::PRODUCT>(const dt_qint8* __restrict, dt_qint8* __restrict,
                                size_t, size_t, size_t) {
-    megdnn_throw(megdnn_mangle(
+    megdnn_throw(
             "Reduce (PRODUCT) with DEFAULT DataType is not supported "
-            "on QuantizedS8"));
+            "on QuantizedS8");
 }
 
 template <Mode mode>
